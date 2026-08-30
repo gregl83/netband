@@ -22,3 +22,8 @@ target
 
 # Agents
 .agents
+
+
+# Added by cargo
+
+/target
