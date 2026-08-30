@@ -1,5 +1,9 @@
 pub mod cli;
 pub mod config;
+pub mod console;
+pub mod diagnostics;
+pub mod journal;
+pub mod model;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -36,6 +40,7 @@ pub fn run(cli: Cli) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    diagnostics::init(config.verbosity);
 
     match config.command {
         CommandKind::ConfigCheck => {
@@ -43,7 +48,7 @@ pub fn run(cli: Cli) -> ExitCode {
             ExitCode::SUCCESS
         }
         CommandKind::Run | CommandKind::OncePing | CommandKind::OnceBandwidth => {
-            eprintln!("measurement command is not implemented yet; configuration is valid");
+            tracing::error!("measurement command is not implemented yet; configuration is valid");
             ExitCode::from(3)
         }
     }
