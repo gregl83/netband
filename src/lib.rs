@@ -2,8 +2,10 @@ pub mod cli;
 pub mod config;
 pub mod console;
 pub mod diagnostics;
+pub mod health;
 pub mod journal;
 pub mod model;
+pub mod monitor;
 pub mod ping;
 
 use std::io::IsTerminal;
@@ -74,7 +76,44 @@ pub async fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        CommandKind::Run | CommandKind::OnceBandwidth => {
+        CommandKind::Run => {
+            if config.interfaces.len() > 1 {
+                tracing::error!(
+                    "continuous monitoring supports one selected interface until multi-interface Phase 7"
+                );
+                return ExitCode::from(3);
+            }
+            if config.bandwidth.automatic_enabled && !config.no_bandwidth {
+                tracing::error!(
+                    "automatic bandwidth scheduling is not available until Phase 6; use --no-bandwidth to run continuous pings"
+                );
+                return ExitCode::from(3);
+            }
+            let transport = std::sync::Arc::new(ping::SurgePingTransport::new(
+                config.interfaces.first().map(String::as_str),
+                &config.ping.targets,
+            ));
+            let (_shutdown_sender, shutdown) = monitor::cancellation_channel();
+            match monitor::execute_ping_monitor(&config, transport, tokio::io::stdout(), shutdown)
+                .await
+            {
+                Ok(execution) => {
+                    tracing::debug!(
+                        output = %execution.output_path.display(),
+                        rounds = execution.monitor_stats.rounds_completed,
+                        skipped_ticks = execution.monitor_stats.skipped_ticks,
+                        console_dropped = execution.console_stats.dropped_events,
+                        "continuous ping monitoring stopped"
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    tracing::error!(%error, "continuous ping monitoring failed");
+                    ExitCode::from(4)
+                }
+            }
+        }
+        CommandKind::OnceBandwidth => {
             tracing::error!("measurement command is not implemented yet; configuration is valid");
             ExitCode::from(3)
         }

@@ -83,6 +83,7 @@ pub struct ProbeAttemptResult {
 #[derive(Debug, Clone)]
 pub struct PingRoundRequest {
     pub run_id: String,
+    pub round_number: u64,
     pub targets: Vec<IpAddr>,
     pub timeout: Duration,
     pub scheduled_at_utc: DateTime<Utc>,
@@ -157,22 +158,26 @@ where
 
     let mut tasks = Vec::with_capacity(request.targets.len());
     for (index, target) in request.targets.iter().copied().enumerate() {
-        let sequence = index as u16;
+        let sequence = request
+            .round_number
+            .wrapping_mul(request.targets.len() as u64)
+            .wrapping_add(index as u64) as u16;
         let transport = Arc::clone(&transport);
-        let run_id = request.run_id.clone();
+        let context = MeasurementContext {
+            run_id: request.run_id.clone(),
+            round_number: request.round_number,
+            scheduled_at: request.scheduled_at_utc,
+        };
         let probe_request = ProbeRequest {
             target,
             identifier: request.identifier,
             sequence,
             timeout: request.timeout,
         };
-        let scheduled_at = request.scheduled_at_utc;
         tasks.push((
             target,
             sequence,
-            tokio::spawn(async move {
-                measure_target(transport, run_id, scheduled_at, probe_request).await
-            }),
+            tokio::spawn(async move { measure_target(transport, context, probe_request).await }),
         ));
     }
 
@@ -184,6 +189,7 @@ where
             Ok(measurement) => measurement,
             Err(error) => internal_failure(
                 &request.run_id,
+                request.round_number,
                 request.scheduled_at_utc,
                 target,
                 sequence,
@@ -236,6 +242,7 @@ where
     let identifier = (u64::from(std::process::id()) ^ run_number) as u16;
     let round_request = PingRoundRequest {
         run_id,
+        round_number: 0,
         targets: config.ping.targets.clone(),
         timeout: config.ping.timeout,
         scheduled_at_utc: scheduled_at,
@@ -284,10 +291,15 @@ struct TargetMeasurement {
     success: bool,
 }
 
+struct MeasurementContext {
+    run_id: String,
+    round_number: u64,
+    scheduled_at: DateTime<Utc>,
+}
+
 async fn measure_target<T: PingTransport>(
     transport: Arc<T>,
-    run_id: String,
-    scheduled_at: DateTime<Utc>,
+    context: MeasurementContext,
     request: ProbeRequest,
 ) -> TargetMeasurement {
     let started_at = Utc::now();
@@ -296,8 +308,7 @@ async fn measure_target<T: PingTransport>(
     let duration = started.elapsed();
     let finished_at = Utc::now();
     build_measurement(
-        &run_id,
-        scheduled_at,
+        &context,
         started_at,
         finished_at,
         duration,
@@ -307,14 +318,14 @@ async fn measure_target<T: PingTransport>(
 }
 
 fn build_measurement(
-    run_id: &str,
-    scheduled_at: DateTime<Utc>,
+    context: &MeasurementContext,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
     duration: Duration,
     request: ProbeRequest,
     attempt: ProbeAttemptResult,
 ) -> TargetMeasurement {
+    let run_id = &context.run_id;
     let validated = attempt
         .result
         .and_then(|reply| validate_reply(&request, reply));
@@ -336,14 +347,17 @@ fn build_measurement(
     let target = request.target.to_string();
     let mut probe = MeasurementEvent::new(
         run_id,
-        format!("{run_id}:ping-probe:{}", request.sequence),
+        format!(
+            "{run_id}:ping-round:{}:ping-probe:{}",
+            context.round_number, request.sequence
+        ),
         EventKind::PingProbe,
         outcome,
         finished_at,
     );
     apply_common(
         &mut probe,
-        scheduled_at,
+        context.scheduled_at,
         started_at,
         &attempt.binding,
         &target,
@@ -359,14 +373,17 @@ fn build_measurement(
 
     let mut summary = MeasurementEvent::new(
         run_id,
-        format!("{run_id}:ping-summary:{}", request.sequence),
+        format!(
+            "{run_id}:ping-round:{}:ping-summary:{}",
+            context.round_number, request.sequence
+        ),
         EventKind::PingSummary,
         outcome,
         finished_at,
     );
     apply_common(
         &mut summary,
-        scheduled_at,
+        context.scheduled_at,
         started_at,
         &attempt.binding,
         &target,
@@ -533,15 +550,20 @@ fn failure_fields(failure: ProbeFailure, timeout: Duration) -> FailureFields {
 
 fn internal_failure(
     run_id: &str,
+    round_number: u64,
     scheduled_at: DateTime<Utc>,
     target: IpAddr,
     sequence: u16,
     message: String,
 ) -> TargetMeasurement {
     let now = Utc::now();
-    build_measurement(
-        run_id,
+    let context = MeasurementContext {
+        run_id: run_id.to_owned(),
+        round_number,
         scheduled_at,
+    };
+    build_measurement(
+        &context,
         now,
         now,
         Duration::ZERO,

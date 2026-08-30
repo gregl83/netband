@@ -58,6 +58,20 @@ fn defaults_are_typed_and_command_specific() {
     )
     .unwrap();
     assert_eq!(once.console, ConsoleMode::Human);
+
+    let explicit_ping_only = resolve(
+        &parse(&["netband", "--accept-mlab-policy", "--no-bandwidth", "run"]),
+        &context(dir.path().to_path_buf(), true),
+    )
+    .unwrap();
+    assert!(explicit_ping_only.no_bandwidth);
+    assert!(!explicit_ping_only.bandwidth.automatic_enabled);
+    assert_eq!(explicit_ping_only.console, ConsoleMode::Human);
+    assert!(
+        explicit_ping_only
+            .summary()
+            .contains("bandwidth.disabled_by_cli=true")
+    );
 }
 
 #[test]

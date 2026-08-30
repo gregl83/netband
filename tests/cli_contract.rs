@@ -27,6 +27,7 @@ fn help_and_version_expose_the_v1_command_contract() {
     assert!(help_text.contains("once"));
     assert!(help_text.contains("config"));
     assert!(help_text.contains("--console"));
+    assert!(help_text.contains("--no-bandwidth"));
     assert!(stderr(&help).is_empty());
 
     let once_help = netband(&["once", "--help"]);
@@ -130,10 +131,13 @@ fn malformed_tokenized_urls_are_redacted_from_errors() {
 
 #[test]
 fn measurement_commands_validate_then_report_phase_unavailable() {
-    for args in [vec!["run"], vec!["once", "bandwidth"]] {
-        let output = netband(&args);
-        assert_eq!(output.status.code(), Some(3));
-        assert!(stdout(&output).is_empty());
-        assert!(stderr(&output).contains("not implemented yet"));
-    }
+    let bandwidth = netband(&["once", "bandwidth"]);
+    assert_eq!(bandwidth.status.code(), Some(3));
+    assert!(stdout(&bandwidth).is_empty());
+    assert!(stderr(&bandwidth).contains("not implemented yet"));
+
+    let scheduled = netband(&["--accept-mlab-policy", "run"]);
+    assert_eq!(scheduled.status.code(), Some(3));
+    assert!(stdout(&scheduled).is_empty());
+    assert!(stderr(&scheduled).contains("--no-bandwidth"));
 }

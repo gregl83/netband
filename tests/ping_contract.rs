@@ -96,6 +96,7 @@ fn behavior(delay_ms: u64, result: ProbeAttemptResult) -> Behavior {
 fn round(targets: Vec<IpAddr>) -> PingRoundRequest {
     PingRoundRequest {
         run_id: "run-test".into(),
+        round_number: 0,
         targets,
         timeout: Duration::from_secs(2),
         scheduled_at_utc: Utc

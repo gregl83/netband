@@ -124,6 +124,10 @@ pub struct Options {
     #[arg(long, global = true, value_name = "DURATION")]
     pub ping_timeout: Option<String>,
 
+    /// Disable automatic bandwidth tests while continuous ping monitoring runs
+    #[arg(long, global = true)]
+    pub no_bandwidth: bool,
+
     /// Write measurements to this CSV file
     #[arg(
         long,

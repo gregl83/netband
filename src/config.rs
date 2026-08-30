@@ -40,6 +40,7 @@ pub struct ResolvedConfig {
     pub interfaces: Vec<String>,
     pub output: OutputTarget,
     pub state_file: PathBuf,
+    pub no_bandwidth: bool,
     pub ping: PingConfig,
     pub bandwidth: BandwidthConfig,
 }
@@ -270,7 +271,10 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
         &context.current_dir,
     );
 
-    let bandwidth = resolve_bandwidth(cli, file.bandwidth.unwrap_or_default(), context)?;
+    let mut bandwidth = resolve_bandwidth(cli, file.bandwidth.unwrap_or_default(), context)?;
+    if cli.options.no_bandwidth {
+        bandwidth.automatic_enabled = false;
+    }
 
     Ok(ResolvedConfig {
         command,
@@ -283,6 +287,7 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
         interfaces,
         output,
         state_file,
+        no_bandwidth: cli.options.no_bandwidth,
         ping: PingConfig {
             targets,
             interval,
@@ -926,6 +931,7 @@ impl ResolvedConfig {
             humantime::format_duration(self.ping.timeout)
         );
         let _ = writeln!(summary, "bandwidth.provider={provider_name}");
+        let _ = writeln!(summary, "bandwidth.disabled_by_cli={}", self.no_bandwidth);
         let _ = writeln!(
             summary,
             "bandwidth.provider_id={}",
