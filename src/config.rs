@@ -230,6 +230,12 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
                 .map_err(|_| error(format!("invalid ping target IP: {target}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut unique_targets = HashSet::new();
+    for target in &targets {
+        if !unique_targets.insert(*target) {
+            return Err(error(format!("duplicate ping target: {target}")));
+        }
+    }
     let interval = parse_duration(
         "ping interval",
         cli.options

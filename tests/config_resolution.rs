@@ -156,6 +156,25 @@ fn duplicate_interfaces_and_output_conflicts_are_rejected() {
     .unwrap_err();
     assert!(duplicate.to_string().contains("duplicate interface"));
 
+    let duplicate_target = resolve(
+        &parse(&[
+            "netband",
+            "--ping-target",
+            "192.0.2.1",
+            "--ping-target",
+            "192.0.2.1",
+            "config",
+            "check",
+        ]),
+        &context(dir.path().to_path_buf(), false),
+    )
+    .unwrap_err();
+    assert!(
+        duplicate_target
+            .to_string()
+            .contains("duplicate ping target")
+    );
+
     let file = dir.path().join("conflict.toml");
     std::fs::write(
         &file,

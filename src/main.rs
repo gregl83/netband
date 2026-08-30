@@ -1,5 +1,6 @@
 use clap::Parser;
 
-fn main() -> std::process::ExitCode {
-    netband::run(netband::cli::Cli::parse())
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    netband::run(netband::cli::Cli::parse()).await
 }

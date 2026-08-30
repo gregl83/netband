@@ -130,7 +130,7 @@ fn malformed_tokenized_urls_are_redacted_from_errors() {
 
 #[test]
 fn measurement_commands_validate_then_report_phase_unavailable() {
-    for args in [vec!["run"], vec!["once", "ping"], vec!["once", "bandwidth"]] {
+    for args in [vec!["run"], vec!["once", "bandwidth"]] {
         let output = netband(&args);
         assert_eq!(output.status.code(), Some(3));
         assert!(stdout(&output).is_empty());

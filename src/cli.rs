@@ -86,7 +86,7 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum OnceCommand {
-    /// Run one ping round
+    /// Run one ping round; exits 0 when all targets reply and 1 otherwise
     Ping,
     /// Run one bandwidth test
     Bandwidth,
