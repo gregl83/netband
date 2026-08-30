@@ -130,12 +130,7 @@ fn malformed_tokenized_urls_are_redacted_from_errors() {
 }
 
 #[test]
-fn measurement_commands_validate_then_report_phase_unavailable() {
-    let bandwidth = netband(&["once", "bandwidth"]);
-    assert_eq!(bandwidth.status.code(), Some(3));
-    assert!(stdout(&bandwidth).is_empty());
-    assert!(stderr(&bandwidth).contains("not implemented yet"));
-
+fn automatic_bandwidth_scheduler_reports_phase_unavailable() {
     let scheduled = netband(&["--accept-mlab-policy", "run"]);
     assert_eq!(scheduled.status.code(), Some(3));
     assert!(stdout(&scheduled).is_empty());

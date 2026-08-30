@@ -1,3 +1,4 @@
+pub mod bandwidth;
 pub mod cli;
 pub mod config;
 pub mod console;
@@ -7,6 +8,7 @@ pub mod journal;
 pub mod model;
 pub mod monitor;
 pub mod ping;
+pub mod provider;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -114,8 +116,28 @@ pub async fn run(cli: Cli) -> ExitCode {
             }
         }
         CommandKind::OnceBandwidth => {
-            tracing::error!("measurement command is not implemented yet; configuration is valid");
-            ExitCode::from(3)
+            if config.interfaces.len() > 1 {
+                tracing::error!(
+                    "once bandwidth supports one selected interface until multi-interface Phase 7"
+                );
+                return ExitCode::from(3);
+            }
+            let (_shutdown_sender, shutdown) = bandwidth::cancellation_channel();
+            match bandwidth::execute_bandwidth_once(&config, tokio::io::stdout(), shutdown).await {
+                Ok(execution) => {
+                    tracing::debug!(
+                        output = %execution.output_path.display(),
+                        outcome = ?execution.report.outcome,
+                        console_dropped = execution.console_stats.dropped_events,
+                        "one-shot bandwidth measurement complete"
+                    );
+                    ExitCode::from(execution.report.exit_code())
+                }
+                Err(error) => {
+                    tracing::error!(%error, "one-shot bandwidth measurement failed");
+                    ExitCode::from(4)
+                }
+            }
         }
     }
 }

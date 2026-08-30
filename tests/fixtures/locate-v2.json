@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "machine": "ndt-a.example.test",
+      "urls": {
+        "wss:///ndt/v7/download": "wss://ndt-a.example.test/ndt/v7/download?access_token=download-secret",
+        "wss:///ndt/v7/upload": "wss://ndt-a.example.test/ndt/v7/upload?access_token=upload-secret"
+      }
+    },
+    {
+      "machine": "ndt-incomplete.example.test",
+      "urls": {
+        "wss:///ndt/v7/download": "wss://ndt-incomplete.example.test/ndt/v7/download"
+      }
+    }
+  ]
+}

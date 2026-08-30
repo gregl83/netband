@@ -15,19 +15,28 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 clap = { version = "4.6.6", features = ["derive"] }
 csv = "1.4.0"
 directories = "6.0.0"
+futures-util = { version = "0.3.32", features = ["sink"] }
+httpdate = "1.0.3"
 humantime = "2.4.0"
 if-addrs = "0.15.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 surge-ping = "0.9.0"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.26.2", default-features = false, features = ["handshake"] }
 toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 url = "2.5.8"
+webpki-roots = "1.0.6"
 
 [dev-dependencies]
+rcgen = "0.13.2"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["test-util"] }

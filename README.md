@@ -18,6 +18,9 @@ intermittent connection problems easier to identify and analyze.
 Designed for home labs, Raspberry Pis, and networks where failures disappear before a
 manual speed test can capture them.
 
+Direct NDT7 connections use verified TLS by default. `--allow-insecure-ndt` permits
+unencrypted `ws://` only for explicitly trusted private networks.
+
 ## License
 
 [Apache 2.0](LICENSE)
