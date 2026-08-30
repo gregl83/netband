@@ -1,2 +1,11 @@
 # netband
-Network bandwidth monitoring toolset.
+
+Network bandwidth monitoring utility.
+
+## Features
+
+- 
+
+## License
+
+[Apache 2.0](LICENSE)
