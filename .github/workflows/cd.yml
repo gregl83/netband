@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-${{ github.event.release.tag_name }}
+  group: release-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
 env:
@@ -20,15 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-31
         with:
           toolchain: "1.98.0"
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: release-verification
       - name: Verify release tag matches the crate version
@@ -45,10 +45,93 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-targets --all-features --locked
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - run: bash scripts/smoke-installer-linux.sh
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:
           command: check
       - run: cargo package --locked
+
+  build-release-binaries:
+    name: Build ${{ matrix.target }} release binary
+    needs: verify-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Rust target
+        shell: bash
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add --toolchain 1.98.0 "${{ matrix.target }}"
+      - name: Install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo +1.98.0 build --release --locked --target "${{ matrix.target }}"
+      - name: Package release asset
+        shell: bash
+        run: |
+          target="${{ matrix.target }}"
+          asset="netband-${target}.tar.gz"
+          mkdir -p stage dist
+          install -m 0755 "target/${target}/release/netband" stage/netband
+          tar -C stage -czf "dist/${asset}" netband
+          (cd dist && sha256sum "${asset}" >"${asset}.sha256")
+          if [[ "${target}" == "x86_64-unknown-linux-gnu" ]]; then
+            install -m 0644 install.sh dist/netband-installer.sh
+            install -m 0644 packaging/netband.toml dist/netband.toml
+            install -m 0644 packaging/netband.service dist/netband.service
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish-release-assets:
+    name: Publish GitHub release assets
+    needs: build-release-binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          for asset in \
+            netband-x86_64-unknown-linux-gnu.tar.gz \
+            netband-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            netband-aarch64-unknown-linux-gnu.tar.gz \
+            netband-aarch64-unknown-linux-gnu.tar.gz.sha256 \
+            netband-installer.sh netband.toml netband.service; do
+            test -f "dist/$asset"
+          done
+          gh release upload "$RELEASE_TAG" dist/*
 
   publish-crate:
     name: Publish crate
@@ -59,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install Rust
         shell: bash

@@ -6,7 +6,33 @@ to journald. Measurements remain exclusively in the configured CSV file.
 
 ## Install
 
-On Linux x86_64 or aarch64 with Rust 1.98 or newer:
+Install a checksum-verified Linux x86_64 or aarch64 binary from the latest GitHub
+release, then fetch the example service files from GitHub:
+
+```sh
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
+  https://github.com/gregl83/netband/releases/latest/download/netband-installer.sh | \
+  sudo env NETBAND_INSTALL_DIR=/usr/local/bin sh
+netband config check
+
+work="$(mktemp -d)"
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
+  https://github.com/gregl83/netband/releases/latest/download/netband.toml \
+  -o "$work/netband.toml"
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
+  https://github.com/gregl83/netband/releases/latest/download/netband.service \
+  -o "$work/netband.service"
+sudo install -Dm0644 "$work/netband.toml" /etc/netband/netband.toml
+sudo install -Dm0644 "$work/netband.service" /etc/systemd/system/netband.service
+rm -rf "$work"
+sudo systemd-analyze verify /etc/systemd/system/netband.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now netband.service
+```
+
+## Build from source
+
+Building requires Git and Rust 1.98 or newer:
 
 ```sh
 git clone https://github.com/gregl83/netband.git
@@ -153,8 +179,8 @@ allowance conservatively before restarting.
 
 ## Raspberry Pi
 
-Use a 64-bit Raspberry Pi Linux image (`aarch64-unknown-linux-gnu`), install the normal
-Rust/build prerequisites, and follow the same source build and systemd steps. Before a
-release is tagged, run [the release smoke](release.md) on real Pi hardware; CI's QEMU
-aarch64 execution validates architecture/startup compatibility but not the board's
-kernel, interfaces, capabilities, thermals, or sustained NDT7 behavior.
+Use a 64-bit Raspberry Pi Linux image (`aarch64-unknown-linux-gnu`) and the pre-built
+binary above, or follow [Build from source](#build-from-source). Before a release is
+tagged, run [the release smoke](release.md) on real Pi hardware; CI's QEMU aarch64
+execution validates architecture/startup compatibility but not the board's kernel,
+interfaces, capabilities, thermals, or sustained NDT7 behavior.

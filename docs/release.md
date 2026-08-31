@@ -12,6 +12,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo deny check
+bash scripts/smoke-installer-linux.sh
 bash scripts/smoke-readme-linux.sh
 bash scripts/smoke-release-linux.sh
 ```
@@ -24,13 +25,33 @@ the GNU linker before executing help/version/config under QEMU. A separate CI jo
 the test suite with `cargo-llvm-cov`, uploads LCOV to Codecov using `CODECOV_TOKEN`, and
 retains the raw report as a workflow artifact.
 
-## crates.io publication
+## Release publication
 
 Publishing a GitHub release is the only trigger for `.github/workflows/cd.yml`. Its tag
 must be exactly `v<crate-version>`; for example, crate version `1.0.0` requires tag
 `v1.0.0`. The workflow checks formatting, Clippy, tests, dependency policy, and package
 construction before the publishing job starts. Only the final step receives the
 `CARGO_REGISTRY_TOKEN` secret and runs `cargo publish` against crates.io.
+
+The workflow also builds GNU/Linux x86_64 and aarch64 archives and publishes a SHA-256
+file beside each archive. The static `netband-installer.sh` downloads both files from
+the same GitHub release, verifies the archive before extraction, rejects unexpected
+archive entries, and installs through a temporary file in the destination directory.
+Release jobs check out the event's commit SHA, and third-party actions in the publishing
+workflow are pinned to complete commit SHAs.
+
+Every release asset receives a GitHub artifact attestation from the pinned CD workflow.
+After downloading an asset, verify both its checksum and build provenance:
+
+```sh
+sha256sum --check netband-x86_64-unknown-linux-gnu.tar.gz.sha256
+gh attestation verify netband-x86_64-unknown-linux-gnu.tar.gz \
+  --repo gregl83/netband \
+  --signer-workflow gregl83/netband/.github/workflows/cd.yml
+```
+
+The workflow does not overwrite existing assets. A failed or partially published
+release must be replaced with a new release version rather than repaired in place.
 
 The `published` event includes GitHub prereleases. Publish a prerelease only when the
 matching Cargo version also contains the intended SemVer prerelease suffix.

@@ -2,7 +2,7 @@
 [![Crates.io](https://img.shields.io/crates/v/netband.svg)](https://crates.io/crates/netband)
 [![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-<p align="center"><img src="/assets/netband.svg" alt="netband" width="400" /></p>
+<p align="center"><img src="/assets/netband.svg" alt="netband" width="250" /></p>
 
 # netband
 
@@ -13,28 +13,31 @@ before a manual speed test can capture them.
 
 ## Five-minute quick start
 
-Prerequisites are Linux x86_64 or aarch64, Rust 1.98 or newer, and permission to create
-ICMP sockets. Git is needed for a source checkout. No bandwidth traffic is sent until
-M-Lab consent is accepted or a direct NDT7 provider is configured.
+Prerequisites are Linux x86_64 or aarch64, `curl`, `tar`, `sha256sum`, and permission
+to create ICMP sockets. The installer and its checksum-verified pre-built binaries are
+hosted entirely on GitHub. No bandwidth traffic is sent until M-Lab consent is accepted
+or a direct NDT7 provider is configured.
 
 ```sh
-git clone https://github.com/gregl83/netband.git
-cd netband
-cargo build --release --locked
-./target/release/netband config check
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
+  https://github.com/gregl83/netband/releases/latest/download/netband-installer.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+netband config check
 ```
+
+Prefer to compile it yourself? See [Build from source](docs/service.md#build-from-source).
 
 Run one ping round and inspect the authoritative CSV:
 
 ```sh
-./target/release/netband --output netband.csv once ping
+netband --output netband.csv once ping
 head -n 3 netband.csv
 ```
 
 Start foreground ping monitoring without bandwidth tests:
 
 ```sh
-./target/release/netband --output netband.csv --no-bandwidth run
+netband --output netband.csv --no-bandwidth run
 ```
 
 Stop it with `Ctrl-C`. Netband flushes completed measurements before exiting. To test
@@ -43,7 +46,7 @@ bandwidth through M-Lab, first review [Netband privacy](PRIVACY.md), the
 [M-Lab privacy policy](https://www.measurementlab.net/privacy/). Consent is explicit:
 
 ```sh
-./target/release/netband --output netband.csv --accept-mlab-policy once bandwidth
+netband --output netband.csv --accept-mlab-policy once bandwidth
 ```
 
 The command consumes one of M-Lab's maximum four automated runs per UTC day. Netband
