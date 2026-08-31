@@ -31,7 +31,7 @@ fn load_config(path: &Path) -> ResolvedConfig {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root(),
-            state_dir: root().join(".netband-state"),
+            state_dir: root().join(".netband/state"),
         },
     )
     .unwrap()

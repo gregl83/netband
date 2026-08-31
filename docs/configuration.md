@@ -33,7 +33,7 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
 | `--output FILE` | `output` | No fixed file; create a timestamped CSV in the current directory |
 | `--output-dir DIR` | `output_dir` | Current directory when neither output option is set |
-| `--state-file FILE` | `state_file` | Platform user state directory, file `scheduler.json` |
+| `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
 | `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
 | `--ndt-provider mlab\|direct` | `bandwidth.provider` | `mlab` |
 | `--mlab-locate-url URL` | `bandwidth.mlab.locate_url` | M-Lab Locate v2 NDT7 URL; override is intended for testing |
@@ -61,6 +61,21 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 
 `run`, `once ping`, `once bandwidth`, and `config check` are subcommands, not TOML
 values. CLI help is authoritative for spelling: `netband --help`.
+
+## Scheduler state
+
+The default scheduler file is independent of the current working directory:
+
+| Platform | Default |
+| --- | --- |
+| Linux | `$XDG_STATE_HOME/netband/scheduler.json`, or `~/.local/state/netband/scheduler.json` |
+| Windows | `%LOCALAPPDATA%\netband\state\scheduler.json` |
+| macOS | `~/Library/Application Support/netband/state/scheduler.json` |
+
+If no platform home directory is available, Netband falls back to
+`.netband/state/scheduler.json` under the current directory. `--state-file` and the
+TOML `state_file` key always override these defaults. System services should continue
+to use an explicitly managed state path such as `/var/lib/netband/scheduler.json`.
 
 ## M-Lab provider
 

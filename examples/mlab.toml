@@ -1,5 +1,4 @@
 output = "netband.csv"
-state_file = ".netband-state/scheduler.json"
 
 [bandwidth]
 provider = "mlab"

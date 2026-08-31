@@ -100,6 +100,10 @@ CLI values override TOML values; repeated CLI targets and interfaces replace the
 TOML lists. The complete option/default table and direct-provider examples are in
 [Configuration and providers](docs/configuration.md).
 
+Scheduler state uses the operating system's per-user state directory and remains
+independent of the directory where Netband is launched. Use `--state-file` only when
+an explicit portable or service-managed location is required.
+
 Netband supports M-Lab discovery and operator-supplied NDT7 servers. Direct endpoints
 use verified TLS by default. Plain `ws://` requires `--allow-insecure-ndt` and is only
 appropriate on an explicitly trusted private network. Netband does not provide or

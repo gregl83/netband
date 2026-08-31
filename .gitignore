@@ -24,7 +24,7 @@ target
 .agents
 
 # Netband runtime data
-.netband-state/
+.netband/
 /netband-*.csv
 /release-live.csv
 

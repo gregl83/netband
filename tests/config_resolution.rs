@@ -34,6 +34,7 @@ fn defaults_are_typed_and_command_specific() {
     assert_eq!(run.ping.interval, Duration::from_secs(5));
     assert_eq!(run.ping.timeout, Duration::from_secs(2));
     assert_eq!(run.shutdown_grace, Duration::from_secs(30));
+    assert_eq!(run.state_file, dir.path().join("state/scheduler.json"));
     assert_eq!(
         run.ping.targets,
         [
@@ -72,6 +73,27 @@ fn defaults_are_typed_and_command_specific() {
         explicit_ping_only
             .summary()
             .contains("bandwidth.disabled_by_cli=true")
+    );
+}
+
+#[test]
+fn explicit_state_file_overrides_the_platform_default() {
+    let dir = tempdir().unwrap();
+    let config = resolve(
+        &parse(&[
+            "netband",
+            "--state-file",
+            "portable/state/scheduler.json",
+            "config",
+            "check",
+        ]),
+        &context(dir.path().to_path_buf(), false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.state_file,
+        dir.path().join("portable/state/scheduler.json")
     );
 }
 

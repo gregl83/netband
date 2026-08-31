@@ -1,6 +1,6 @@
 [package]
 name = "netband"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Continuous network latency and bandwidth measurement daemon"
@@ -12,7 +12,7 @@ readme = "README.md"
 publish = ["crates-io"]
 keywords = ["network", "latency", "bandwidth", "monitoring", "ndt7"]
 categories = ["command-line-utilities", "network-programming"]
-exclude = [".agents/**", ".idea/**", ".netband-state/**", "netband-*.csv", "release-live.csv"]
+exclude = [".agents/**", ".idea/**", ".netband/**", "netband-*.csv", "release-live.csv"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }

@@ -38,7 +38,10 @@ fn help_and_version_expose_the_v1_command_contract() {
 
     let version = netband(&["--version"]);
     assert!(version.status.success());
-    assert_eq!(stdout(&version).trim(), "netband 0.1.0");
+    assert_eq!(
+        stdout(&version).trim(),
+        format!("netband {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

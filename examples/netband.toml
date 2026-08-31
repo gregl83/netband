@@ -3,7 +3,6 @@ console = "auto"
 verbosity = "info"
 interfaces = []
 output = "netband.csv"
-state_file = ".netband-state/scheduler.json"
 shutdown_grace = "30s"
 
 [ping]

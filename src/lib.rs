@@ -16,7 +16,7 @@ pub mod shutdown;
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 
 use crate::cli::{Cli, CommandKind};
 use crate::config::{ResolveContext, resolve, validate_environment};
@@ -40,9 +40,7 @@ pub async fn run(cli: Cli) -> ExitCode {
             return ExitCode::from(EXIT_CONFIGURATION);
         }
     };
-    let state_dir = ProjectDirs::from("dev", "netband", "netband")
-        .and_then(|dirs| dirs.state_dir().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| current_dir.join(".netband-state"));
+    let state_dir = default_state_dir(&current_dir);
     let context = ResolveContext {
         stdout_is_terminal: std::io::stdout().is_terminal(),
         current_dir,
@@ -73,6 +71,17 @@ pub async fn run(cli: Cli) -> ExitCode {
         CommandKind::Run => run_monitor(&config).await,
         CommandKind::OnceBandwidth => run_once_bandwidth(&config).await,
     }
+}
+
+fn default_state_dir(current_dir: &std::path::Path) -> std::path::PathBuf {
+    if let Some(state_dir) = ProjectDirs::from("dev", "netband", "netband")
+        .and_then(|dirs| dirs.state_dir().map(std::path::Path::to_path_buf))
+    {
+        return state_dir;
+    }
+    BaseDirs::new()
+        .map(|dirs| dirs.data_local_dir().join("netband").join("state"))
+        .unwrap_or_else(|| current_dir.join(".netband").join("state"))
 }
 
 async fn run_once_ping(config: &config::ResolvedConfig) -> ExitCode {
@@ -271,5 +280,28 @@ fn bandwidth_error_code(error: &bandwidth::BandwidthCommandError) -> u8 {
     match error {
         bandwidth::BandwidthCommandError::Journal(error) => journal_error_code(error),
         bandwidth::BandwidthCommandError::Scheduler(error) => scheduler_error_code(error),
+    }
+}
+
+#[cfg(test)]
+mod state_directory_tests {
+    use super::*;
+
+    #[test]
+    fn platform_state_directory_is_not_relative_to_the_working_directory() {
+        let work = tempfile::tempdir().unwrap();
+        let actual = default_state_dir(work.path());
+        assert!(actual.is_absolute());
+        assert!(!actual.starts_with(work.path()));
+
+        #[cfg(windows)]
+        assert_eq!(
+            actual,
+            BaseDirs::new()
+                .unwrap()
+                .data_local_dir()
+                .join("netband")
+                .join("state")
+        );
     }
 }

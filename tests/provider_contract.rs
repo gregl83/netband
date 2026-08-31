@@ -156,11 +156,10 @@ async fn locate_follows_redirect_identifies_client_and_parses_multiple_results()
     assert_eq!(resolution.candidates.len(), 1);
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(
-        requests[0]
-            .to_ascii_lowercase()
-            .contains("user-agent: netband/0.1.0")
-    );
+    assert!(requests[0].to_ascii_lowercase().contains(&format!(
+        "user-agent: netband/{}",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(requests[1].starts_with("GET /final HTTP/1.1"));
 }
 
