@@ -80,7 +80,9 @@ not silently fall back between M-Lab and direct providers.
 Direct mode bypasses M-Lab Locate. The operator is responsible for endpoint
 authorization, capacity, privacy notices, retention, and rate policy. M-Lab's four-run
 limit applies only to the M-Lab profile. Direct mode may set a different cap and spacing,
-while retaining persisted admission, trigger latching, and adaptive rate-limit backoff:
+while retaining persisted admission, trigger latching, and adaptive rate-limit backoff.
+For a complete operator deployment, see
+[Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md).
 
 ```sh
 netband --ndt-provider direct \

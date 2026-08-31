@@ -11,6 +11,8 @@ NDT7 bandwidth measurements in a durable CSV journal. It is built for unattended
 lab and Raspberry Pi monitoring, especially when intermittent failures disappear
 before a manual speed test can capture them.
 
+**One speed test is a snapshot; Netband builds the timestamped evidence to show when your ISP falls short.**
+
 ## Five-minute quick start
 
 Prerequisites are Linux x86_64 or aarch64, `curl`, `tar`, `sha256sum`, and permission
@@ -114,6 +116,7 @@ in [Service operation](docs/service.md).
 ## Reference
 
 - [Configuration and providers](docs/configuration.md)
+- [Self-hosted NDT7 on Akamai Cloud](docs/akamai-ndt-server.md)
 - [CSV schema and outcomes](docs/data-format.md)
 - [Scheduling, triggers, cooldowns, and fairness](docs/scheduling.md)
 - [Privacy and provider data](PRIVACY.md)
