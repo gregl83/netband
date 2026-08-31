@@ -130,9 +130,14 @@ where
     } else {
         monitor_ping(transport, settings, &mut coordinator, shutdown).await
     };
+    let flush_result = coordinator.flush();
+    if flush_result.is_ok() {
+        tracing::info!(path = %output_path.display(), "measurement journal flushed");
+    }
     let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
+    flush_result?;
     let monitor_stats = result?;
     Ok(PingMonitorExecution {
         output_path,
@@ -208,9 +213,14 @@ where
         shutdown,
     )
     .await;
+    let flush_result = coordinator.flush();
+    if flush_result.is_ok() {
+        tracing::info!(path = %output_path.display(), "measurement journal flushed");
+    }
     let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
+    flush_result?;
     let monitor_stats = result?;
     Ok(PingMonitorExecution {
         output_path,
@@ -482,6 +492,9 @@ where
             }
         }
     }
+    if let Some(scheduler) = scheduler.as_ref() {
+        scheduler.flush()?;
+    }
     Ok(stats)
 }
 
@@ -655,6 +668,7 @@ where
             }
         }
     }
+    scheduler.flush()?;
     Ok(stats)
 }
 

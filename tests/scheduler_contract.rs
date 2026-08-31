@@ -186,6 +186,11 @@ fn mlab_cap_is_global_and_survives_restart() {
         scheduler.reserve_run(at(30, 5, 0, 0)),
         Err(SchedulerError::Admission(_))
     ));
+    assert!(matches!(
+        Scheduler::open_seeded(&path, &mlab(), at(30, 6, 0, 0), 6),
+        Err(SchedulerError::Locked(_))
+    ));
+    drop(scheduler);
     let mut restarted = Scheduler::open_seeded(&path, &mlab(), at(30, 6, 0, 0), 6).unwrap();
     assert_eq!(restarted.snapshot().runs.len(), 4);
     assert!(matches!(
@@ -252,6 +257,7 @@ fn utc_rollover_keeps_cross_midnight_spacing_and_clock_rollback_fails_closed() {
     let path = state_path(&root);
     let mut scheduler = Scheduler::open_seeded(&path, &mlab(), at(30, 23, 50, 0), 3).unwrap();
     scheduler.reserve_run(at(30, 23, 50, 0)).unwrap();
+    drop(scheduler);
 
     let next_day = at(31, 0, 5, 0);
     let mut restarted = Scheduler::open_seeded(&path, &mlab(), next_day, 4).unwrap();
@@ -430,6 +436,7 @@ fn locate_rate_limits_persist_cooldown_defer_once_and_use_bounded_backoff() {
             .contains("status=429")
     );
 
+    drop(scheduler);
     let mut restarted = Scheduler::open_seeded(&path, &mlab(), now, 999).unwrap();
     assert_eq!(restarted.snapshot().cooldown_until_utc, Some(deadline));
     assert!(
@@ -487,24 +494,25 @@ fn provider_state_is_independent_and_policy_changes_preserve_used_runs() {
     let now = at(30, 1, 0, 0);
     let mut mlab_scheduler = Scheduler::open_seeded(&path, &mlab(), now, 41).unwrap();
     mlab_scheduler.reserve_run(now).unwrap();
+    drop(mlab_scheduler);
 
     let direct_config = direct("direct:canonical", 8, Duration::from_secs(90 * 60));
     let mut direct_scheduler = Scheduler::open_seeded(&path, &direct_config, now, 43).unwrap();
     assert!(direct_scheduler.snapshot().runs.is_empty());
     direct_scheduler.reserve_run(now).unwrap();
+    drop(direct_scheduler);
 
-    assert_eq!(
-        Scheduler::open_seeded(&path, &mlab(), now, 99)
-            .unwrap()
-            .snapshot()
-            .runs
-            .len(),
-        1
-    );
+    let mlab_runs = Scheduler::open_seeded(&path, &mlab(), now, 99)
+        .unwrap()
+        .snapshot()
+        .runs
+        .len();
+    assert_eq!(mlab_runs, 1);
     let lowered = direct("direct:canonical", 1, Duration::from_secs(2 * 60 * 60));
     let lowered = Scheduler::open_seeded(&path, &lowered, now, 100).unwrap();
     assert_eq!(lowered.snapshot().runs.len(), 1);
     assert!(lowered.snapshot().slots.is_empty());
+    drop(lowered);
 
     let disabled = direct("direct:canonical", 0, Duration::from_secs(2 * 60 * 60));
     let mut disabled = Scheduler::open_seeded(&path, &disabled, now, 101).unwrap();
@@ -536,6 +544,12 @@ fn reservation_ledger_recovers_a_run_from_an_interrupted_state_replace() {
     scheduler.reserve_run(now).unwrap();
 
     std::fs::remove_file(&path).unwrap();
+    drop(scheduler);
+    assert!(matches!(
+        Scheduler::open_seeded(&path, &mlab(), now, 62),
+        Err(SchedulerError::Corrupt { .. })
+    ));
+    std::fs::copy(path.with_extension("bak"), &path).unwrap();
     let recovered = Scheduler::open_seeded(&path, &mlab(), now, 62)
         .unwrap()
         .snapshot();

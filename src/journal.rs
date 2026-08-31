@@ -63,16 +63,23 @@ pub enum JournalError {
     Csv(#[from] csv::Error),
     #[error("existing output has an incompatible v1 CSV header: {0}")]
     Header(PathBuf),
+    #[error("output file is already locked by another Netband process: {0}")]
+    Locked(PathBuf),
 }
 
 impl JournalError {
     pub fn write(error: io::Error) -> Self {
         Self::Io(error)
     }
+
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self, Self::Io(source) if source.kind() == io::ErrorKind::PermissionDenied)
+    }
 }
 
 pub struct Journal<W: Write> {
     writer: csv::Writer<W>,
+    sync: Option<fn(&W) -> io::Result<()>>,
 }
 
 impl<W: Write> fmt::Debug for Journal<W> {
@@ -95,6 +102,7 @@ impl<W: Write> Journal<W> {
                 .has_headers(false)
                 .terminator(csv::Terminator::CRLF)
                 .from_writer(writer),
+            sync: None,
         }
     }
 
@@ -102,7 +110,15 @@ impl<W: Write> Journal<W> {
         for event in events {
             self.writer.serialize(event.sanitized())?;
         }
+        self.flush()?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), JournalError> {
         self.writer.flush()?;
+        if let Some(sync) = self.sync {
+            sync(self.writer.get_ref())?;
+        }
         Ok(())
     }
 
@@ -130,17 +146,20 @@ impl Journal<File> {
             .read(true)
             .append(true)
             .open(path)?;
+        lock_file(&file, path)?;
         let empty = file.metadata()?.len() == 0;
         if !empty {
             validate_header(&mut file, path)?;
             ensure_record_boundary(&mut file)?;
         }
         file.seek(SeekFrom::End(0))?;
-        let journal = if empty {
+        let mut journal = if empty {
             Self::from_writer(file)?
         } else {
             Self::without_header(file)
         };
+        journal.sync = Some(File::sync_data);
+        journal.flush()?;
         Ok((journal, path.to_path_buf()))
     }
 
@@ -154,7 +173,18 @@ impl Journal<File> {
             .write(true)
             .create_new(true)
             .open(&path)?;
-        Ok((Self::from_writer(file)?, path))
+        let mut journal = Self::from_writer(file)?;
+        journal.sync = Some(File::sync_data);
+        journal.flush()?;
+        Ok((journal, path))
+    }
+}
+
+fn lock_file(file: &File, path: &Path) -> Result<(), JournalError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(JournalError::Locked(path.to_path_buf())),
+        Err(std::fs::TryLockError::Error(source)) => Err(JournalError::Io(source)),
     }
 }
 
@@ -184,11 +214,19 @@ fn ensure_record_boundary(file: &mut File) -> Result<(), JournalError> {
 
 pub trait JournalSink {
     fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError>;
+
+    fn flush(&mut self) -> Result<(), JournalError> {
+        Ok(())
+    }
 }
 
 impl<W: Write> JournalSink for Journal<W> {
     fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
         Journal::append_batch(self, events)
+    }
+
+    fn flush(&mut self) -> Result<(), JournalError> {
+        Journal::flush(self)
     }
 }
 
@@ -208,10 +246,15 @@ where
 
     pub fn publish_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
         self.journal.append_batch(events)?;
+        crate::diagnostics::record_events(events);
         for event in events {
             self.console.offer(event);
         }
         Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), JournalError> {
+        self.journal.flush()
     }
 
     pub fn into_parts(self) -> (J, C) {

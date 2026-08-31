@@ -30,6 +30,14 @@ pub enum SchedulerError {
     UnsupportedSchema(u8),
     #[error("bandwidth admission rejected: {0}")]
     Admission(String),
+    #[error("scheduler state is already locked by another Netband process: {0}")]
+    Locked(PathBuf),
+}
+
+impl SchedulerError {
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self, Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +173,7 @@ pub struct Reservation {
 #[derive(Debug)]
 pub struct Scheduler {
     path: PathBuf,
+    _lock: File,
     store: SchedulerStore,
     policy: SchedulerPolicy,
     event_number: u64,
@@ -186,12 +195,14 @@ impl Scheduler {
         seed: u64,
     ) -> Result<Self, SchedulerError> {
         let path = path.into();
+        let lock = acquire_state_lock(&path)?;
         let store = load_store(&path)?;
         if store.schema_version != STATE_SCHEMA_VERSION {
             return Err(SchedulerError::UnsupportedSchema(store.schema_version));
         }
         let mut scheduler = Self {
             path,
+            _lock: lock,
             store,
             policy: SchedulerPolicy::from(config),
             event_number: 0,
@@ -921,6 +932,12 @@ impl Scheduler {
     fn persist(&self) -> Result<(), SchedulerError> {
         persist_store(&self.path, &self.store)
     }
+
+    pub fn flush(&self) -> Result<(), SchedulerError> {
+        self.persist()?;
+        tracing::info!(path = %self.path.display(), "scheduler state flushed");
+        Ok(())
+    }
 }
 
 impl ReservationGate for Scheduler {
@@ -1150,18 +1167,13 @@ fn stage_text(stage: RequestStage) -> &'static str {
 
 fn load_store(path: &Path) -> Result<SchedulerStore, SchedulerError> {
     if !path.exists() {
-        let backup = backup_path(path);
-        if backup.exists() {
-            let bytes = fs::read(&backup).map_err(|source| SchedulerError::Io {
-                path: backup.clone(),
-                source,
-            })?;
-            return parse_store(path, &bytes);
-        }
         if marker_path(path).exists() {
             return Err(SchedulerError::Corrupt {
                 path: path.to_path_buf(),
-                message: "initialized state is missing".to_owned(),
+                message: format!(
+                    "initialized state is missing; stop Netband and recover explicitly from {}",
+                    backup_path(path).display()
+                ),
             });
         }
         return Ok(SchedulerStore::default());
@@ -1208,21 +1220,9 @@ fn persist_store(path: &Path, store: &SchedulerStore) -> Result<(), SchedulerErr
         })?;
     drop(file);
 
-    let backup = backup_path(path);
-    if path.exists() {
-        let _ = fs::remove_file(&backup);
-        fs::rename(path, &backup).map_err(|source| SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
-    if let Err(source) = fs::rename(&temporary, path) {
-        let _ = fs::rename(&backup, path);
-        return Err(SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
+    preserve_backup(path)?;
+    replace_state_file(&temporary, path)?;
+    sync_parent(parent)?;
     let marker = marker_path(path);
     if !marker.exists() {
         File::create(&marker)
@@ -1231,7 +1231,120 @@ fn persist_store(path: &Path, store: &SchedulerStore) -> Result<(), SchedulerErr
                 path: marker,
                 source,
             })?;
+        sync_parent(parent)?;
     }
+    Ok(())
+}
+
+fn acquire_state_lock(path: &Path) -> Result<File, SchedulerError> {
+    let parent = path.parent().ok_or_else(|| SchedulerError::Corrupt {
+        path: path.to_path_buf(),
+        message: "state file has no parent".to_owned(),
+    })?;
+    fs::create_dir_all(parent).map_err(|source| SchedulerError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let lock_path = lock_path(path);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| SchedulerError::Io {
+            path: lock_path.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(SchedulerError::Locked(lock_path)),
+        Err(std::fs::TryLockError::Error(source)) => Err(SchedulerError::Io {
+            path: lock_path,
+            source,
+        }),
+    }
+}
+
+fn preserve_backup(path: &Path) -> Result<(), SchedulerError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let backup = backup_path(path);
+    let temporary = backup.with_extension(format!("bak.tmp.{}", std::process::id()));
+    let contents = fs::read(path).map_err(|source| SchedulerError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|source| SchedulerError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+    file.write_all(&contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|source| SchedulerError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+    drop(file);
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|source| SchedulerError::Io {
+            path: backup.clone(),
+            source,
+        })?;
+    }
+    fs::rename(&temporary, &backup).map_err(|source| SchedulerError::Io {
+        path: backup,
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
+    fs::rename(temporary, path).map_err(|source| SchedulerError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|source| SchedulerError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    if let Err(source) = fs::rename(temporary, path) {
+        let backup = backup_path(path);
+        if backup.exists() {
+            let _ = fs::copy(&backup, path);
+        }
+        return Err(SchedulerError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(parent: &Path) -> Result<(), SchedulerError> {
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| SchedulerError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path) -> Result<(), SchedulerError> {
     Ok(())
 }
 
@@ -1294,4 +1407,8 @@ fn marker_path(path: &Path) -> PathBuf {
 
 fn reservation_path(path: &Path) -> PathBuf {
     path.with_extension("reservations.jsonl")
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("lock")
 }

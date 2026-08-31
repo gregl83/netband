@@ -1,0 +1,15 @@
+console = "off"
+verbosity = "info"
+output = "/var/lib/netband/netband.csv"
+state_file = "/var/lib/netband/scheduler.json"
+shutdown_grace = "30s"
+
+[ping]
+targets = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+interval = "5s"
+timeout = "2s"
+
+[bandwidth]
+provider = "mlab"
+daily_max = 4
+accept_mlab_policy = false

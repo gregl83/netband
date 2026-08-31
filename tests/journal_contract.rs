@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{TimeZone, Utc};
 use netband::config::OutputTarget;
 use netband::console::ConsoleSink;
-use netband::journal::{CSV_HEADER, Journal, JournalSink, OutputCoordinator};
+use netband::journal::{CSV_HEADER, Journal, JournalError, JournalSink, OutputCoordinator};
 use netband::model::{
     ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
 };
@@ -160,6 +160,33 @@ fn explicit_files_append_with_one_header_and_reject_mismatch() {
     drop(journal);
     let contents = fs::read_to_string(bare_header).unwrap();
     assert!(contents.starts_with(&format!("{CSV_HEADER}\r\n1,")));
+}
+
+#[test]
+fn explicit_output_lock_rejects_competing_writer_and_releases_on_drop() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("locked.csv");
+    let output = OutputTarget::File(path.clone());
+
+    let (first, _) = Journal::open_at(&output, timestamp(0)).unwrap();
+    assert!(matches!(
+        Journal::open_at(&output, timestamp(1)),
+        Err(JournalError::Locked(locked)) if locked == path
+    ));
+    drop(first);
+
+    let (mut restarted, _) = Journal::open_at(&output, timestamp(2)).unwrap();
+    restarted
+        .append_batch(&[fixture_events()[0].clone()])
+        .unwrap();
+    drop(restarted);
+    assert_eq!(
+        fs::read_to_string(path)
+            .unwrap()
+            .matches(CSV_HEADER)
+            .count(),
+        1
+    );
 }
 
 #[test]

@@ -211,13 +211,19 @@ where
             reservation_error: None,
         },
     };
+    scheduler.flush()?;
     let reservation_error = report.reservation_error.take();
     let mut coordinator = OutputCoordinator::new(journal, console);
     let publish_result = coordinator.publish_batch(&report.events);
+    let flush_result = coordinator.flush();
+    if flush_result.is_ok() {
+        tracing::info!(path = %output_path.display(), "measurement journal flushed");
+    }
     let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
     publish_result?;
+    flush_result?;
     if let Some(message) = reservation_error {
         return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
             message,

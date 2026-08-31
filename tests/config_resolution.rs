@@ -33,6 +33,7 @@ fn defaults_are_typed_and_command_specific() {
     assert_eq!(run.console, ConsoleMode::Human);
     assert_eq!(run.ping.interval, Duration::from_secs(5));
     assert_eq!(run.ping.timeout, Duration::from_secs(2));
+    assert_eq!(run.shutdown_grace, Duration::from_secs(30));
     assert_eq!(
         run.ping.targets,
         [
@@ -108,6 +109,8 @@ daily_max = 2
             "198.51.100.1",
             "--ping-interval",
             "7s",
+            "--shutdown-grace",
+            "12s",
             "config",
             "check",
         ]),
@@ -123,6 +126,7 @@ daily_max = 2
     );
     assert_eq!(config.ping.interval, Duration::from_secs(7));
     assert_eq!(config.ping.timeout, Duration::from_secs(4));
+    assert_eq!(config.shutdown_grace, Duration::from_secs(12));
     assert_eq!(config.bandwidth.daily_max, 2);
 }
 

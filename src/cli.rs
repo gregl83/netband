@@ -145,6 +145,10 @@ pub struct Options {
     #[arg(long, global = true, value_name = "FILE")]
     pub state_file: Option<PathBuf>,
 
+    /// Time allowed for graceful shutdown after the first signal
+    #[arg(long, global = true, value_name = "DURATION")]
+    pub shutdown_grace: Option<String>,
+
     /// Set operational log verbosity
     #[arg(long, global = true, value_enum)]
     pub verbosity: Option<Verbosity>,

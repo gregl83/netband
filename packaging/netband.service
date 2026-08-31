@@ -1,0 +1,40 @@
+[Unit]
+Description=Netband network quality monitor
+Documentation=https://github.com/gregl83/netband
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=netband
+StateDirectoryMode=0700
+ConfigurationDirectory=netband
+ExecStart=/usr/local/bin/netband --config /etc/netband/netband.toml --console off run
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=35s
+KillSignal=SIGTERM
+StandardOutput=null
+StandardError=journal
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

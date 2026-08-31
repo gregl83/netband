@@ -41,6 +41,7 @@ pub struct ResolvedConfig {
     pub interfaces: Vec<String>,
     pub output: OutputTarget,
     pub state_file: PathBuf,
+    pub shutdown_grace: Duration,
     pub no_bandwidth: bool,
     pub ping: PingConfig,
     pub bandwidth: BandwidthConfig,
@@ -121,6 +122,7 @@ struct FileConfig {
     output: Option<PathBuf>,
     output_dir: Option<PathBuf>,
     state_file: Option<PathBuf>,
+    shutdown_grace: Option<String>,
     ping: Option<FilePing>,
     bandwidth: Option<FileBandwidth>,
 }
@@ -271,6 +273,14 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
             .unwrap_or_else(|| context.state_dir.join("scheduler.json")),
         &context.current_dir,
     );
+    let shutdown_grace = parse_duration(
+        "shutdown grace period",
+        cli.options
+            .shutdown_grace
+            .as_deref()
+            .or(file.shutdown_grace.as_deref())
+            .unwrap_or("30s"),
+    )?;
 
     let mut bandwidth = resolve_bandwidth(cli, file.bandwidth.unwrap_or_default(), context)?;
     if cli.options.no_bandwidth {
@@ -288,6 +298,7 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
         interfaces,
         output,
         state_file,
+        shutdown_grace,
         no_bandwidth: cli.options.no_bandwidth,
         ping: PingConfig {
             targets,
@@ -898,6 +909,11 @@ impl ResolvedConfig {
         );
         let _ = writeln!(summary, "output={output}");
         let _ = writeln!(summary, "state_file={}", self.state_file.display());
+        let _ = writeln!(
+            summary,
+            "shutdown_grace={}",
+            humantime::format_duration(self.shutdown_grace)
+        );
         let _ = writeln!(
             summary,
             "ping.targets={}",

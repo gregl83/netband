@@ -1,7 +1,9 @@
 use std::fmt;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -44,6 +46,98 @@ pub struct ConsoleStats {
 
 pub trait ConsoleSink {
     fn offer(&self, event: &MeasurementEvent);
+}
+
+#[cfg(unix)]
+pub struct ServiceStdout {
+    setup_error: Option<i32>,
+}
+
+#[cfg(unix)]
+impl ServiceStdout {
+    fn new() -> Self {
+        // SAFETY: fcntl operates on the process stdout descriptor and does not retain pointers.
+        let flags = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFL) };
+        let setup_error = if flags < 0 {
+            io::Error::last_os_error().raw_os_error()
+        } else {
+            // SAFETY: the descriptor and integer flags are valid for F_SETFL.
+            let result = unsafe {
+                libc::fcntl(libc::STDOUT_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK)
+            };
+            (result < 0)
+                .then(|| io::Error::last_os_error().raw_os_error())
+                .flatten()
+        };
+        Self { setup_error }
+    }
+}
+
+#[cfg(unix)]
+impl AsyncWrite for ServiceStdout {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if let Some(code) = self.setup_error {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(code)));
+        }
+        // SAFETY: buffer is valid for its length and write does not outlive this call.
+        let written = unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                buffer.as_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+        if written < 0 {
+            Poll::Ready(Err(io::Error::last_os_error()))
+        } else {
+            Poll::Ready(Ok(written as usize))
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(not(unix))]
+pub struct ServiceStdout(tokio::io::Stdout);
+
+#[cfg(not(unix))]
+impl AsyncWrite for ServiceStdout {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(context)
+    }
+}
+
+pub fn service_stdout() -> ServiceStdout {
+    #[cfg(unix)]
+    {
+        ServiceStdout::new()
+    }
+    #[cfg(not(unix))]
+    {
+        ServiceStdout(tokio::io::stdout())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
