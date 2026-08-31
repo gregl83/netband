@@ -169,7 +169,7 @@ async fn immediate_start_and_regular_ticks_cover_one_logical_hour() {
             .len(),
         events.len()
     );
-    assert!(events.chunks_exact(2).all(|pair| {
+    assert!(events.as_chunks::<2>().0.iter().all(|pair| {
         pair[0].event_kind == netband::model::EventKind::PingProbe
             && pair[1].event_kind == netband::model::EventKind::PingSummary
     }));

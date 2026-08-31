@@ -480,10 +480,10 @@ impl Scheduler {
         if due_slot.is_some() {
             self.remove_due_slots(now);
         }
-        if reason != TriggerReason::Scheduled {
-            if let Some(first) = self.state().slots.first().copied() {
-                self.remove_slot(first);
-            }
+        if reason != TriggerReason::Scheduled
+            && let Some(first) = self.state().slots.first().copied()
+        {
+            self.remove_slot(first);
         }
         self.persist()?;
         events.push(self.event(
@@ -510,10 +510,10 @@ impl Scheduler {
         now: DateTime<Utc>,
     ) -> Result<ManualDecision, SchedulerError> {
         let mut clock_events = self.advance_clock(run_id, now)?;
-        if let Some(event) = clock_events.pop() {
-            if now < self.state().last_observed_utc {
-                return Ok(ManualDecision::Blocked(Box::new(event)));
-            }
+        if let Some(event) = clock_events.pop()
+            && now < self.state().last_observed_utc
+        {
+            return Ok(ManualDecision::Blocked(Box::new(event)));
         }
         match self.block_reason(now) {
             Some(blocked) => Ok(ManualDecision::Blocked(Box::new(self.event(

@@ -49,7 +49,7 @@ impl PingTransport for DegradedTransport {
                     source_ip: Some("192.0.2.10".parse().unwrap()),
                 },
                 sent: true,
-                result: if call % 2 == 0 {
+                result: if call.is_multiple_of(2) {
                     Ok(ProbeReply {
                         target: request.target,
                         identifier: Some(request.identifier),

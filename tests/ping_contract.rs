@@ -125,7 +125,7 @@ async fn targets_overlap_but_events_remain_in_configuration_order() {
     assert_eq!(report.failed_targets, 0);
     assert_eq!(report.exit_status(), PingExitStatus::Success);
     assert_eq!(report.events.len(), 6);
-    for (index, pair) in report.events.chunks_exact(2).enumerate() {
+    for (index, pair) in report.events.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!(pair[0].event_kind, EventKind::PingProbe);
         assert_eq!(pair[1].event_kind, EventKind::PingSummary);
         assert_eq!(
