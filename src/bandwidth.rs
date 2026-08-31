@@ -33,6 +33,7 @@ use crate::provider::{
     EndpointCandidate, FailureDisposition, RequestFailure, USER_AGENT as NETBAND_USER_AGENT,
     parse_retry_after_value, resolve_endpoints, retry_until,
 };
+use crate::scheduler::{BandwidthOpportunity, ManualDecision, Scheduler, SchedulerError};
 
 const NDT7_SUBPROTOCOL: &str = "net.measurementlab.ndt.v7";
 const MAX_RESOLVED_ADDRESSES: usize = 8;
@@ -112,6 +113,8 @@ struct CandidateResult {
 pub struct BandwidthReport {
     pub events: Vec<MeasurementEvent>,
     pub outcome: Outcome,
+    pub reserved: bool,
+    pub reservation_error: Option<String>,
 }
 
 impl BandwidthReport {
@@ -135,6 +138,27 @@ pub struct BandwidthExecution {
 pub enum BandwidthCommandError {
     #[error(transparent)]
     Journal(#[from] JournalError),
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionReservation {
+    Untracked,
+    Reserved { daily_runs_used: u32 },
+}
+
+pub trait ReservationGate {
+    fn reserve(&mut self, started_at: DateTime<Utc>) -> Result<AdmissionReservation, String>;
+}
+
+#[derive(Debug, Default)]
+struct UntrackedReservation;
+
+impl ReservationGate for UntrackedReservation {
+    fn reserve(&mut self, _started_at: DateTime<Utc>) -> Result<AdmissionReservation, String> {
+        Ok(AdmissionReservation::Untracked)
+    }
 }
 
 pub fn cancellation_channel() -> (watch::Sender<bool>, watch::Receiver<bool>) {
@@ -163,13 +187,41 @@ where
         CONSOLE_CAPACITY,
         trace_console_diagnostic,
     );
-    let report = measure_bandwidth(config, &run_id, shutdown).await;
+    let mut scheduler = Scheduler::open(&config.state_file, &config.bandwidth, started_at)?;
+    let mut report = match scheduler.preflight_manual(&run_id, started_at)? {
+        ManualDecision::Allowed => {
+            let opportunity = BandwidthOpportunity {
+                reason: TriggerReason::Manual,
+                scheduled_at_utc: started_at,
+            };
+            let mut report =
+                measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
+            if report.reservation_error.is_none() {
+                let scheduler_events =
+                    scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
+                report.events.extend(scheduler_events);
+            }
+            report
+        }
+        ManualDecision::Blocked(event) => BandwidthReport {
+            events: vec![*event],
+            outcome: Outcome::Suppressed,
+            reserved: false,
+            reservation_error: None,
+        },
+    };
+    let reservation_error = report.reservation_error.take();
     let mut coordinator = OutputCoordinator::new(journal, console);
     let publish_result = coordinator.publish_batch(&report.events);
     let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
     publish_result?;
+    if let Some(message) = reservation_error {
+        return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
+            message,
+        )));
+    }
     Ok(BandwidthExecution {
         output_path,
         report,
@@ -182,12 +234,31 @@ pub async fn measure_bandwidth(
     run_id: &str,
     shutdown: watch::Receiver<bool>,
 ) -> BandwidthReport {
-    measure_bandwidth_with_network(
+    let mut reservation = UntrackedReservation;
+    measure_bandwidth_with_network_and_gate(
         config,
         run_id,
         shutdown,
         &SystemTcpConnector,
         &SystemAddressResolver,
+        &mut reservation,
+    )
+    .await
+}
+
+pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
+    config: &ResolvedConfig,
+    run_id: &str,
+    shutdown: watch::Receiver<bool>,
+    reservation: &mut G,
+) -> BandwidthReport {
+    measure_bandwidth_with_network_and_gate(
+        config,
+        run_id,
+        shutdown,
+        &SystemTcpConnector,
+        &SystemAddressResolver,
+        reservation,
     )
     .await
 }
@@ -198,16 +269,48 @@ pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
     shutdown: watch::Receiver<bool>,
     connector: &C,
 ) -> BandwidthReport {
-    measure_bandwidth_with_network(config, run_id, shutdown, connector, &SystemAddressResolver)
-        .await
+    let mut reservation = UntrackedReservation;
+    measure_bandwidth_with_network_and_gate(
+        config,
+        run_id,
+        shutdown,
+        connector,
+        &SystemAddressResolver,
+        &mut reservation,
+    )
+    .await
 }
 
 pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>(
     config: &ResolvedConfig,
     run_id: &str,
+    shutdown: watch::Receiver<bool>,
+    connector: &C,
+    resolver: &R,
+) -> BandwidthReport {
+    let mut reservation = UntrackedReservation;
+    measure_bandwidth_with_network_and_gate(
+        config,
+        run_id,
+        shutdown,
+        connector,
+        resolver,
+        &mut reservation,
+    )
+    .await
+}
+
+pub async fn measure_bandwidth_with_network_and_gate<
+    C: TcpConnector,
+    R: AddressResolver,
+    G: ReservationGate,
+>(
+    config: &ResolvedConfig,
+    run_id: &str,
     mut shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
+    reservation: &mut G,
 ) -> BandwidthReport {
     let interface = config.interfaces.first().map(String::as_str);
     let whole_timeout = tokio::time::sleep(config.bandwidth.whole_test_timeout);
@@ -255,10 +358,26 @@ pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>
         });
     }
 
+    let reservation = match reservation.reserve(Utc::now()) {
+        Ok(reservation) => reservation,
+        Err(message) => {
+            let mut report = command_failure_report(
+                config,
+                run_id,
+                interface,
+                Outcome::Error,
+                ErrorKind::Internal,
+                format!("cannot persist bandwidth reservation: {message}"),
+            );
+            report.reservation_error = Some(message);
+            return report;
+        }
+    };
+
     let test = run_candidates(&resolution.candidates, interface, connector, resolver);
     let candidate = tokio::select! {
         _ = &mut whole_timeout => {
-            return command_failure_report(
+            return apply_admission(command_failure_report(
                 config,
                 run_id,
                 interface,
@@ -268,17 +387,17 @@ pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>
                     "NDT7 test timed out after {}",
                     humantime::format_duration(config.bandwidth.whole_test_timeout)
                 ),
-            );
+            ), reservation);
         }
         _ = cancellation_requested(&mut shutdown) => {
-            return command_failure_report(
+            return apply_admission(command_failure_report(
                 config,
                 run_id,
                 interface,
                 Outcome::Cancelled,
                 ErrorKind::Cancelled,
                 "NDT7 test was cancelled".to_owned(),
-            );
+            ), reservation);
         },
         result = test => result,
     };
@@ -290,7 +409,7 @@ pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>
             (false, false) => Outcome::Error,
         }
     });
-    report_from_result(ReportInput {
+    let report = report_from_result(ReportInput {
         run_id,
         interface,
         provider_id: &candidate.provider_id,
@@ -300,7 +419,21 @@ pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>
         download: candidate.download,
         upload: candidate.upload,
         outcome,
-    })
+    });
+    apply_admission(report, reservation)
+}
+
+fn apply_admission(
+    mut report: BandwidthReport,
+    reservation: AdmissionReservation,
+) -> BandwidthReport {
+    if let AdmissionReservation::Reserved { daily_runs_used } = reservation {
+        report.reserved = true;
+        for event in &mut report.events {
+            event.daily_runs_used = Some(daily_runs_used);
+        }
+    }
+    report
 }
 
 fn command_failure_report(
@@ -730,11 +863,15 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
             }
             Err(WebSocketError::Http(response)) => {
                 let status = response.status().as_u16();
-                let retry_after = response
-                    .headers()
-                    .get("retry-after")
+                let retry_header = response.headers().get("retry-after");
+                let retry_after = retry_header
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| parse_retry_after_value(value, std::time::SystemTime::now()));
+                let retry_detail = match (retry_header.is_some(), retry_after.is_some()) {
+                    (true, true) => "Retry-After parsed",
+                    (true, false) => "Retry-After malformed",
+                    (false, _) => "Retry-After missing",
+                };
                 failures.push(handshake_failure(
                     candidate,
                     url,
@@ -742,7 +879,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     source_ip,
                     request_attempt,
                     Some((status, retry_after)),
-                    format!("WebSocket handshake returned HTTP {status}"),
+                    format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
                 ));
                 return Err(failures);
             }
@@ -1081,6 +1218,8 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     BandwidthReport {
         events: events.into_iter().map(|event| event.sanitized()).collect(),
         outcome,
+        reserved: false,
+        reservation_error: None,
     }
 }
 

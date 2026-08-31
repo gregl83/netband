@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use netband::bandwidth::{
-    AddressResolver, ConnectFuture, ResolveFuture, TcpConnector, cancellation_channel,
-    classify_handshake_status, execute_bandwidth_once, measure_bandwidth,
-    measure_bandwidth_with_network, throughput_mbps,
+    AddressResolver, AdmissionReservation, ConnectFuture, ReservationGate, ResolveFuture,
+    TcpConnector, cancellation_channel, classify_handshake_status, execute_bandwidth_once,
+    measure_bandwidth, measure_bandwidth_with_network, measure_bandwidth_with_network_and_gate,
+    throughput_mbps,
 };
 use netband::cli::{Cli, ConsoleMode};
 use netband::config::{OutputTarget, ResolveContext, resolve};
@@ -345,6 +347,80 @@ impl TcpConnector for RecordingConnector {
             .push((remote, interface.map(str::to_owned)));
         Box::pin(async { Err(std::io::Error::other("injected connect failure")) })
     }
+}
+
+struct RecordingGate {
+    reserved: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ReservationGate for RecordingGate {
+    fn reserve(
+        &mut self,
+        _started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AdmissionReservation, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.reserved.store(true, Ordering::SeqCst);
+        Ok(AdmissionReservation::Reserved { daily_runs_used: 1 })
+    }
+}
+
+struct ReservationCheckingConnector {
+    reserved: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl TcpConnector for ReservationCheckingConnector {
+    fn connect<'a>(
+        &'a self,
+        _remote: std::net::SocketAddr,
+        _interface: Option<&'a str>,
+    ) -> ConnectFuture<'a> {
+        assert!(
+            self.reserved.load(Ordering::SeqCst),
+            "the allowance must be persisted before connection I/O"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(std::io::Error::other("injected connect failure")) })
+    }
+}
+
+#[tokio::test]
+async fn daily_allowance_is_reserved_once_before_the_first_ndt_connection() {
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), "127.0.0.1:443".parse().unwrap(), "1s");
+    let reserved = Arc::new(AtomicBool::new(false));
+    let gate_calls = Arc::new(AtomicUsize::new(0));
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let mut gate = RecordingGate {
+        reserved: Arc::clone(&reserved),
+        calls: Arc::clone(&gate_calls),
+    };
+    let connector = ReservationCheckingConnector {
+        reserved,
+        calls: Arc::clone(&connector_calls),
+    };
+    let resolver = FixedResolver(vec!["192.0.2.10:443".parse().unwrap()]);
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth_with_network_and_gate(
+        &config,
+        "run-reservation",
+        shutdown,
+        &connector,
+        &resolver,
+        &mut gate,
+    )
+    .await;
+
+    assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(connector_calls.load(Ordering::SeqCst), 2);
+    assert!(report.reserved);
+    assert!(
+        report
+            .events
+            .iter()
+            .all(|event| event.daily_runs_used == Some(1))
+    );
 }
 
 #[tokio::test]

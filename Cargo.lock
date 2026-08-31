@@ -889,6 +889,7 @@ dependencies = [
  "csv",
  "directories",
  "futures-util",
+ "getrandom 0.3.4",
  "httpdate",
  "humantime",
  "if-addrs",

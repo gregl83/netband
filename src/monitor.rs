@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::bandwidth::measure_bandwidth_with_gate;
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleStats};
 use crate::health::{DegradationReason, HealthConfig, HealthDecision, HealthWindow};
@@ -17,6 +18,7 @@ use crate::journal::{Journal, JournalError, JournalSink, OutputCoordinator};
 use crate::ping::{
     PingRoundError, PingRoundReport, PingRoundRequest, PingTransport, measure_round,
 };
+use crate::scheduler::{Scheduler, SchedulerError};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -38,6 +40,7 @@ pub struct MonitorStats {
     pub skipped_ticks: u64,
     pub successful_probes: u64,
     pub failed_probes: u64,
+    pub bandwidth_attempts: u64,
 }
 
 #[derive(Debug)]
@@ -55,6 +58,8 @@ pub enum MonitorError {
     Round(#[from] PingRoundError),
     #[error("ping scheduler task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
 }
 
 pub fn cancellation_channel() -> (watch::Sender<bool>, watch::Receiver<bool>) {
@@ -93,7 +98,20 @@ where
         |diagnostic| tracing::warn!(?diagnostic, "ping console diagnostic"),
     );
     let mut coordinator = OutputCoordinator::new(journal, console);
-    let result = monitor_ping(transport, settings, &mut coordinator, shutdown).await;
+    let result = if config.bandwidth.automatic_enabled {
+        let scheduler = Scheduler::open(&config.state_file, &config.bandwidth, started_at)?;
+        monitor_adaptive(
+            config,
+            transport,
+            settings,
+            scheduler,
+            &mut coordinator,
+            shutdown,
+        )
+        .await
+    } else {
+        monitor_ping(transport, settings, &mut coordinator, shutdown).await
+    };
     let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
@@ -134,12 +152,12 @@ where
                 biased;
                 result = task => {
                     active = None;
-                    complete_round(result, coordinator, &mut health, &mut stats)?;
+                    let _ = complete_round(result, coordinator, &mut health, &mut stats)?;
                 }
                 cancelled = cancellation_requested(&mut shutdown) => {
                     if cancelled {
                         let task = active.take().expect("active round exists");
-                        complete_round(task.await, coordinator, &mut health, &mut stats)?;
+                        let _ = complete_round(task.await, coordinator, &mut health, &mut stats)?;
                         break;
                     }
                 }
@@ -171,6 +189,113 @@ where
     Ok(stats)
 }
 
+pub async fn monitor_adaptive<T, J, C>(
+    resolved: &ResolvedConfig,
+    transport: Arc<T>,
+    config: PingMonitorConfig,
+    mut scheduler: Scheduler,
+    coordinator: &mut OutputCoordinator<J, C>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<MonitorStats, MonitorError>
+where
+    T: PingTransport,
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let mut stats = MonitorStats::default();
+    let mut health = HealthWindow::new(config.health);
+    let mut ticker = tokio::time::interval_at(Instant::now(), config.interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut active: Option<JoinHandle<Result<PingRoundReport, PingRoundError>>> = None;
+    let mut next_round = 0_u64;
+    let mut latest_round_has_success = false;
+    let mut bandwidth_number = 0_u64;
+
+    loop {
+        if *shutdown.borrow() {
+            if let Some(task) = active.take() {
+                let _ = complete_round(task.await, coordinator, &mut health, &mut stats)?;
+            }
+            break;
+        }
+
+        if let Some(task) = active.as_mut() {
+            tokio::select! {
+                biased;
+                result = task => {
+                    active = None;
+                    let (decision, has_success) =
+                        complete_round(result, coordinator, &mut health, &mut stats)?;
+                    latest_round_has_success = has_success;
+                    let events = scheduler.observe_health(&config.run_id, Utc::now(), decision)?;
+                    coordinator.publish_batch(&events)?;
+                }
+                cancelled = cancellation_requested(&mut shutdown) => {
+                    if cancelled {
+                        let task = active.take().expect("active round exists");
+                        let _ = complete_round(task.await, coordinator, &mut health, &mut stats)?;
+                        break;
+                    }
+                }
+                scheduled = ticker.tick() => {
+                    stats.skipped_ticks += 1;
+                    tracing::warn!(
+                        skipped_ticks = stats.skipped_ticks,
+                        scheduled_at = ?scheduled,
+                        "ping round still active; skipping interval tick"
+                    );
+                }
+            }
+            continue;
+        }
+
+        let action = scheduler.poll(&config.run_id, Utc::now(), latest_round_has_success)?;
+        coordinator.publish_batch(&action.events)?;
+        if let Some(opportunity) = action.opportunity {
+            let bandwidth_run_id = format!("{}:bandwidth:{bandwidth_number}", config.run_id);
+            bandwidth_number = bandwidth_number.wrapping_add(1);
+            let mut report = measure_bandwidth_with_gate(
+                resolved,
+                &bandwidth_run_id,
+                shutdown.clone(),
+                &mut scheduler,
+            )
+            .await;
+            stats.bandwidth_attempts += 1;
+            let reservation_error = report.reservation_error.clone();
+            if reservation_error.is_none() {
+                let events = scheduler.finish_attempt(
+                    &config.run_id,
+                    Utc::now(),
+                    opportunity,
+                    &mut report,
+                )?;
+                report.events.extend(events);
+            }
+            coordinator.publish_batch(&report.events)?;
+            if let Some(message) = reservation_error {
+                return Err(MonitorError::Scheduler(SchedulerError::Admission(message)));
+            }
+            ticker.reset_at(Instant::now() + config.interval);
+            continue;
+        }
+
+        tokio::select! {
+            cancelled = cancellation_requested(&mut shutdown) => {
+                if cancelled {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                active = Some(start_round(&transport, &config, next_round));
+                stats.rounds_started += 1;
+                next_round = next_round.wrapping_add(1);
+            }
+        }
+    }
+    Ok(stats)
+}
+
 fn start_round<T: PingTransport>(
     transport: &Arc<T>,
     config: &PingMonitorConfig,
@@ -193,7 +318,7 @@ fn complete_round<J, C>(
     coordinator: &mut OutputCoordinator<J, C>,
     health: &mut HealthWindow,
     stats: &mut MonitorStats,
-) -> Result<(), MonitorError>
+) -> Result<(HealthDecision, bool), MonitorError>
 where
     J: JournalSink,
     C: crate::console::ConsoleSink,
@@ -205,7 +330,7 @@ where
     stats.rounds_completed += 1;
     stats.successful_probes += report.successful_targets as u64;
     stats.failed_probes += report.failed_targets as u64;
-    Ok(())
+    Ok((decision, report.successful_targets > 0))
 }
 
 fn trace_health(decision: HealthDecision) {

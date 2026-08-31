@@ -173,9 +173,12 @@ async fn resolve_mlab(
     };
 
     let status = response.status();
+    let retry_after_present = response
+        .headers()
+        .contains_key(reqwest::header::RETRY_AFTER);
     let retry_after = parse_retry_after(response.headers(), SystemTime::now());
     if status != StatusCode::OK {
-        let (outcome, message) = match status {
+        let (outcome, base_message) = match status {
             StatusCode::NO_CONTENT => (Outcome::NoCapacity, "Locate returned no capacity"),
             StatusCode::TOO_MANY_REQUESTS => (Outcome::RateLimited, "Locate rate limit"),
             StatusCode::SERVICE_UNAVAILABLE if retry_after.is_some() => (
@@ -185,11 +188,16 @@ async fn resolve_mlab(
             StatusCode::SERVICE_UNAVAILABLE => (Outcome::Error, "Locate service unavailable"),
             _ => (Outcome::Error, "Locate returned an unexpected status"),
         };
+        let retry_detail = match (retry_after_present, retry_after.is_some()) {
+            (true, true) => "Retry-After parsed",
+            (true, false) => "Retry-After malformed",
+            (false, _) => "Retry-After missing",
+        };
         return terminal_resolution(RequestFailure {
             stage: RequestStage::Locate,
             outcome,
             error_kind: ErrorKind::HttpStatus,
-            message: message.to_owned(),
+            message: format!("{base_message}; {retry_detail}"),
             server: Some(mlab.locate_url.to_string()),
             source_ip: None,
             remote_ip: None,

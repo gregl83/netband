@@ -130,9 +130,9 @@ fn malformed_tokenized_urls_are_redacted_from_errors() {
 }
 
 #[test]
-fn automatic_bandwidth_scheduler_reports_phase_unavailable() {
-    let scheduled = netband(&["--accept-mlab-policy", "run"]);
-    assert_eq!(scheduled.status.code(), Some(3));
-    assert!(stdout(&scheduled).is_empty());
-    assert!(stderr(&scheduled).contains("--no-bandwidth"));
+fn automatic_bandwidth_scheduler_is_exposed_by_the_run_configuration() {
+    let scheduled = netband(&["--accept-mlab-policy", "config", "check"]);
+    assert_eq!(scheduled.status.code(), Some(0));
+    assert!(stdout(&scheduled).contains("bandwidth.automatic_enabled=true"));
+    assert!(stderr(&scheduled).is_empty());
 }

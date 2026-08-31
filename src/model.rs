@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
 
 pub const SCHEMA_VERSION: u8 = 1;
@@ -35,7 +35,7 @@ pub enum Outcome {
     Expired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerReason {
     Scheduled,

@@ -9,6 +9,7 @@ pub mod model;
 pub mod monitor;
 pub mod ping;
 pub mod provider;
+pub mod scheduler;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -82,12 +83,6 @@ pub async fn run(cli: Cli) -> ExitCode {
             if config.interfaces.len() > 1 {
                 tracing::error!(
                     "continuous monitoring supports one selected interface until multi-interface Phase 7"
-                );
-                return ExitCode::from(3);
-            }
-            if config.bandwidth.automatic_enabled && !config.no_bandwidth {
-                tracing::error!(
-                    "automatic bandwidth scheduling is not available until Phase 6; use --no-bandwidth to run continuous pings"
                 );
                 return ExitCode::from(3);
             }
