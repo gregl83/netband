@@ -9,6 +9,7 @@ repository = "https://github.com/gregl83/netband"
 homepage = "https://github.com/gregl83/netband"
 documentation = "https://github.com/gregl83/netband/tree/master/docs"
 readme = "README.md"
+publish = ["crates-io"]
 keywords = ["network", "latency", "bandwidth", "monitoring", "ndt7"]
 categories = ["command-line-utilities", "network-programming"]
 exclude = [".agents/**", ".idea/**", ".netband-state/**", "netband-*.csv", "release-live.csv"]

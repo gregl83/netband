@@ -20,7 +20,20 @@ The release smoke builds with `--release --locked`, enforces a 25 MiB binary cei
 requires `--version` startup in under two seconds, verifies help/config commands, parses
 the v1 fixture with Python's CSV implementation, and executes local NDT7 and Locate
 mocks. CI runs the quality/MSRV/release job on Linux x86_64 and cross-builds aarch64 with
-the GNU linker before executing help/version/config under QEMU.
+the GNU linker before executing help/version/config under QEMU. A separate CI job runs
+the test suite with `cargo-llvm-cov`, uploads LCOV to Codecov using `CODECOV_TOKEN`, and
+retains the raw report as a workflow artifact.
+
+## crates.io publication
+
+Publishing a GitHub release is the only trigger for `.github/workflows/cd.yml`. Its tag
+must be exactly `v<crate-version>`; for example, crate version `1.0.0` requires tag
+`v1.0.0`. The workflow checks formatting, Clippy, tests, dependency policy, and package
+construction before the publishing job starts. Only the final step receives the
+`CARGO_REGISTRY_TOKEN` secret and runs `cargo publish` against crates.io.
+
+The `published` event includes GitHub prereleases. Publish a prerelease only when the
+matching Cargo version also contains the intended SemVer prerelease suffix.
 
 ## Architecture evidence
 
