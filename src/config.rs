@@ -65,6 +65,7 @@ pub struct BandwidthConfig {
     pub provider: ProviderConfig,
     pub provider_id: String,
     pub automatic_enabled: bool,
+    pub force_limits: bool,
     pub daily_max: u32,
     pub min_spacing: Duration,
     pub slot_jitter_pct: u8,
@@ -190,6 +191,9 @@ struct FileDirect {
 pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, ConfigError> {
     let file = load_file(cli.options.config.as_deref())?;
     let command = cli.command_kind();
+    if cli.options.force && command != CommandKind::OnceBandwidth {
+        return Err(error("--force applies only to once bandwidth"));
+    }
 
     let requested_console = cli
         .options
@@ -283,6 +287,14 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
     )?;
 
     let mut bandwidth = resolve_bandwidth(cli, file.bandwidth.unwrap_or_default(), context)?;
+    if command == CommandKind::OnceBandwidth
+        && let ProviderConfig::Mlab(mlab) = &bandwidth.provider
+        && !mlab.policy_accepted
+    {
+        return Err(error(format!(
+            "M-Lab bandwidth requires explicit policy acceptance; review {MLAB_AUP_URL} and {MLAB_PRIVACY_URL}, then pass --accept-mlab-policy"
+        )));
+    }
     if cli.options.no_bandwidth {
         bandwidth.automatic_enabled = false;
     }
@@ -543,6 +555,7 @@ fn resolve_bandwidth(
         provider,
         provider_id,
         automatic_enabled,
+        force_limits: cli.options.force,
         daily_max,
         min_spacing,
         slot_jitter_pct,

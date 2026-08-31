@@ -88,7 +88,20 @@ pub async fn resolve_endpoints(
 ) -> EndpointResolution {
     match &config.provider {
         ProviderConfig::Direct(direct) => resolve_direct(config, direct),
-        ProviderConfig::Mlab(mlab) => resolve_mlab(config, mlab, interface).await,
+        ProviderConfig::Mlab(mlab) if mlab.policy_accepted => {
+            resolve_mlab(config, mlab, interface).await
+        }
+        ProviderConfig::Mlab(mlab) => EndpointResolution {
+            candidates: Vec::new(),
+            failures: Vec::new(),
+            terminal: Some(RequestFailure::simple(
+                RequestStage::Locate,
+                ErrorKind::PermissionDenied,
+                "M-Lab bandwidth requires explicit policy acceptance",
+                Some(mlab.locate_url.to_string()),
+                0,
+            )),
+        },
     }
 }
 

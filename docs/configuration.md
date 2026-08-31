@@ -30,6 +30,7 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--ping-interval DURATION` | `ping.interval` | `5s` |
 | `--ping-timeout DURATION` | `ping.timeout` | `2s` per probe |
 | `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
+| `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
 | `--output FILE` | `output` | No fixed file; create a timestamped CSV in the current directory |
 | `--output-dir DIR` | `output_dir` | Current directory when neither output option is set |
 | `--state-file FILE` | `state_file` | Platform user state directory, file `scheduler.json` |
@@ -71,7 +72,8 @@ read [Netband privacy](../PRIVACY.md), the
 
 The M-Lab profile has a hard global maximum of four starts per UTC day and a 36-minute
 minimum spacing. Manual commands, triggered tests, interfaces, and restarts share that
-allowance. Netband does not silently fall back between M-Lab and direct providers.
+allowance. `--force` never bypasses consent or the hard four-start limit. Netband does
+not silently fall back between M-Lab and direct providers.
 
 ## Direct provider
 

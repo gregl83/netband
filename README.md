@@ -49,6 +49,10 @@ bandwidth through M-Lab, first review [Netband privacy](PRIVACY.md), the
 The command consumes one of M-Lab's maximum four automated runs per UTC day. Netband
 persists that allowance across restarts and manual commands.
 
+For an authorized manual diagnostic, `once bandwidth --force` bypasses configured
+spacing, cooldown, and provider-specific local caps. It still requires M-Lab consent,
+records the attempt, and cannot exceed M-Lab's hard four-start daily maximum.
+
 ## Output channels
 
 | Command/mode | Measurement CSV | stdout presentation | Operational stderr |

@@ -106,6 +106,7 @@ struct ReservationLedgerEntry {
 struct SchedulerPolicy {
     provider_id: String,
     provider_kind: ProviderKind,
+    force_limits: bool,
     daily_max: u32,
     min_spacing: Duration,
     slot_jitter_pct: u8,
@@ -122,6 +123,7 @@ impl From<&BandwidthConfig> for SchedulerPolicy {
                 ProviderConfig::Mlab(_) => ProviderKind::Mlab,
                 ProviderConfig::Direct(_) => ProviderKind::Direct,
             },
+            force_limits: config.force_limits,
             daily_max: config.daily_max,
             min_spacing: config.min_spacing,
             slot_jitter_pct: config.slot_jitter_pct,
@@ -799,18 +801,27 @@ impl Scheduler {
 
     fn block_reason(&self, now: DateTime<Utc>) -> Option<BlockReason> {
         let state = self.state();
-        if self.policy.daily_max == 0
-            || runs_on_day(state, now.date_naive()) >= self.policy.daily_max
-        {
+        let used = runs_on_day(state, now.date_naive());
+        let mlab_hard_cap_reached = self.policy.provider_kind == ProviderKind::Mlab && used >= 4;
+        let configured_cap_reached = self.policy.daily_max == 0 || used >= self.policy.daily_max;
+        if mlab_hard_cap_reached || (!self.policy.force_limits && configured_cap_reached) {
+            let maximum =
+                if self.policy.force_limits && self.policy.provider_kind == ProviderKind::Mlab {
+                    4
+                } else {
+                    self.policy.daily_max
+                };
             return Some(BlockReason {
                 kind: ErrorKind::DailyCap,
                 cooldown_until: None,
                 message: format!(
                     "decision=suppressed reason=daily_cap used={} maximum={}",
-                    runs_on_day(state, now.date_naive()),
-                    self.policy.daily_max
+                    used, maximum
                 ),
             });
+        }
+        if self.policy.force_limits {
+            return None;
         }
         if let Some(deadline) = state.cooldown_until_utc
             && now < deadline

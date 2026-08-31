@@ -128,6 +128,10 @@ pub struct Options {
     #[arg(long, global = true)]
     pub no_bandwidth: bool,
 
+    /// Override local limits for one manual bandwidth test
+    #[arg(long, global = true)]
+    pub force: bool,
+
     /// Write measurements to this CSV file
     #[arg(
         long,

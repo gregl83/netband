@@ -53,6 +53,7 @@ clients to no more than four tests per day, and calls for randomized test times.
 enforces a maximum of four starts per UTC day for the M-Lab provider, persists manual
 and automatic reservations together, spaces them by at least 36 minutes, and randomizes
 planned times. A test that starts may transfer substantial data in both directions.
+`--force` does not bypass M-Lab consent or its hard four-start daily maximum.
 
 Do not enable M-Lab if the network owner or affected user has not consented, if public
 and indefinite test data is unacceptable, or if applicable policy/law prohibits it.
@@ -70,6 +71,8 @@ apply. The direct endpoint/CDN operator determines what it collects, publishes, 
 and shares. Before use, obtain authorization and document that operator's privacy,
 retention, capacity, security, and rate policy. Configure an appropriate daily cap and
 spacing; adaptive cooldown remains active.
+An authorized `once bandwidth --force` invocation may bypass those configured direct
+provider limits and cooldown for that attempt, while still recording the start.
 
 Verified TLS is the default. A private CA can be added without disabling certificate
 validation. `--allow-insecure-ndt` permits unencrypted `ws://` only after an explicit

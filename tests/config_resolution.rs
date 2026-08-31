@@ -242,6 +242,36 @@ fn mlab_policy_bounds_and_consent_are_applied() {
     )
     .unwrap();
     assert!(accepted.bandwidth.automatic_enabled);
+
+    for extra in [None, Some("--force")] {
+        let mut args = vec!["netband"];
+        if let Some(flag) = extra {
+            args.push(flag);
+        }
+        args.extend(["once", "bandwidth"]);
+        let error = resolve(&parse(&args), &context(dir.path().to_path_buf(), false)).unwrap_err();
+        assert!(error.to_string().contains("explicit policy acceptance"));
+    }
+
+    let forced = resolve(
+        &parse(&[
+            "netband",
+            "--accept-mlab-policy",
+            "--force",
+            "once",
+            "bandwidth",
+        ]),
+        &context(dir.path().to_path_buf(), false),
+    )
+    .unwrap();
+    assert!(forced.bandwidth.force_limits);
+
+    let wrong_command = resolve(
+        &parse(&["netband", "--force", "once", "ping"]),
+        &context(dir.path().to_path_buf(), false),
+    )
+    .unwrap_err();
+    assert!(wrong_command.to_string().contains("once bandwidth"));
 }
 
 #[test]

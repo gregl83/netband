@@ -40,6 +40,7 @@ fn mlab() -> BandwidthConfig {
         }),
         provider_id: "mlab".into(),
         automatic_enabled: true,
+        force_limits: false,
         daily_max: 4,
         min_spacing: Duration::from_secs(36 * 60),
         slot_jitter_pct: 50,
@@ -65,6 +66,7 @@ fn direct(provider_id: &str, daily_max: u32, min_spacing: Duration) -> Bandwidth
         }),
         provider_id: provider_id.into(),
         automatic_enabled: daily_max > 0,
+        force_limits: false,
         daily_max,
         min_spacing,
         slot_jitter_pct: 50,
@@ -196,6 +198,50 @@ fn mlab_cap_is_global_and_survives_restart() {
     assert!(matches!(
         restarted.preflight_manual("run", at(30, 6, 0, 0)).unwrap(),
         ManualDecision::Blocked(_)
+    ));
+}
+
+#[test]
+fn force_overrides_direct_limits_but_not_the_mlab_hard_cap() {
+    let direct_root = TempDir::new().unwrap();
+    let direct_path = state_path(&direct_root);
+    let now = at(30, 1, 0, 0);
+    let direct_config = direct("direct:forced", 1, Duration::from_secs(60));
+    let mut scheduler = Scheduler::open_seeded(&direct_path, &direct_config, now, 81).unwrap();
+    scheduler.reserve_run(now).unwrap();
+    drop(scheduler);
+
+    let mut forced_direct = direct_config;
+    forced_direct.force_limits = true;
+    let forced_at = now + TimeDelta::seconds(1);
+    let mut scheduler =
+        Scheduler::open_seeded(&direct_path, &forced_direct, forced_at, 82).unwrap();
+    assert_eq!(
+        scheduler.preflight_manual("forced", forced_at).unwrap(),
+        ManualDecision::Allowed
+    );
+    assert_eq!(scheduler.reserve_run(forced_at).unwrap().daily_runs_used, 2);
+
+    let mlab_root = TempDir::new().unwrap();
+    let mlab_path = state_path(&mlab_root);
+    let mut mlab_config = mlab();
+    let mut scheduler =
+        Scheduler::open_seeded(&mlab_path, &mlab_config, at(30, 0, 0, 0), 83).unwrap();
+    for hour in 1..=4 {
+        scheduler.reserve_run(at(30, hour, 0, 0)).unwrap();
+    }
+    drop(scheduler);
+
+    mlab_config.force_limits = true;
+    let forced_at = at(30, 5, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(&mlab_path, &mlab_config, forced_at, 84).unwrap();
+    assert!(matches!(
+        scheduler.preflight_manual("forced", forced_at).unwrap(),
+        ManualDecision::Blocked(_)
+    ));
+    assert!(matches!(
+        scheduler.reserve_run(forced_at),
+        Err(SchedulerError::Admission(_))
     ));
 }
 

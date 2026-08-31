@@ -6,7 +6,7 @@ use clap::Parser;
 use netband::bandwidth::{cancellation_channel, measure_bandwidth};
 use netband::cli::Cli;
 use netband::config::{ResolveContext, resolve};
-use netband::model::{Outcome, RequestStage};
+use netband::model::{ErrorKind, Outcome, RequestStage};
 use netband::provider::{parse_locate_candidates, parse_retry_after, resolve_endpoints};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -105,11 +105,39 @@ fn mlab_config(root: &std::path::Path, locate_url: &str) -> netband::config::Res
         "netband",
         "--mlab-locate-url",
         locate_url,
+        "--accept-mlab-policy",
         "once",
         "bandwidth",
     ])
     .unwrap();
     resolve(&cli, &context(root.to_path_buf())).unwrap()
+}
+
+#[tokio::test]
+async fn unconsented_mlab_resolution_stops_before_the_network_boundary() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = tempdir().unwrap();
+    let cli = Cli::try_parse_from([
+        "netband",
+        "--mlab-locate-url",
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "config",
+        "check",
+    ])
+    .unwrap();
+    let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
+
+    let resolution = resolve_endpoints(&config.bandwidth, None).await;
+
+    assert!(resolution.candidates.is_empty());
+    let failure = resolution.terminal.unwrap();
+    assert_eq!(failure.error_kind, ErrorKind::PermissionDenied);
+    assert!(failure.message.contains("policy acceptance"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -193,6 +221,7 @@ async fn locate_is_included_in_the_whole_test_timeout() {
         &format!("http://{address}"),
         "--bandwidth-timeout",
         "20ms",
+        "--accept-mlab-policy",
         "once",
         "bandwidth",
     ])

@@ -28,6 +28,7 @@ fn help_and_version_expose_the_v1_command_contract() {
     assert!(help_text.contains("config"));
     assert!(help_text.contains("--console"));
     assert!(help_text.contains("--no-bandwidth"));
+    assert!(help_text.contains("--force"));
     assert!(stderr(&help).is_empty());
 
     let once_help = netband(&["once", "--help"]);
@@ -38,6 +39,28 @@ fn help_and_version_expose_the_v1_command_contract() {
     let version = netband(&["--version"]);
     assert!(version.status.success());
     assert_eq!(stdout(&version).trim(), "netband 0.1.0");
+}
+
+#[test]
+fn unconsented_mlab_bandwidth_fails_before_creating_files() {
+    let dir = tempdir().unwrap();
+    let output_path = dir.path().join("must-not-exist.csv");
+    let state_path = dir.path().join("must-not-exist.json");
+    let output = netband(&[
+        "--output",
+        output_path.to_str().unwrap(),
+        "--state-file",
+        state_path.to_str().unwrap(),
+        "--force",
+        "once",
+        "bandwidth",
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("explicit policy acceptance"));
+    assert!(!output_path.exists());
+    assert!(!state_path.exists());
 }
 
 #[test]
