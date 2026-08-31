@@ -11,6 +11,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::cli::{Cli, CommandKind, ConsoleMode, ProviderKind, Verbosity};
+use crate::interfaces::resolve_configured;
 
 const DEFAULT_TARGETS: [&str; 3] = ["1.1.1.1", "8.8.8.8", "9.9.9.9"];
 const DEFAULT_LOCATE_URL: &str = "https://locate.measurementlab.net/v2/nearest/ndt/ndt7";
@@ -814,20 +815,7 @@ fn valid_dns_name(name: &str) -> bool {
 }
 
 pub fn validate_environment(config: &ResolvedConfig) -> Result<(), ConfigError> {
-    if !config.interfaces.is_empty() {
-        let available = if_addrs::get_if_addrs()
-            .map_err(|source| error(format!("cannot inspect network interfaces: {source}")))?
-            .into_iter()
-            .map(|interface| interface.name)
-            .collect::<HashSet<_>>();
-        for interface in &config.interfaces {
-            if !available.contains(interface) {
-                return Err(error(format!(
-                    "network interface does not exist: {interface}"
-                )));
-            }
-        }
-    }
+    resolve_configured(&config.interfaces).map_err(|source| error(source.to_string()))?;
 
     let directory = match &config.output {
         OutputTarget::File(path) => path

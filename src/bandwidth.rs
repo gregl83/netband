@@ -193,6 +193,7 @@ where
             let opportunity = BandwidthOpportunity {
                 reason: TriggerReason::Manual,
                 scheduled_at_utc: started_at,
+                interface: config.interfaces.first().cloned(),
             };
             let mut report =
                 measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;

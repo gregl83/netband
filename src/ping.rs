@@ -152,7 +152,7 @@ pub async fn measure_round<T>(
     request: PingRoundRequest,
 ) -> Result<PingRoundReport, PingRoundError>
 where
-    T: PingTransport,
+    T: PingTransport + ?Sized,
 {
     validate_round_request(&request)?;
 
@@ -297,7 +297,7 @@ struct MeasurementContext {
     scheduled_at: DateTime<Utc>,
 }
 
-async fn measure_target<T: PingTransport>(
+async fn measure_target<T: PingTransport + ?Sized>(
     transport: Arc<T>,
     context: MeasurementContext,
     request: ProbeRequest,

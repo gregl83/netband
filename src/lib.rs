@@ -4,6 +4,7 @@ pub mod config;
 pub mod console;
 pub mod diagnostics;
 pub mod health;
+pub mod interfaces;
 pub mod journal;
 pub mod model;
 pub mod monitor;
@@ -56,7 +57,7 @@ pub async fn run(cli: Cli) -> ExitCode {
         CommandKind::OncePing => {
             if config.interfaces.len() > 1 {
                 tracing::error!(
-                    "once ping supports one selected interface until multi-interface Phase 7"
+                    "once ping accepts at most one selected interface; use run for fair multi-interface monitoring"
                 );
                 return ExitCode::from(3);
             }
@@ -80,20 +81,19 @@ pub async fn run(cli: Cli) -> ExitCode {
             }
         }
         CommandKind::Run => {
-            if config.interfaces.len() > 1 {
-                tracing::error!(
-                    "continuous monitoring supports one selected interface until multi-interface Phase 7"
-                );
-                return ExitCode::from(3);
-            }
-            let transport = std::sync::Arc::new(ping::SurgePingTransport::new(
-                config.interfaces.first().map(String::as_str),
-                &config.ping.targets,
-            ));
             let (_shutdown_sender, shutdown) = monitor::cancellation_channel();
-            match monitor::execute_ping_monitor(&config, transport, tokio::io::stdout(), shutdown)
-                .await
-            {
+            let execution = if !config.interfaces.is_empty() {
+                monitor::execute_multi_interface_monitor(&config, tokio::io::stdout(), shutdown)
+                    .await
+            } else {
+                let transport = std::sync::Arc::new(ping::SurgePingTransport::new(
+                    config.interfaces.first().map(String::as_str),
+                    &config.ping.targets,
+                ));
+                monitor::execute_ping_monitor(&config, transport, tokio::io::stdout(), shutdown)
+                    .await
+            };
+            match execution {
                 Ok(execution) => {
                     tracing::debug!(
                         output = %execution.output_path.display(),
@@ -113,7 +113,7 @@ pub async fn run(cli: Cli) -> ExitCode {
         CommandKind::OnceBandwidth => {
             if config.interfaces.len() > 1 {
                 tracing::error!(
-                    "once bandwidth supports one selected interface until multi-interface Phase 7"
+                    "once bandwidth accepts at most one selected interface; use run for fair multi-interface monitoring"
                 );
                 return ExitCode::from(3);
             }

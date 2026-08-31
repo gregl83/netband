@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -311,6 +312,72 @@ fn one_degradation_episode_triggers_once_replans_and_rearms_after_recovery() {
 }
 
 #[test]
+fn interface_trigger_latches_are_independent_and_keep_origin_attribution() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 19).unwrap();
+    scheduler
+        .observe_interface_health("run", now, Some("eth-a"), degraded(DegradationReason::Loss))
+        .unwrap();
+    scheduler
+        .observe_interface_health(
+            "run",
+            now + TimeDelta::seconds(1),
+            Some("eth-b"),
+            degraded(DegradationReason::Rtt),
+        )
+        .unwrap();
+    let health = BTreeMap::from([("eth-a".to_owned(), true), ("eth-b".to_owned(), true)]);
+
+    let first = scheduler
+        .poll_interfaces("run", now + TimeDelta::seconds(2), &health)
+        .unwrap()
+        .opportunity
+        .unwrap();
+    assert_eq!(first.interface.as_deref(), Some("eth-a"));
+    assert_eq!(first.reason, TriggerReason::PingLoss);
+    let mut report = success_report(false);
+    scheduler
+        .finish_attempt("run", now + TimeDelta::seconds(2), first, &mut report)
+        .unwrap();
+
+    let second = scheduler
+        .poll_interfaces("run", now + TimeDelta::seconds(3), &health)
+        .unwrap()
+        .opportunity
+        .unwrap();
+    assert_eq!(second.interface.as_deref(), Some("eth-b"));
+    assert_eq!(second.reason, TriggerReason::PingRtt);
+}
+
+#[test]
+fn outage_on_one_interface_does_not_block_an_eligible_interface_trigger() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 23).unwrap();
+    for (offset, interface) in [(0, "eth-down"), (1, "eth-ready")] {
+        scheduler
+            .observe_interface_health(
+                "run",
+                now + TimeDelta::seconds(offset),
+                Some(interface),
+                degraded(DegradationReason::Loss),
+            )
+            .unwrap();
+    }
+    let health = BTreeMap::from([
+        ("eth-down".to_owned(), false),
+        ("eth-ready".to_owned(), true),
+    ]);
+    let opportunity = scheduler
+        .poll_interfaces("run", now + TimeDelta::seconds(2), &health)
+        .unwrap()
+        .opportunity
+        .unwrap();
+    assert_eq!(opportunity.interface.as_deref(), Some("eth-ready"));
+}
+
+#[test]
 fn outage_defers_trigger_until_success_then_expires_at_ttl() {
     let root = TempDir::new().unwrap();
     let mut scheduler =
@@ -344,6 +411,7 @@ fn locate_rate_limits_persist_cooldown_defer_once_and_use_bounded_backoff() {
     let opportunity = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
         scheduled_at_utc: now,
+        interface: None,
     };
     let mut report = rate_report(RequestStage::Locate, 429, None, false);
     let events = scheduler
@@ -392,6 +460,7 @@ fn retry_after_is_exact_and_post_reservation_limit_is_not_retried() {
     let opportunity = BandwidthOpportunity {
         reason: TriggerReason::PingLoss,
         scheduled_at_utc: now,
+        interface: None,
     };
     let mut report = rate_report(
         RequestStage::WebsocketHandshake,
@@ -481,6 +550,7 @@ fn health_trigger_during_cooldown_merges_into_the_single_deferred_retry() {
     let scheduled = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
         scheduled_at_utc: now,
+        interface: None,
     };
     let mut limited = rate_report(RequestStage::Locate, 429, None, false);
     scheduler
@@ -522,11 +592,12 @@ fn five_consecutive_discovery_limits_expire_the_deferred_opportunity() {
     let mut opportunity = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
         scheduled_at_utc: now,
+        interface: None,
     };
     for attempt in 1..=5 {
         let mut limited = rate_report(RequestStage::Locate, 503, None, false);
         scheduler
-            .finish_attempt("run", now, opportunity, &mut limited)
+            .finish_attempt("run", now, opportunity.clone(), &mut limited)
             .unwrap();
         if attempt < 5 {
             assert_eq!(scheduler.snapshot().deferred_attempts, Some(attempt));

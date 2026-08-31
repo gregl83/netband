@@ -18,6 +18,7 @@ use crate::model::{
 const STATE_SCHEMA_VERSION: u8 = 1;
 const DAY_SECONDS: i64 = 86_400;
 const MAX_RATE_LIMIT_ATTEMPTS: u8 = 5;
+const DEFAULT_INTERFACE_KEY: &str = "";
 
 #[derive(Debug, Error)]
 pub enum SchedulerError {
@@ -55,8 +56,8 @@ struct ProviderState {
     cooldown_until_utc: Option<DateTime<Utc>>,
     backoff_step: u8,
     deferred: Option<DeferredOpportunity>,
-    pending_trigger: Option<PendingTrigger>,
-    trigger_latched: bool,
+    #[serde(default)]
+    interface_triggers: BTreeMap<String, InterfaceTriggerState>,
     policy_daily_max: u32,
     policy_min_spacing_ms: u64,
     policy_slot_jitter_pct: u8,
@@ -67,6 +68,8 @@ struct ProviderState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeferredOpportunity {
     reason: TriggerReason,
+    #[serde(default)]
+    interface: Option<String>,
     created_at_utc: DateTime<Utc>,
     expires_at_utc: DateTime<Utc>,
     rate_limit_attempts: u8,
@@ -77,6 +80,12 @@ struct PendingTrigger {
     reason: TriggerReason,
     created_at_utc: DateTime<Utc>,
     expires_at_utc: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct InterfaceTriggerState {
+    pending: Option<PendingTrigger>,
+    latched: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,10 +144,11 @@ pub struct SchedulerAction {
     pub events: Vec<MeasurementEvent>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BandwidthOpportunity {
     pub reason: TriggerReason,
     pub scheduled_at_utc: DateTime<Utc>,
+    pub interface: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,8 +227,15 @@ impl Scheduler {
                 .deferred
                 .as_ref()
                 .map(|deferred| deferred.rate_limit_attempts),
-            pending_trigger: state.pending_trigger.as_ref().map(|trigger| trigger.reason),
-            trigger_latched: state.trigger_latched,
+            pending_trigger: state
+                .interface_triggers
+                .get(DEFAULT_INTERFACE_KEY)
+                .and_then(|trigger| trigger.pending.as_ref())
+                .map(|trigger| trigger.reason),
+            trigger_latched: state
+                .interface_triggers
+                .get(DEFAULT_INTERFACE_KEY)
+                .is_some_and(|trigger| trigger.latched),
         }
     }
 
@@ -228,9 +245,21 @@ impl Scheduler {
         now: DateTime<Utc>,
         decision: HealthDecision,
     ) -> Result<Vec<MeasurementEvent>, SchedulerError> {
+        self.observe_interface_health(run_id, now, None, decision)
+    }
+
+    pub fn observe_interface_health(
+        &mut self,
+        run_id: &str,
+        now: DateTime<Utc>,
+        interface: Option<&str>,
+        decision: HealthDecision,
+    ) -> Result<Vec<MeasurementEvent>, SchedulerError> {
         let mut events = self.advance_clock(run_id, now)?;
         match decision {
-            HealthDecision::Degraded { reason, snapshot } if !self.state().trigger_latched => {
+            HealthDecision::Degraded { reason, snapshot }
+                if !self.interface_trigger(interface).latched =>
+            {
                 let trigger_reason = match reason {
                     DegradationReason::Rtt => TriggerReason::PingRtt,
                     DegradationReason::Loss | DegradationReason::LossAndRtt => {
@@ -238,20 +267,27 @@ impl Scheduler {
                     }
                 };
                 let expires_at = add_duration(now, self.policy.pending_ttl);
-                let state = self.state_mut();
-                state.trigger_latched = true;
-                if let Some(deferred) = state.deferred.as_mut() {
+                let interface_name = interface.map(str::to_owned);
+                let has_deferred = self.state().deferred.is_some();
+                if has_deferred {
+                    let state = self.state_mut();
+                    let deferred = state.deferred.as_mut().expect("deferred exists");
                     deferred.reason = trigger_reason;
-                    state.pending_trigger = None;
+                    deferred.interface.clone_from(&interface_name);
+                }
+                let trigger = self.interface_trigger_mut(interface);
+                trigger.latched = true;
+                trigger.pending = if has_deferred {
+                    None
                 } else {
-                    state.pending_trigger = Some(PendingTrigger {
+                    Some(PendingTrigger {
                         reason: trigger_reason,
                         created_at_utc: now,
                         expires_at_utc: expires_at,
-                    });
-                }
+                    })
+                };
                 self.persist()?;
-                let decision_text = if self.state().deferred.is_some() {
+                let decision_text = if has_deferred {
                     "trigger_merged_with_deferred"
                 } else {
                     "trigger_pending"
@@ -261,7 +297,7 @@ impl Scheduler {
                     now,
                     Outcome::Deferred,
                     trigger_reason,
-                    EventContext::NONE,
+                    EventContext::for_interface(interface),
                     format!(
                         "decision={decision_text} loss_pct={:.3} p95_rtt_ms={} expires_at={}",
                         snapshot.loss_pct,
@@ -273,12 +309,13 @@ impl Scheduler {
                 ));
             }
             HealthDecision::Recovered(_) => {
-                let pending = self.state().pending_trigger.clone();
-                let was_latched = self.state().trigger_latched;
+                let trigger = self.interface_trigger(interface).clone();
+                let pending = trigger.pending;
+                let was_latched = trigger.latched;
                 if pending.is_some() || was_latched {
-                    let state = self.state_mut();
-                    state.pending_trigger = None;
-                    state.trigger_latched = false;
+                    let trigger = self.interface_trigger_mut(interface);
+                    trigger.pending = None;
+                    trigger.latched = false;
                     self.persist()?;
                 }
                 if let Some(pending) = pending {
@@ -287,7 +324,7 @@ impl Scheduler {
                         now,
                         Outcome::Expired,
                         pending.reason,
-                        EventContext::NONE,
+                        EventContext::for_interface(interface),
                         "decision=trigger_cancelled reason=health_recovered".to_owned(),
                     ));
                 }
@@ -303,6 +340,16 @@ impl Scheduler {
         now: DateTime<Utc>,
         latest_round_has_success: bool,
     ) -> Result<SchedulerAction, SchedulerError> {
+        let health = BTreeMap::from([(DEFAULT_INTERFACE_KEY.to_owned(), latest_round_has_success)]);
+        self.poll_interfaces(run_id, now, &health)
+    }
+
+    pub fn poll_interfaces(
+        &mut self,
+        run_id: &str,
+        now: DateTime<Utc>,
+        latest_success: &BTreeMap<String, bool>,
+    ) -> Result<SchedulerAction, SchedulerError> {
         let mut events = self.advance_clock(run_id, now)?;
         if now < self.state().last_observed_utc {
             return Ok(SchedulerAction {
@@ -311,19 +358,36 @@ impl Scheduler {
             });
         }
 
-        if let Some(trigger) = self.state().pending_trigger.clone()
-            && now >= trigger.expires_at_utc
-        {
-            self.state_mut().pending_trigger = None;
+        let expired = self
+            .state()
+            .interface_triggers
+            .iter()
+            .filter_map(|(key, state)| {
+                state
+                    .pending
+                    .as_ref()
+                    .filter(|trigger| now >= trigger.expires_at_utc)
+                    .cloned()
+                    .map(|trigger| (key.clone(), trigger))
+            })
+            .collect::<Vec<_>>();
+        if !expired.is_empty() {
+            for (key, _) in &expired {
+                if let Some(trigger) = self.state_mut().interface_triggers.get_mut(key) {
+                    trigger.pending = None;
+                }
+            }
             self.persist()?;
-            events.push(self.event(
-                run_id,
-                now,
-                Outcome::Expired,
-                trigger.reason,
-                EventContext::NONE,
-                "decision=trigger_expired reason=ttl".to_owned(),
-            ));
+            for (key, trigger) in expired {
+                events.push(self.event(
+                    run_id,
+                    now,
+                    Outcome::Expired,
+                    trigger.reason,
+                    EventContext::for_interface(interface_from_key(&key)),
+                    "decision=trigger_expired reason=ttl".to_owned(),
+                ));
+            }
         }
 
         if let Some(deferred) = self.state().deferred.clone() {
@@ -349,6 +413,7 @@ impl Scheduler {
                     opportunity: Some(BandwidthOpportunity {
                         reason: deferred.reason,
                         scheduled_at_utc: deferred.created_at_utc,
+                        interface: deferred.interface,
                     }),
                     events,
                 });
@@ -363,19 +428,16 @@ impl Scheduler {
             .filter(|slot| *slot <= now)
             .collect::<Vec<_>>();
         let due_slot = due_slots.first().copied();
-        let pending = self.state().pending_trigger.clone();
-        let reason = pending.as_ref().map(|trigger| trigger.reason);
+        let pending = self.oldest_eligible_pending_trigger(latest_success, due_slot.is_some());
+        let reason = pending.as_ref().map(|(_, trigger)| trigger.reason);
+        let pending_interface = pending
+            .as_ref()
+            .and_then(|(key, _)| interface_from_key(key).map(str::to_owned));
         let scheduled_at = pending
             .as_ref()
-            .map(|trigger| trigger.created_at_utc)
+            .map(|(_, trigger)| trigger.created_at_utc)
             .or(due_slot);
 
-        if reason.is_some() && !latest_round_has_success && due_slot.is_none() {
-            return Ok(SchedulerAction {
-                opportunity: None,
-                events,
-            });
-        }
         let Some(scheduled_at) = scheduled_at else {
             return Ok(SchedulerAction {
                 opportunity: None,
@@ -389,22 +451,26 @@ impl Scheduler {
             }
             let terminal = matches!(blocked.kind, ErrorKind::DailyCap)
                 || add_duration(now, self.policy.min_spacing) >= day_end(now.date_naive());
-            if terminal && self.state().pending_trigger.is_some() {
-                self.state_mut().pending_trigger = None;
+            if terminal && pending.is_some() {
+                self.interface_trigger_mut(pending_interface.as_deref())
+                    .pending = None;
             }
             self.persist()?;
-            events.push(self.event(
-                run_id,
-                now,
-                if terminal {
-                    Outcome::Suppressed
-                } else {
-                    Outcome::Deferred
-                },
-                reason,
-                EventContext::new(Some(blocked.kind), blocked.cooldown_until),
-                blocked.message,
-            ));
+            events.push(
+                self.event(
+                    run_id,
+                    now,
+                    if terminal {
+                        Outcome::Suppressed
+                    } else {
+                        Outcome::Deferred
+                    },
+                    reason,
+                    EventContext::new(Some(blocked.kind), blocked.cooldown_until)
+                        .with_interface(pending_interface.as_deref()),
+                    blocked.message,
+                ),
+            );
             return Ok(SchedulerAction {
                 opportunity: None,
                 events,
@@ -432,6 +498,7 @@ impl Scheduler {
             opportunity: Some(BandwidthOpportunity {
                 reason,
                 scheduled_at_utc: scheduled_at,
+                interface: pending_interface,
             }),
             events,
         })
@@ -514,6 +581,7 @@ impl Scheduler {
                         && deadline < day_deadline)
                         .then_some(DeferredOpportunity {
                             reason: opportunity.reason,
+                            interface: opportunity.interface.clone(),
                             created_at_utc: opportunity.scheduled_at_utc,
                             expires_at_utc: day_deadline,
                             rate_limit_attempts: attempts,
@@ -521,8 +589,9 @@ impl Scheduler {
                 } else {
                     state.deferred = None;
                 }
-                state.pending_trigger = None;
             }
+            self.interface_trigger_mut(opportunity.interface.as_deref())
+                .pending = None;
             self.replan_remaining(now);
             self.persist()?;
             events.push(self.event(
@@ -534,7 +603,8 @@ impl Scheduler {
                     Outcome::Deferred
                 },
                 opportunity.reason,
-                EventContext::new(Some(ErrorKind::ProviderCooldown), Some(deadline)),
+                EventContext::new(Some(ErrorKind::ProviderCooldown), Some(deadline))
+                    .with_interface(opportunity.interface.as_deref()),
                 format!(
                     "decision=rate_limit stage={} status={} retry_after={} reserved={} deferred_attempts={}",
                     stage_text(rate_limit.stage),
@@ -559,11 +629,12 @@ impl Scheduler {
             });
             let state = self.state_mut();
             state.deferred = None;
-            state.pending_trigger = None;
             if successful_request {
                 state.cooldown_until_utc = None;
                 state.backoff_step = 0;
             }
+            self.interface_trigger_mut(opportunity.interface.as_deref())
+                .pending = None;
             if opportunity.reason != TriggerReason::Scheduled {
                 self.replan_remaining(now);
             } else if reserved {
@@ -593,8 +664,7 @@ impl Scheduler {
                 cooldown_until_utc: None,
                 backoff_step: 0,
                 deferred: None,
-                pending_trigger: None,
-                trigger_latched: false,
+                interface_triggers: BTreeMap::new(),
                 policy_daily_max: self.policy.daily_max,
                 policy_min_spacing_ms: duration_millis(self.policy.min_spacing),
                 policy_slot_jitter_pct: self.policy.slot_jitter_pct,
@@ -622,7 +692,7 @@ impl Scheduler {
             state.policy_slot_jitter_pct = slot_jitter_pct;
             if daily_max == 0 {
                 state.slots.clear();
-                state.pending_trigger = None;
+                state.interface_triggers.clear();
                 state.deferred = None;
             } else {
                 self.replan_remaining(now);
@@ -672,8 +742,7 @@ impl Scheduler {
         state.day_utc = day;
         state.runs.retain(|run| run.date_naive() >= day);
         state.deferred = None;
-        state.pending_trigger = None;
-        state.trigger_latched = false;
+        state.interface_triggers.clear();
         state.cooldown_until_utc = state.cooldown_until_utc.filter(|deadline| *deadline > now);
         state.slots = plan_full_day(state, &policy, now);
     }
@@ -770,6 +839,42 @@ impl Scheduler {
         self.state_mut().slots.retain(|candidate| *candidate > now);
     }
 
+    fn interface_trigger(&self, interface: Option<&str>) -> InterfaceTriggerState {
+        self.state()
+            .interface_triggers
+            .get(interface_key(interface))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn interface_trigger_mut(&mut self, interface: Option<&str>) -> &mut InterfaceTriggerState {
+        self.state_mut()
+            .interface_triggers
+            .entry(interface_key(interface).to_owned())
+            .or_default()
+    }
+
+    fn oldest_eligible_pending_trigger(
+        &self,
+        latest_success: &BTreeMap<String, bool>,
+        allow_without_success: bool,
+    ) -> Option<(String, PendingTrigger)> {
+        self.state()
+            .interface_triggers
+            .iter()
+            .filter_map(|(key, state)| {
+                if !allow_without_success && !latest_success.get(key).copied().unwrap_or(false) {
+                    return None;
+                }
+                state
+                    .pending
+                    .as_ref()
+                    .cloned()
+                    .map(|pending| (key.clone(), pending))
+            })
+            .min_by_key(|(_, pending)| pending.created_at_utc)
+    }
+
     fn state(&self) -> &ProviderState {
         self.store
             .providers
@@ -805,6 +910,7 @@ impl Scheduler {
         event.trigger_reason = Some(reason);
         event.provider_id = Some(self.policy.provider_id.clone());
         event.provider_kind = Some(self.policy.provider_kind);
+        event.interface = context.interface;
         event.rate_limit_until_utc = context.cooldown_until;
         event.daily_runs_used = Some(runs_on_day(self.state(), now.date_naive()));
         event.error_kind = context.error_kind;
@@ -834,24 +940,44 @@ struct BlockReason {
     message: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct EventContext {
     error_kind: Option<ErrorKind>,
     cooldown_until: Option<DateTime<Utc>>,
+    interface: Option<String>,
 }
 
 impl EventContext {
     const NONE: Self = Self {
         error_kind: None,
         cooldown_until: None,
+        interface: None,
     };
 
     const fn new(error_kind: Option<ErrorKind>, cooldown_until: Option<DateTime<Utc>>) -> Self {
         Self {
             error_kind,
             cooldown_until,
+            interface: None,
         }
     }
+
+    fn for_interface(interface: Option<&str>) -> Self {
+        Self::NONE.with_interface(interface)
+    }
+
+    fn with_interface(mut self, interface: Option<&str>) -> Self {
+        self.interface = interface.map(str::to_owned);
+        self
+    }
+}
+
+fn interface_key(interface: Option<&str>) -> &str {
+    interface.unwrap_or(DEFAULT_INTERFACE_KEY)
+}
+
+fn interface_from_key(key: &str) -> Option<&str> {
+    (!key.is_empty()).then_some(key)
 }
 
 #[derive(Debug, Clone, Copy)]
