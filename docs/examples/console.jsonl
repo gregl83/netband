@@ -1,0 +1,2 @@
+{"schema_version":1,"run_id":"example-run","event_id":"ping:1","event_kind":"ping_probe","finished_at_utc":"2026-08-30T12:00:00.010Z","interface":"eth0","target":"1.1.1.1","outcome":"success","rtt_ms":10.25}
+{"schema_version":1,"run_id":"example-run","event_id":"bandwidth:1","event_kind":"bandwidth","finished_at_utc":"2026-08-30T12:01:00.000Z","provider_kind":"direct","server":"wss://ndt.operator.example.invalid/ndt/v7/download","outcome":"success","download_mbps":123.45,"upload_mbps":24.5}

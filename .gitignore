@@ -23,6 +23,11 @@ target
 # Agents
 .agents
 
+# Netband runtime data
+.netband-state/
+/netband-*.csv
+/release-live.csv
+
 
 # Added by cargo
 

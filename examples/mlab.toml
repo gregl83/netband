@@ -1,0 +1,8 @@
+output = "netband.csv"
+state_file = ".netband-state/scheduler.json"
+
+[bandwidth]
+provider = "mlab"
+daily_max = 4
+min_spacing = "36m"
+accept_mlab_policy = false

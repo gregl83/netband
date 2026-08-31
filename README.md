@@ -1,33 +1,117 @@
 [![Build](https://github.com/gregl83/netband/actions/workflows/ci.yml/badge.svg)](https://github.com/gregl83/netband/actions/workflows/ci.yml)
-[![Coverage Status](https://codecov.io/gh/gregl83/netband/graph/badge.svg?token=S9vGTwnOw6)](https://codecov.io/gh/gregl83/netband)
 [![Crates.io](https://img.shields.io/crates/v/netband.svg)](https://crates.io/crates/netband)
-[![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/gregl83/netband/blob/master/LICENSE)
-
+[![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 <p align="center"><img src="/assets/netband.svg" alt="netband" width="400" /></p>
 
 # netband
 
-Network bandwidth monitoring utility.
+Netband is a Linux-first command-line monitor that records latency, packet loss, and
+NDT7 bandwidth measurements in a durable CSV journal. It is built for unattended home
+lab and Raspberry Pi monitoring, especially when intermittent failures disappear
+before a manual speed test can capture them.
 
-Netband is a planned Linux-first daemon that records network health over time, making
-intermittent connection problems easier to identify and analyze.
+## Five-minute quick start
 
-## Features
+Prerequisites are Linux x86_64 or aarch64, Rust 1.98 or newer, and permission to create
+ICMP sockets. Git is needed for a source checkout. No bandwidth traffic is sent until
+M-Lab consent is accepted or a direct NDT7 provider is configured.
 
-- Continuous latency and packet-loss measurements against multiple ping targets.
-- NDT7 bandwidth tests using M-Lab or a directly configured server.
-- Bandwidth tests triggered by degraded ping results or a jittered schedule.
-- Provider-aware daily limits, cooldowns, and rate-limit handling.
-- Fair, non-overlapping monitoring across multiple network interfaces.
-- Detailed CSV history with optional human-readable or JSON Lines console output.
-- Graceful command-line and systemd daemon operation.
+```sh
+git clone https://github.com/gregl83/netband.git
+cd netband
+cargo build --release --locked
+./target/release/netband config check
+```
 
-Designed for home labs, Raspberry Pis, and networks where failures disappear before a
-manual speed test can capture them.
+Run one ping round and inspect the authoritative CSV:
 
-Direct NDT7 connections use verified TLS by default. `--allow-insecure-ndt` permits
-unencrypted `ws://` only for explicitly trusted private networks.
+```sh
+./target/release/netband --output netband.csv once ping
+head -n 3 netband.csv
+```
+
+Start foreground ping monitoring without bandwidth tests:
+
+```sh
+./target/release/netband --output netband.csv --no-bandwidth run
+```
+
+Stop it with `Ctrl-C`. Netband flushes completed measurements before exiting. To test
+bandwidth through M-Lab, first review [Netband privacy](PRIVACY.md), the
+[M-Lab acceptable-use policy](https://www.measurementlab.net/aup/), and the
+[M-Lab privacy policy](https://www.measurementlab.net/privacy/). Consent is explicit:
+
+```sh
+./target/release/netband --output netband.csv --accept-mlab-policy once bandwidth
+```
+
+The command consumes one of M-Lab's maximum four automated runs per UTC day. Netband
+persists that allowance across restarts and manual commands.
+
+## Output channels
+
+| Command/mode | Measurement CSV | stdout presentation | Operational stderr |
+| --- | --- | --- | --- |
+| `run` default (`auto`) | Authoritative | Human on a TTY; off when redirected | Logs |
+| `once ...` default (`human`) | Authoritative | Concise human result | Logs |
+| `--console human` | Authoritative | Concise human result | Logs |
+| `--console jsonl` | Authoritative | Versioned JSON Lines | Logs |
+| `--console off` | Authoritative | Disabled | Logs |
+| systemd example | Authoritative | Explicitly disabled | journald |
+
+CSV is the source of truth. Human and JSONL stdout are independent, best-effort live
+views. JSONL uses `schema_version=1`, but records may be dropped or the stream may stop
+under backpressure or a broken pipe without affecting CSV or service health.
+
+```sh
+# Interactive human output
+netband --output netband.csv --console human once ping
+
+# Independently parse the live JSONL view
+netband --output netband.csv --console jsonl once ping | jq -c .
+
+# Quiet measurement with only the CSV and operational log retained
+netband --output netband.csv --console off once ping 2>netband.log
+
+# Keep all three channels separate
+netband --output netband.csv --console jsonl once ping >events.jsonl 2>netband.log
+```
+
+## Configuration
+
+Copy [examples/netband.toml](examples/netband.toml), adjust its relative output paths,
+and validate it without sending probes:
+
+```sh
+netband --config examples/netband.toml config check
+```
+
+CLI values override TOML values; repeated CLI targets and interfaces replace their
+TOML lists. The complete option/default table and direct-provider examples are in
+[Configuration and providers](docs/configuration.md).
+
+Netband supports M-Lab discovery and operator-supplied NDT7 servers. Direct endpoints
+use verified TLS by default. Plain `ws://` requires `--allow-insecure-ndt` and is only
+appropriate on an explicitly trusted private network. Netband does not provide or
+imply a public Akamai NDT7 endpoint; CDN-hosted servers must be authorized and supplied
+by their operator.
+
+## Running as a service
+
+The reviewed [systemd unit](packaging/netband.service) uses a non-root dynamic user,
+keeps measurements out of journald, and grants only `CAP_NET_RAW`. Installation,
+ICMP permission setup, exit codes, state recovery, and troubleshooting are documented
+in [Service operation](docs/service.md).
+
+## Reference
+
+- [Configuration and providers](docs/configuration.md)
+- [CSV schema and outcomes](docs/data-format.md)
+- [Scheduling, triggers, cooldowns, and fairness](docs/scheduling.md)
+- [Privacy and provider data](PRIVACY.md)
+- [Service operation and recovery](docs/service.md)
+- [Release validation](docs/release.md)
 
 ## License
 

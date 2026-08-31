@@ -1,8 +1,9 @@
-console = "off"
+# Complete Netband configuration using the v1 defaults.
+console = "auto"
 verbosity = "info"
 interfaces = []
-output = "/var/lib/netband/netband.csv"
-state_file = "/var/lib/netband/scheduler.json"
+output = "netband.csv"
+state_file = ".netband-state/scheduler.json"
 shutdown_grace = "30s"
 
 [ping]
@@ -17,12 +18,15 @@ min_spacing = "36m"
 slot_jitter_pct = 50
 whole_test_timeout = "55s"
 shutdown_margin = "15s"
+# Change only after reviewing PRIVACY.md and both linked M-Lab policies.
 accept_mlab_policy = false
 
 [bandwidth.trigger]
 window_rounds = 6
 min_samples = 6
 loss_threshold_pct = 50.0
+# Uncomment to trigger on p95 latency as well as loss.
+# rtt_threshold_ms = 250.0
 recovery_loss_pct = 10.0
 recovery_rounds = 3
 pending_ttl = "30m"

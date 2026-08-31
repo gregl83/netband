@@ -1,0 +1,11 @@
+output = "netband.csv"
+state_file = ".netband-state/scheduler.json"
+
+[bandwidth]
+provider = "direct"
+daily_max = 8
+min_spacing = "90m"
+
+[bandwidth.direct]
+# RFC 2606's .invalid suffix ensures this documentation endpoint cannot be real.
+target = "ndt.operator.example.invalid:443"

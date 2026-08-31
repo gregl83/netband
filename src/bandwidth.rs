@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::io::{self, BufReader};
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
 use thiserror::Error;
@@ -997,11 +997,10 @@ fn tls_roots(ca_cert: Option<&std::path::Path>) -> Result<RootCertStore, String>
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if let Some(path) = ca_cert {
-        let file = std::fs::File::open(path)
+        let contents = std::fs::read(path)
             .map_err(|error| format!("cannot read private CA {}: {error}", path.display()))?;
-        let mut reader = BufReader::new(file);
         let mut found = false;
-        for certificate in rustls_pemfile::certs(&mut reader) {
+        for certificate in CertificateDer::pem_slice_iter(&contents) {
             let certificate = certificate
                 .map_err(|error| format!("invalid private CA {}: {error}", path.display()))?;
             roots
