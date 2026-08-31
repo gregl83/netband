@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
@@ -160,6 +160,82 @@ fn explicit_files_append_with_one_header_and_reject_mismatch() {
     drop(journal);
     let contents = fs::read_to_string(bare_header).unwrap();
     assert!(contents.starts_with(&format!("{CSV_HEADER}\r\n1,")));
+}
+
+#[test]
+fn explicit_file_recovers_only_an_unterminated_trailing_record() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("recovered.csv");
+    let output = OutputTarget::File(path.clone());
+
+    let (mut journal, _) = Journal::open_at(&output, timestamp(0)).unwrap();
+    journal
+        .append_batch(&[fixture_events()[0].clone()])
+        .unwrap();
+    drop(journal);
+    let complete = fs::read(&path).unwrap();
+
+    let mut staged = Journal::from_writer(Vec::new()).unwrap();
+    let mut partial_event = fixture_events()[4].clone();
+    partial_event.error_message = Some("quoted, trailing value".into());
+    staged.append_batch(&[partial_event]).unwrap();
+    let staged = staged.into_inner().unwrap();
+    let row_start = staged
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .unwrap()
+        + 2;
+    let partial = &staged[row_start..staged.len() - 8];
+    let partial_record = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(partial)
+        .byte_records()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(partial_record.len(), 40);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(partial)
+        .unwrap();
+
+    let (mut recovered, _) = Journal::open_at(&output, timestamp(1)).unwrap();
+    recovered
+        .append_batch(&[fixture_events()[1].clone()])
+        .unwrap();
+    drop(recovered);
+
+    let bytes = fs::read(&path).unwrap();
+    let common_prefix = bytes
+        .iter()
+        .zip(&complete)
+        .take_while(|(left, right)| left == right)
+        .count();
+    assert!(
+        bytes.starts_with(&complete),
+        "journal changed at byte {common_prefix}; original={} recovered={} original_byte={:?} recovered_byte={:?}",
+        complete.len(),
+        bytes.len(),
+        complete.get(common_prefix),
+        bytes.get(common_prefix)
+    );
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    let records = reader
+        .byte_records()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(records.len(), 2);
+
+    let corrupt = dir.path().join("corrupt.csv");
+    fs::write(&corrupt, format!("{CSV_HEADER}\r\nbroken,row\r\n")).unwrap();
+    let before = fs::read(&corrupt).unwrap();
+    assert!(matches!(
+        Journal::open_at(&OutputTarget::File(corrupt.clone()), timestamp(2)),
+        Err(JournalError::Corrupt(path)) if path == corrupt
+    ));
+    assert_eq!(fs::read(corrupt).unwrap(), before);
 }
 
 #[test]

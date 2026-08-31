@@ -63,6 +63,8 @@ pub enum JournalError {
     Csv(#[from] csv::Error),
     #[error("existing output has an incompatible v1 CSV header: {0}")]
     Header(PathBuf),
+    #[error("existing output contains a malformed v1 CSV record: {0}")]
+    Corrupt(PathBuf),
     #[error("output file is already locked by another Netband process: {0}")]
     Locked(PathBuf),
 }
@@ -144,13 +146,14 @@ impl Journal<File> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(path)?;
         lock_file(&file, path)?;
         let empty = file.metadata()?.len() == 0;
         if !empty {
             validate_header(&mut file, path)?;
-            ensure_record_boundary(&mut file)?;
+            recover_trailing_record(&mut file, path)?;
         }
         file.seek(SeekFrom::End(0))?;
         let mut journal = if empty {
@@ -201,13 +204,65 @@ fn validate_header(file: &mut File, path: &Path) -> Result<(), JournalError> {
     Ok(())
 }
 
-fn ensure_record_boundary(file: &mut File) -> Result<(), JournalError> {
+fn recover_trailing_record(file: &mut File, path: &Path) -> Result<(), JournalError> {
+    let length = file.metadata()?.len();
+    if length == CSV_HEADER.len() as u64 {
+        file.write_all(b"\r\n")?;
+        file.sync_data()?;
+        return Ok(());
+    }
+
     file.seek(SeekFrom::End(-1))?;
     let mut last = [0];
     file.read_exact(&mut last)?;
-    if last[0] != b'\n' {
-        file.write_all(b"\r\n")?;
-        file.flush()?;
+    let terminated = matches!(last[0], b'\n' | b'\r');
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(&mut *file);
+    let mut record = csv::ByteRecord::new();
+    let mut record_number = 0_u64;
+    let mut truncate_at = None;
+    while reader.read_byte_record(&mut record)? {
+        let start = record
+            .position()
+            .map_or_else(|| reader.position().byte(), csv::Position::byte);
+        let end = reader.position().byte();
+        let structurally_valid = record.len() == CSV_FIELDS.len()
+            && record
+                .iter()
+                .all(|field| std::str::from_utf8(field).is_ok());
+
+        if record_number > 0 && !structurally_valid {
+            if !terminated && end == length {
+                truncate_at = Some(start);
+                break;
+            }
+            return Err(JournalError::Corrupt(path.to_path_buf()));
+        }
+        if record_number > 0 && !terminated && end == length {
+            truncate_at = Some(start);
+            break;
+        }
+        record_number += 1;
+    }
+    drop(reader);
+
+    if let Some(mut offset) = truncate_at {
+        file.seek(SeekFrom::Start(offset))?;
+        let mut boundary = [0];
+        if file.read(&mut boundary)? == 1 && boundary[0] == b'\n' {
+            offset += 1;
+        }
+        file.set_len(offset)?;
+        file.sync_data()?;
+        tracing::warn!(
+            path = %path.display(),
+            truncated_bytes = length - offset,
+            "discarded incomplete trailing CSV record"
+        );
     }
     Ok(())
 }
