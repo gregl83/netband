@@ -138,6 +138,33 @@ async fn worker_writes_jsonl_and_drains_on_shutdown() {
     assert_eq!(output.lines().count(), 2);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn async_writer_recovers_after_pipe_backpressure_clears() {
+    let measurement = event(EventKind::PingProbe, Outcome::Success);
+    let expected_line = render_jsonl(&measurement).unwrap();
+    assert!(expected_line.len() > 64);
+
+    let (writer, mut reader) = tokio::io::duplex(64);
+    let console = Console::spawn(ConsoleMode::Jsonl, writer, 8, |_| {});
+    console.offer(&measurement);
+    console.offer(&measurement);
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!console.stats().disabled);
+
+    let reader_task = tokio::spawn(async move {
+        let mut output = String::new();
+        reader.read_to_string(&mut output).await.unwrap();
+        output
+    });
+    let stats = console.shutdown(Duration::from_secs(1)).await;
+    let output = reader_task.await.unwrap();
+
+    assert!(!stats.disabled);
+    assert_eq!(stats.dropped_events, 0);
+    assert_eq!(output, expected_line.repeat(2));
+}
+
 struct PendingWriter;
 
 impl AsyncWrite for PendingWriter {
