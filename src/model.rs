@@ -231,6 +231,14 @@ pub fn sanitize_message(value: &str) -> String {
             };
             let start = search_from + offset;
             let value_start = start + key.len();
+            if sanitized[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+            {
+                search_from = value_start;
+                continue;
+            }
             let value_end = sanitized[value_start..]
                 .find(|character: char| {
                     character.is_whitespace() || matches!(character, '&' | ',' | ';' | '"' | '\'')
