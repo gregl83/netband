@@ -38,7 +38,8 @@ use crate::scheduler::{BandwidthOpportunity, ManualDecision, Scheduler, Schedule
 const NDT7_SUBPROTOCOL: &str = "net.measurementlab.ndt.v7";
 const MAX_RESOLVED_ADDRESSES: usize = 8;
 const MAX_MESSAGE_SIZE: usize = 1 << 24;
-const UPLOAD_MESSAGE_SIZE: usize = 1 << 13;
+const INITIAL_UPLOAD_MESSAGE_SIZE: usize = 1 << 13;
+const UPLOAD_SCALING_FRACTION: u64 = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -668,7 +669,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         mut failures,
     } = connected;
     let (mut sender, mut receiver) = socket.split();
-    let payload = Message::Binary(upload_payload().into());
+    let mut payload = Message::Binary(upload_payload().into());
     let started = Instant::now();
     let mut bytes = 0_u64;
     let mut metrics = TcpMetrics::default();
@@ -695,7 +696,12 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
                 None => break,
             },
             sent = send_upload_payload(&mut sender, payload.clone(), &mut bytes) => match sent {
-                Ok(()) => {}
+                Ok(()) => {
+                    let next_size = next_upload_message_size(payload.len(), bytes);
+                    if next_size != payload.len() {
+                        payload = Message::Binary(upload_payload_with_size(next_size).into());
+                    }
+                }
                 Err(error) => {
                     failures.push(stream_failure(candidate, RequestStage::Upload, remote_ip, source_ip, error.to_string(), websocket_os_error(&error)));
                     break;
@@ -1299,8 +1305,23 @@ fn update_metrics(metrics: &mut TcpMetrics, text: &str) {
     }
 }
 
+fn next_upload_message_size(current_size: usize, total_bytes: u64) -> usize {
+    // Follow the adaptive sizing algorithm from the NDT7 specification appendix.
+    if current_size >= MAX_MESSAGE_SIZE
+        || current_size as u64 >= total_bytes / UPLOAD_SCALING_FRACTION
+    {
+        current_size
+    } else {
+        current_size.saturating_mul(2).min(MAX_MESSAGE_SIZE)
+    }
+}
+
 fn upload_payload() -> Vec<u8> {
-    let mut payload = vec![0_u8; UPLOAD_MESSAGE_SIZE];
+    upload_payload_with_size(INITIAL_UPLOAD_MESSAGE_SIZE)
+}
+
+fn upload_payload_with_size(size: usize) -> Vec<u8> {
+    let mut payload = vec![0_u8; size];
     let mut state = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64 | 1;
     for byte in &mut payload {
         state ^= state << 13;
@@ -1331,7 +1352,10 @@ mod tests {
     use futures_util::{Sink, SinkExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    use super::{UPLOAD_MESSAGE_SIZE, send_upload_payload};
+    use super::{
+        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_MESSAGE_SIZE, next_upload_message_size,
+        send_upload_payload, upload_payload,
+    };
 
     #[derive(Debug, Default)]
     struct PendingFlushSink {
@@ -1382,11 +1406,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn upload_payload_starts_at_the_ndt7_initial_size() {
+        assert_eq!(upload_payload().len(), INITIAL_UPLOAD_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn upload_message_size_follows_ndt7_growth_boundaries_and_cap() {
+        let threshold = (INITIAL_UPLOAD_MESSAGE_SIZE * 16) as u64;
+        assert_eq!(
+            next_upload_message_size(INITIAL_UPLOAD_MESSAGE_SIZE, threshold),
+            INITIAL_UPLOAD_MESSAGE_SIZE
+        );
+        assert_eq!(
+            next_upload_message_size(INITIAL_UPLOAD_MESSAGE_SIZE, threshold + 15),
+            INITIAL_UPLOAD_MESSAGE_SIZE
+        );
+        assert_eq!(
+            next_upload_message_size(INITIAL_UPLOAD_MESSAGE_SIZE, threshold + 16),
+            INITIAL_UPLOAD_MESSAGE_SIZE * 2
+        );
+
+        let half_max = MAX_MESSAGE_SIZE / 2;
+        assert_eq!(
+            next_upload_message_size(half_max, (half_max * 16) as u64 + 16),
+            MAX_MESSAGE_SIZE
+        );
+        assert_eq!(
+            next_upload_message_size(MAX_MESSAGE_SIZE, u64::MAX),
+            MAX_MESSAGE_SIZE
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn accepted_payload_is_accounted_before_a_pending_flush_can_be_cancelled() {
         let mut sink = PendingFlushSink::default();
         let mut bytes = 0_u64;
-        let payload = Message::Binary(vec![7_u8; UPLOAD_MESSAGE_SIZE].into());
+        let payload = Message::Binary(vec![7_u8; INITIAL_UPLOAD_MESSAGE_SIZE].into());
 
         let mut operation = Box::pin(send_upload_payload(&mut sink, payload, &mut bytes));
         assert!(matches!(futures_util::poll!(&mut operation), Poll::Pending));
@@ -1394,7 +1450,7 @@ mod tests {
 
         assert_eq!(sink.flush_polls, 1, "the operation must reach flush");
         assert_eq!(sink.accepted_frames, 1);
-        assert_eq!(sink.accepted_bytes, UPLOAD_MESSAGE_SIZE);
+        assert_eq!(sink.accepted_bytes, INITIAL_UPLOAD_MESSAGE_SIZE);
         assert_eq!(bytes, sink.accepted_bytes as u64);
 
         sink.flush_ready = true;

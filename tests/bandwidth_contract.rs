@@ -120,6 +120,32 @@ async fn successful_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<(
     (address, task)
 }
 
+async fn upload_size_server(
+    frame_count: usize,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<usize>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (download, _) = listener.accept().await.unwrap();
+        serve_download(download).await;
+
+        let (upload, _) = listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(upload, accept_protocol).await.unwrap();
+        let mut sizes = Vec::with_capacity(frame_count);
+        while sizes.len() < frame_count {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Binary(payload) => sizes.push(payload.len()),
+                Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
+                _ => {}
+            }
+        }
+        socket.send(Message::Text(METRICS.into())).await.unwrap();
+        socket.close(None).await.unwrap();
+        sizes
+    });
+    (address, task)
+}
+
 fn tls_material(root: &std::path::Path) -> (PathBuf, Arc<ServerConfig>) {
     let CertifiedKey { cert, key_pair } =
         generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
@@ -223,6 +249,21 @@ async fn direct_download_and_upload_produce_attributed_bandwidth_result() {
     assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5));
     assert_eq!(bandwidth.tcp_retransmissions, Some(7));
     assert!(!format!("{bandwidth:?}").contains("download-secret"));
+}
+
+#[tokio::test]
+async fn upload_messages_scale_at_ndt7_boundaries() {
+    let (address, server) = upload_size_server(26).await;
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "run-upload-scaling", shutdown).await;
+    let sizes = server.await.unwrap();
+
+    assert_eq!(report.outcome, Outcome::Success);
+    assert!(sizes[..17].iter().all(|size| *size == 8 * 1024));
+    assert!(sizes[17..25].iter().all(|size| *size == 16 * 1024));
+    assert_eq!(sizes[25], 32 * 1024);
 }
 
 #[tokio::test]
