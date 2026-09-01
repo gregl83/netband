@@ -13,6 +13,26 @@ use netband::model::{
 };
 use tokio::io::{AsyncReadExt, AsyncWrite};
 
+#[cfg(target_os = "linux")]
+#[test]
+fn service_stdout_does_not_change_inherited_descriptor_flags() {
+    fn stdout_flags() -> String {
+        std::fs::read_to_string("/proc/self/fdinfo/1")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("flags:"))
+            .unwrap()
+            .to_owned()
+    }
+
+    let before = stdout_flags();
+    let writer = netband::console::service_stdout();
+    let after = stdout_flags();
+    drop(writer);
+
+    assert_eq!(after, before);
+}
+
 fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
     MeasurementEvent::new(
         "run-1",

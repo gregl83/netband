@@ -893,7 +893,6 @@ dependencies = [
  "httpdate",
  "humantime",
  "if-addrs",
- "libc",
  "rcgen",
  "reqwest",
  "rustls",
