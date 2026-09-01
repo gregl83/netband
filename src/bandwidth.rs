@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
@@ -694,8 +694,8 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
                 }
                 None => break,
             },
-            sent = sender.send(payload.clone()) => match sent {
-                Ok(()) => bytes = bytes.saturating_add(UPLOAD_MESSAGE_SIZE as u64),
+            sent = send_upload_payload(&mut sender, payload.clone(), &mut bytes) => match sent {
+                Ok(()) => {}
                 Err(error) => {
                     failures.push(stream_failure(candidate, RequestStage::Upload, remote_ip, source_ip, error.to_string(), websocket_os_error(&error)));
                     break;
@@ -740,6 +740,22 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         }),
         failures,
     }
+}
+
+async fn send_upload_payload<S>(
+    sender: &mut S,
+    payload: Message,
+    bytes: &mut u64,
+) -> Result<(), S::Error>
+where
+    S: Sink<Message> + Unpin,
+{
+    let payload_bytes = payload.len() as u64;
+    sender.feed(payload).await?;
+    // feed returns immediately after the sink accepts the frame. Account here so a
+    // concurrent inbound message cannot cancel the following flush and lose these bytes.
+    *bytes = bytes.saturating_add(payload_bytes);
+    sender.flush().await
 }
 
 struct ConnectedSocket {
@@ -1303,6 +1319,91 @@ fn provider_kind(config: &ResolvedConfig) -> ProviderKind {
     match config.bandwidth.provider {
         crate::config::ProviderConfig::Mlab(_) => ProviderKind::Mlab,
         crate::config::ProviderConfig::Direct(_) => ProviderKind::Direct,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use futures_util::{Sink, SinkExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::{UPLOAD_MESSAGE_SIZE, send_upload_payload};
+
+    #[derive(Debug, Default)]
+    struct PendingFlushSink {
+        accepted_bytes: usize,
+        accepted_frames: usize,
+        flush_polls: usize,
+        flush_ready: bool,
+        queued: bool,
+    }
+
+    impl Sink<Message> for PendingFlushSink {
+        type Error = io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.queued {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, message: Message) -> io::Result<()> {
+            assert!(!self.queued, "poll_ready must complete before start_send");
+            let Message::Binary(payload) = message else {
+                panic!("the upload helper must send a binary payload");
+            };
+            self.accepted_bytes += payload.len();
+            self.accepted_frames += 1;
+            self.queued = true;
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.flush_polls += 1;
+            if self.flush_ready {
+                self.queued = false;
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_flush(context)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_payload_is_accounted_before_a_pending_flush_can_be_cancelled() {
+        let mut sink = PendingFlushSink::default();
+        let mut bytes = 0_u64;
+        let payload = Message::Binary(vec![7_u8; UPLOAD_MESSAGE_SIZE].into());
+
+        let mut operation = Box::pin(send_upload_payload(&mut sink, payload, &mut bytes));
+        assert!(matches!(futures_util::poll!(&mut operation), Poll::Pending));
+        drop(operation);
+
+        assert_eq!(sink.flush_polls, 1, "the operation must reach flush");
+        assert_eq!(sink.accepted_frames, 1);
+        assert_eq!(sink.accepted_bytes, UPLOAD_MESSAGE_SIZE);
+        assert_eq!(bytes, sink.accepted_bytes as u64);
+
+        sink.flush_ready = true;
+        sink.flush().await.unwrap();
+        assert!(!sink.queued);
+        assert_eq!(
+            sink.accepted_frames, 1,
+            "cancellation must not resend the frame"
+        );
     }
 }
 

@@ -48,7 +48,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `daily_runs_used` | Reserved starts for this provider and UTC day |
 | `download_mbps` | NDT7 download throughput in decimal Mb/s |
 | `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
-| `bytes_sent` | Application payload bytes sent |
+| `bytes_sent` | Binary application payload bytes accepted by the WebSocket sink; excludes WebSocket and TLS overhead |
 | `bytes_received` | Application payload bytes received |
 | `tcp_min_rtt_ms` | NDT7 TCPInfo minimum RTT in milliseconds |
 | `tcp_rtt_ms` | NDT7 TCPInfo current/smoothed RTT in milliseconds |
