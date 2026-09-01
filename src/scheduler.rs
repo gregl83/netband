@@ -387,19 +387,24 @@ impl Scheduler {
         if !expired.is_empty() {
             for (key, _) in &expired {
                 if let Some(trigger) = self.state_mut().interface_triggers.get_mut(key) {
+                    // TTL discards the stale opportunity, not the degradation episode.
+                    // Recovery owns rearming so one outage cannot consume the daily allowance.
                     trigger.pending = None;
                 }
             }
             self.persist()?;
             for (key, trigger) in expired {
-                events.push(self.event(
-                    run_id,
-                    now,
-                    Outcome::Expired,
-                    trigger.reason,
-                    EventContext::for_interface(interface_from_key(&key)),
-                    "decision=trigger_expired reason=ttl".to_owned(),
-                ));
+                events.push(
+                    self.event(
+                        run_id,
+                        now,
+                        Outcome::Expired,
+                        trigger.reason,
+                        EventContext::for_interface(interface_from_key(&key)),
+                        "decision=trigger_expired reason=ttl latch=retained rearm=health_recovery"
+                            .to_owned(),
+                    ),
+                );
             }
         }
 

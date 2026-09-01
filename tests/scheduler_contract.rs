@@ -430,7 +430,7 @@ fn outage_on_one_interface_does_not_block_an_eligible_interface_trigger() {
 }
 
 #[test]
-fn outage_defers_trigger_until_success_then_expires_at_ttl() {
+fn expired_trigger_stays_latched_until_recovery_then_rearms() {
     let root = TempDir::new().unwrap();
     let mut scheduler =
         Scheduler::open_seeded(state_path(&root), &mlab(), at(30, 1, 0, 0), 21).unwrap();
@@ -446,11 +446,31 @@ fn outage_defers_trigger_until_success_then_expires_at_ttl() {
     );
     let expired = scheduler.poll("run", at(30, 1, 30, 1), false).unwrap();
     assert!(expired.opportunity.is_none());
-    assert!(
-        expired
-            .events
-            .iter()
-            .any(|event| event.outcome == Outcome::Expired)
+    assert!(expired.events.iter().any(|event| {
+        event.outcome == Outcome::Expired
+            && event.error_message.as_deref()
+                == Some("decision=trigger_expired reason=ttl latch=retained rearm=health_recovery")
+    }));
+    let after_expiry = scheduler.snapshot();
+    assert!(after_expiry.trigger_latched);
+    assert!(after_expiry.pending_trigger.is_none());
+
+    let repeated_degradation = scheduler
+        .observe_health("run", at(30, 1, 31, 0), degraded(DegradationReason::Loss))
+        .unwrap();
+    assert!(repeated_degradation.is_empty());
+    assert!(scheduler.snapshot().pending_trigger.is_none());
+
+    scheduler
+        .observe_health("run", at(30, 1, 32, 0), recovered())
+        .unwrap();
+    assert!(!scheduler.snapshot().trigger_latched);
+    scheduler
+        .observe_health("run", at(30, 1, 33, 0), degraded(DegradationReason::Rtt))
+        .unwrap();
+    assert_eq!(
+        scheduler.snapshot().pending_trigger,
+        Some(TriggerReason::PingRtt)
     );
 }
 
