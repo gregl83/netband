@@ -110,6 +110,29 @@ appropriate on an explicitly trusted private network. Netband does not provide o
 imply a public Akamai NDT7 endpoint; CDN-hosted servers must be authorized and supplied
 by their operator.
 
+## Validation against the NDT7 reference client
+
+On September 3, 2026, Netband 0.3.0 and M-Lab's Go NDT7 reference client were each
+run 20 times from the same Wi-Fi-connected Linux host to the same nearby Akamai Cloud
+server. The order alternated within each pair, with a 10-second cooldown between runs.
+
+| Client | Complete runs | Download median (p10–p90) | Download CV | Upload median (p10–p90) | Upload CV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| NDT7 reference | 20/20 | 22.24 (19.75–23.17) Mbit/s | 6.28% | 16.62 (16.05–17.33) Mbit/s | 3.53% |
+| Netband | 20/20 | 21.84 (19.77–23.99) Mbit/s | 9.93% | 17.97 (16.93–19.07) Mbit/s | 4.80% |
+
+All 40 runs produced complete download and upload results. Download distribution medians
+differed by 1.8%, and their central 80% ranges were nearly identical. Netband's median
+upload was 8.1% higher; the clients intentionally summarize upload from different
+observation points, so their upload values are comparable but not numerically interchangeable.
+Netband also preserved a late upload `EPIPE` or `ECONNRESET` diagnostic in 9 runs while
+still producing complete results; the full report explains this shutdown behavior.
+This is evidence of completion reliability, repeatability, and agreement under the
+measured conditions—not proof of warning-free operation or absolute path capacity.
+
+See [NDT7 reference-client validation](docs/ndt7-validation.md) for the method,
+per-pair data, interpretation, limitations, and reproduction command.
+
 ## Running as a service
 
 The reviewed [systemd unit](packaging/netband.service) uses a non-root dynamic user,
@@ -120,6 +143,7 @@ in [Service operation](docs/service.md).
 ## Reference
 
 - [Configuration and providers](docs/configuration.md)
+- [NDT7 reference-client validation](docs/ndt7-validation.md)
 - [Self-hosted NDT7 on Akamai Cloud](docs/akamai-ndt-server.md)
 - [CSV schema and outcomes](docs/data-format.md)
 - [Scheduling, triggers, cooldowns, and fairness](docs/scheduling.md)

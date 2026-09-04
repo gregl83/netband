@@ -67,6 +67,77 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
 }
 
 #[test]
+fn published_ndt7_validation_dataset_is_complete_and_sanitized() {
+    let path = root().join("docs/benchmarks/2026-09-03-akamai.csv");
+    let mut reader = csv::Reader::from_path(path).unwrap();
+    let headers = reader.headers().unwrap().clone();
+    assert_eq!(
+        headers.iter().collect::<Vec<_>>(),
+        [
+            "pair",
+            "first_client",
+            "netband_download_mbps",
+            "netband_upload_mbps",
+            "reference_download_mbps",
+            "reference_upload_mbps",
+            "netband_upload_end",
+        ]
+    );
+    assert!(headers.iter().all(|field| {
+        !field.contains("ip") && !field.contains("address") && !field.contains("timestamp")
+    }));
+
+    let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(rows.len(), 20);
+    let mut warning_count = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let pair = index + 1;
+        assert_eq!(row.get(0).unwrap().parse::<usize>().unwrap(), pair);
+        let expected_first = if pair % 2 == 1 {
+            "netband"
+        } else {
+            "reference"
+        };
+        assert_eq!(row.get(1), Some(expected_first));
+        for field in 2..=5 {
+            let value = row.get(field).unwrap().parse::<f64>().unwrap();
+            assert!(value.is_finite() && value > 0.0);
+        }
+        match row.get(6).unwrap() {
+            "clean" => {}
+            "broken_pipe" | "connection_reset" => warning_count += 1,
+            status => panic!("unexpected upload-end status {status}"),
+        }
+    }
+    assert_eq!(warning_count, 9);
+
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(f64::total_cmp);
+        (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
+    }
+    let values = |field: usize| {
+        rows.iter()
+            .map(|row| row.get(field).unwrap().parse::<f64>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(format!("{:.2}", median(values(2))), "21.84");
+    assert_eq!(format!("{:.2}", median(values(3))), "17.97");
+    assert_eq!(format!("{:.2}", median(values(4))), "22.24");
+    assert_eq!(format!("{:.2}", median(values(5))), "16.62");
+
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
+    for documented in ["21.84", "17.97", "22.24", "16.62"] {
+        assert!(readme.contains(documented));
+        assert!(validation.contains(documented));
+    }
+    assert!(readme.contains("docs/ndt7-validation.md"));
+    assert!(validation.contains("benchmarks/2026-09-03-akamai.csv"));
+    assert!(validation.contains("actual server endpoint and client"));
+    assert!(validation.contains("ndt.example.com"));
+}
+
+#[test]
 fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     let readme = fs::read_to_string(root().join("README.md")).unwrap();
     let configuration = fs::read_to_string(root().join("docs/configuration.md")).unwrap();
