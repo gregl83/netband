@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::bandwidth::{BandwidthReport, measure_bandwidth_with_gate};
+use crate::bandwidth::{BandwidthReport, measure_bandwidth_with_gate_and_phase};
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleStats};
 use crate::health::{DegradationReason, HealthConfig, HealthDecision, HealthWindow};
@@ -22,7 +22,9 @@ use crate::ping::{
     measure_round,
 };
 use crate::scheduler::{BandwidthOpportunity, Scheduler, SchedulerError};
-use crate::{model::ErrorKind, model::EventKind, model::MeasurementEvent, model::Outcome};
+use crate::{
+    model::ErrorKind, model::EventKind, model::LoadPhase, model::MeasurementEvent, model::Outcome,
+};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -393,13 +395,20 @@ where
                     let bandwidth_run_id =
                         format!("{}:bandwidth:{bandwidth_number}", config.run_id);
                     bandwidth_number = bandwidth_number.wrapping_add(1);
-                    let mut report = measure_bandwidth_with_gate(
+                    let load_transport = factory.create(&interface, &config.targets);
+                    let mut report = measure_bandwidth_while_monitoring(
                         &attempt_config,
+                        load_transport,
+                        &config,
                         &bandwidth_run_id,
-                        shutdown.clone(),
                         scheduler,
+                        coordinator,
+                        shutdown.clone(),
+                        &mut ticker,
+                        &mut next_round,
+                        &mut stats,
                     )
-                    .await;
+                    .await?;
                     fairness.record_attempt(&interface);
                     stats.bandwidth_attempts += 1;
                     let reservation_error = report.reservation_error.clone();
@@ -433,7 +442,6 @@ where
                     report.events.extend(events);
                     coordinator.publish_batch(&report.events)?;
                 }
-                ticker.reset_at(Instant::now() + config.interval);
                 continue;
             }
             coordinator.publish_batch(&action.events)?;
@@ -469,7 +477,7 @@ where
                         let transport = factory.create(&runtime.name, &config.targets);
                         active = Some((
                             index,
-                            start_dynamic_round(transport, &config, next_round),
+                            start_dynamic_round(transport, &config, next_round, None, None),
                         ));
                         stats.rounds_started += 1;
                         next_round = next_round.wrapping_add(1);
@@ -517,7 +525,7 @@ where
 
     let mut ticker = tokio::time::interval_at(Instant::now() + config.interval, config.interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut active = Some(start_round(&transport, &config, 0));
+    let mut active = Some(start_round(&transport, &config, 0, None, None));
     stats.rounds_started = 1;
     let mut next_round = 1_u64;
 
@@ -553,7 +561,7 @@ where
                     }
                 }
                 _ = ticker.tick() => {
-                    active = Some(start_round(&transport, &config, next_round));
+                    active = Some(start_round(&transport, &config, next_round, None, None));
                     stats.rounds_started += 1;
                     next_round = next_round.wrapping_add(1);
                 }
@@ -629,13 +637,20 @@ where
         if let Some(opportunity) = action.opportunity {
             let bandwidth_run_id = format!("{}:bandwidth:{bandwidth_number}", config.run_id);
             bandwidth_number = bandwidth_number.wrapping_add(1);
-            let mut report = measure_bandwidth_with_gate(
+            let load_transport: Arc<dyn PingTransport> = transport.clone();
+            let mut report = measure_bandwidth_while_monitoring(
                 resolved,
+                load_transport,
+                &config,
                 &bandwidth_run_id,
-                shutdown.clone(),
                 &mut scheduler,
+                coordinator,
+                shutdown.clone(),
+                &mut ticker,
+                &mut next_round,
+                &mut stats,
             )
-            .await;
+            .await?;
             stats.bandwidth_attempts += 1;
             let reservation_error = report.reservation_error.clone();
             if reservation_error.is_none() {
@@ -651,7 +666,6 @@ where
             if let Some(message) = reservation_error {
                 return Err(MonitorError::Scheduler(SchedulerError::Admission(message)));
             }
-            ticker.reset_at(Instant::now() + config.interval);
             continue;
         }
 
@@ -662,7 +676,7 @@ where
                 }
             }
             _ = ticker.tick() => {
-                active = Some(start_round(&transport, &config, next_round));
+                active = Some(start_round(&transport, &config, next_round, None, None));
                 stats.rounds_started += 1;
                 next_round = next_round.wrapping_add(1);
             }
@@ -846,10 +860,108 @@ fn chrono_duration(duration: Duration) -> chrono::Duration {
     chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn measure_bandwidth_while_monitoring<J, C>(
+    resolved: &ResolvedConfig,
+    transport: Arc<dyn PingTransport>,
+    ping: &PingMonitorConfig,
+    bandwidth_run_id: &str,
+    scheduler: &mut Scheduler,
+    coordinator: &mut OutputCoordinator<J, C>,
+    shutdown: watch::Receiver<bool>,
+    ticker: &mut tokio::time::Interval,
+    next_round: &mut u64,
+    stats: &mut MonitorStats,
+) -> Result<BandwidthReport, MonitorError>
+where
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let (phase_sender, phase_receiver) = watch::channel(LoadPhase::Setup);
+    let bandwidth = measure_bandwidth_with_gate_and_phase(
+        resolved,
+        bandwidth_run_id,
+        shutdown,
+        scheduler,
+        phase_sender,
+    );
+    tokio::pin!(bandwidth);
+    let mut active_ping: Option<JoinHandle<Result<PingRoundReport, PingRoundError>>> = None;
+
+    loop {
+        if let Some(task) = active_ping.as_mut() {
+            tokio::select! {
+                biased;
+                report = &mut bandwidth => {
+                    let task = active_ping.take().expect("active loaded ping round exists");
+                    complete_loaded_round(task.await, coordinator, stats)?;
+                    return Ok(report);
+                }
+                result = task => {
+                    active_ping = None;
+                    complete_loaded_round(result, coordinator, stats)?;
+                }
+                scheduled = ticker.tick() => {
+                    stats.skipped_ticks += 1;
+                    tracing::warn!(
+                        skipped_ticks = stats.skipped_ticks,
+                        scheduled_at = ?scheduled,
+                        load_phase = ?*phase_receiver.borrow(),
+                        load_run_id = bandwidth_run_id,
+                        "ping round still active during bandwidth test; skipping interval tick"
+                    );
+                }
+            }
+        } else {
+            tokio::select! {
+                biased;
+                report = &mut bandwidth => return Ok(report),
+                _ = ticker.tick() => {
+                    let phase = *phase_receiver.borrow();
+                    active_ping = Some(start_dynamic_round(
+                        Arc::clone(&transport),
+                        ping,
+                        *next_round,
+                        Some(phase),
+                        Some(bandwidth_run_id),
+                    ));
+                    stats.rounds_started += 1;
+                    *next_round = next_round.wrapping_add(1);
+                }
+            }
+        }
+    }
+}
+
+fn complete_loaded_round<J, C>(
+    result: Result<Result<PingRoundReport, PingRoundError>, tokio::task::JoinError>,
+    coordinator: &mut OutputCoordinator<J, C>,
+    stats: &mut MonitorStats,
+) -> Result<(), MonitorError>
+where
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let report = result??;
+    debug_assert!(
+        report
+            .events
+            .iter()
+            .all(|event| { event.load_phase.is_some() && event.load_run_id.is_some() })
+    );
+    coordinator.publish_batch(&report.events)?;
+    stats.rounds_completed += 1;
+    stats.successful_probes += report.successful_targets as u64;
+    stats.failed_probes += report.failed_targets as u64;
+    Ok(())
+}
+
 fn start_dynamic_round(
     transport: Arc<dyn PingTransport>,
     config: &PingMonitorConfig,
     round_number: u64,
+    load_phase: Option<LoadPhase>,
+    load_run_id: Option<&str>,
 ) -> JoinHandle<Result<PingRoundReport, PingRoundError>> {
     let request = PingRoundRequest {
         run_id: config.run_id.clone(),
@@ -858,6 +970,8 @@ fn start_dynamic_round(
         timeout: config.timeout,
         scheduled_at_utc: Utc::now(),
         identifier: config.identifier,
+        load_phase,
+        load_run_id: load_run_id.map(str::to_owned),
     };
     tokio::spawn(async move { measure_round(transport, request).await })
 }
@@ -866,6 +980,8 @@ fn start_round<T: PingTransport>(
     transport: &Arc<T>,
     config: &PingMonitorConfig,
     round_number: u64,
+    load_phase: Option<LoadPhase>,
+    load_run_id: Option<&str>,
 ) -> JoinHandle<Result<PingRoundReport, PingRoundError>> {
     let request = PingRoundRequest {
         run_id: config.run_id.clone(),
@@ -874,6 +990,8 @@ fn start_round<T: PingTransport>(
         timeout: config.timeout,
         scheduled_at_utc: Utc::now(),
         identifier: config.identifier,
+        load_phase,
+        load_run_id: load_run_id.map(str::to_owned),
     };
     let transport = Arc::clone(transport);
     tokio::spawn(async move { measure_round(transport, request).await })

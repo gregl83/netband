@@ -11,7 +11,7 @@ use chrono::{TimeZone, Utc};
 use clap::Parser;
 use netband::cli::{Cli, ConsoleMode};
 use netband::config::{OutputTarget, ResolveContext, resolve};
-use netband::model::{ErrorKind, EventKind, Outcome};
+use netband::model::{ErrorKind, EventKind, LoadPhase, Outcome};
 use netband::ping::{
     PingExitStatus, PingRoundRequest, PingTransport, ProbeAttemptResult, ProbeBinding,
     ProbeFailure, ProbeReply, ProbeRequest, execute_ping_once, measure_round,
@@ -104,6 +104,8 @@ fn round(targets: Vec<IpAddr>) -> PingRoundRequest {
             .single()
             .unwrap(),
         identifier: 42,
+        load_phase: None,
+        load_run_id: None,
     }
 }
 
@@ -140,6 +142,26 @@ async fn targets_overlap_but_events_remain_in_configuration_order() {
         assert_eq!(pair[1].packets_received, Some(1));
         assert_eq!(pair[1].packet_loss_pct, Some(0.0));
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_round_snapshots_load_context_for_probe_and_summary_rows() {
+    let target = ip("192.0.2.1");
+    let transport = Arc::new(FakeTransport::new([(
+        target,
+        behavior(1, success(target, 0, 10)),
+    )]));
+    let mut request = round(vec![target]);
+    request.load_phase = Some(LoadPhase::Download);
+    request.load_run_id = Some("run-test:bandwidth:0".into());
+
+    let report = measure_round(transport, request).await.unwrap();
+
+    assert_eq!(report.events.len(), 2);
+    assert!(report.events.iter().all(|event| {
+        event.load_phase == Some(LoadPhase::Download)
+            && event.load_run_id.as_deref() == Some("run-test:bandwidth:0")
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

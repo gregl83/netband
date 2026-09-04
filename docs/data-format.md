@@ -7,7 +7,7 @@ discarded and reported to the operational log; completed malformed records fail 
 Each completed batch is flushed and synced.
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message
+schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -17,7 +17,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Integer schema version, currently `1` |
-| `run_id` | Identifier shared by events from one process invocation |
+| `run_id` | Identifier for a measurement stream; automatic bandwidth attempts use a nested run ID |
 | `event_id` | Unique event identifier within the run |
 | `scheduled_at_utc` | Planned opportunity or trigger creation time |
 | `started_at_utc` | Actual attempt start time |
@@ -26,6 +26,8 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `source_ip` | Source address actually bound/used when known |
 | `event_kind` | `ping_probe`, `ping_summary`, `bandwidth`, `request_failure`, or `scheduler` |
 | `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
+| `load_phase` | Concurrent NDT7 phase at ping-round start: `setup`, `download`, or `upload`; empty without a concurrent test |
+| `load_run_id` | `run_id` of the concurrent bandwidth attempt; empty without a concurrent test |
 | `target` | Ping target address |
 | `sequence` | ICMP sequence number |
 | `outcome` | Classified result listed below |
@@ -78,6 +80,14 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 
 Failures are data. A failed ping still produces a `ping_probe` and `ping_summary`; HTTP,
 TLS, WebSocket, download, and upload failures produce sanitized `request_failure` rows.
+
+During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
+interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`
+covers discovery and connection work that does not itself represent throughput load.
+Load-classified pings remain durable measurements but are excluded from the health window
+that can request another bandwidth test. Join `load_run_id` to the bandwidth row's
+`run_id` when analyzing loaded latency. Because rows are committed as operations finish,
+use their timestamps rather than file order when constructing a timeline.
 
 Use an independent CSV implementation when ingesting journals. For example:
 

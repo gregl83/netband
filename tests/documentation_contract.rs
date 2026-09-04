@@ -188,7 +188,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 40);
+    assert_eq!(CSV_HEADER.split(',').count(), 42);
     for mode in ["auto", "human", "jsonl", "off"] {
         assert!(readme.contains(mode), "README omits console mode {mode}");
     }

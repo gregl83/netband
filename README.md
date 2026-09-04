@@ -7,9 +7,10 @@
 # netband
 
 Netband is a Linux-first command-line monitor that records latency, packet loss, and
-NDT7 bandwidth measurements in a durable CSV journal. It is built for unattended home
-lab and Raspberry Pi monitoring, especially when intermittent failures disappear
-before a manual speed test can capture them.
+NDT7 bandwidth measurements in a durable CSV journal. During automatic bandwidth tests,
+it keeps measuring and classifies latency by NDT7 phase for loaded-latency analysis. It
+is built for unattended home lab and Raspberry Pi monitoring, especially when
+intermittent failures disappear before a manual speed test can capture them.
 
 **One speed test is a snapshot; Netband builds the timestamped evidence to show when your ISP falls short.**
 

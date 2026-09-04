@@ -275,3 +275,262 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
         assert_eq!(event.source_ip, Some(expected.parse().unwrap()));
     }
 }
+
+#[cfg(target_os = "linux")]
+mod loaded_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use netband::model::LoadPhase;
+    use netband::ping::ProbeFailure;
+    use netband::scheduler::Scheduler;
+    use tokio::net::TcpListener;
+    use tokio::sync::watch;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    const NDT7_PROTOCOL: &str = "net.measurementlab.ndt.v7";
+
+    #[derive(Clone, Copy)]
+    struct StableResolver;
+
+    impl InterfaceResolver for StableResolver {
+        fn resolve(&self, name: &str) -> Result<ResolvedInterface, InterfaceError> {
+            let address = match name {
+                "lo" => "127.0.0.1",
+                "test-other" => "192.0.2.20",
+                _ => "192.0.2.40",
+            };
+            Ok(ResolvedInterface {
+                name: name.to_owned(),
+                addresses: vec![address.parse().unwrap()],
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct LoadedPingFactory {
+        order: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PingTransportFactory for LoadedPingFactory {
+        fn create(&self, interface: &str, _targets: &[IpAddr]) -> Arc<dyn PingTransport> {
+            self.order.lock().unwrap().push(interface.to_owned());
+            Arc::new(LoadedPingTransport {
+                interface: interface.to_owned(),
+            })
+        }
+    }
+
+    struct LoadedPingTransport {
+        interface: String,
+    }
+
+    impl PingTransport for LoadedPingTransport {
+        fn probe(&self, request: ProbeRequest) -> ProbeFuture<'_> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                let source_ip = if self.interface == "lo" {
+                    "127.0.0.1"
+                } else {
+                    "192.0.2.20"
+                }
+                .parse()
+                .unwrap();
+                let result = if self.interface == "lo" && request.target.to_string().ends_with(".2")
+                {
+                    Err(ProbeFailure::Timeout)
+                } else {
+                    Ok(ProbeReply {
+                        target: request.target,
+                        identifier: Some(request.identifier),
+                        sequence: request.sequence,
+                        rtt: Duration::from_millis(10),
+                        icmp_type: 0,
+                        icmp_code: 0,
+                    })
+                };
+                ProbeAttemptResult {
+                    binding: ProbeBinding {
+                        interface: Some(self.interface.clone()),
+                        source_ip: Some(source_ip),
+                    },
+                    sent: true,
+                    result,
+                }
+            })
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn accept_ndt7(_request: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
+        response.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static(NDT7_PROTOCOL),
+        );
+        Ok(response)
+    }
+
+    async fn loaded_ndt_server(listener: TcpListener, shutdown: watch::Sender<bool>) {
+        let (download, _) = listener.accept().await.unwrap();
+        let mut download = accept_hdr_async(download, accept_ndt7).await.unwrap();
+        for _ in 0..6 {
+            download
+                .send(Message::Binary(vec![1_u8; 16 * 1024].into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        download.close(None).await.unwrap();
+
+        let (upload, _) = listener.accept().await.unwrap();
+        let mut upload = accept_hdr_async(upload, accept_ndt7).await.unwrap();
+        let upload_window = tokio::time::sleep(Duration::from_millis(60));
+        tokio::pin!(upload_window);
+        loop {
+            tokio::select! {
+                _ = &mut upload_window => break,
+                message = upload.next() => {
+                    if message.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = upload.close(None).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = shutdown.send(true);
+    }
+
+    fn resolved_with_bandwidth(
+        root: PathBuf,
+        address: std::net::SocketAddr,
+    ) -> netband::config::ResolvedConfig {
+        let download = format!("ws://{address}/ndt/v7/download");
+        let upload = format!("ws://{address}/ndt/v7/upload");
+        let cli = Cli::try_parse_from([
+            "netband",
+            "--interface",
+            "lo",
+            "--interface",
+            "test-other",
+            "--ndt-provider",
+            "direct",
+            "--ndt-download-url",
+            &download,
+            "--ndt-upload-url",
+            &upload,
+            "--allow-insecure-ndt",
+            "--ping-target",
+            "192.0.2.1",
+            "--ping-target",
+            "192.0.2.2",
+            "--ping-interval",
+            "10ms",
+            "--loss-window-rounds",
+            "1",
+            "--loss-min-samples",
+            "2",
+            "--bandwidth-timeout",
+            "2s",
+            "run",
+        ])
+        .unwrap();
+        resolve(
+            &cli,
+            &ResolveContext {
+                stdout_is_terminal: false,
+                current_dir: root.clone(),
+                state_dir: root.join("state"),
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn loaded_rounds_stay_on_the_bandwidth_interface_then_rotation_resumes() {
+        let root = tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config =
+            resolved_with_bandwidth(root.path().to_path_buf(), listener.local_addr().unwrap());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let factory = LoadedPingFactory {
+            order: Arc::clone(&order),
+        };
+        let journal = RecordingJournal::default();
+        let mut coordinator = OutputCoordinator::new(journal.clone(), ConsoleOff);
+        let (shutdown_tx, shutdown) = cancellation_channel();
+        let server = tokio::spawn(loaded_ndt_server(listener, shutdown_tx));
+        let scheduler =
+            Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
+        let settings = PingMonitorConfig {
+            run_id: "multi-loaded-run".into(),
+            targets: config.ping.targets.clone(),
+            interval: config.ping.interval,
+            timeout: Duration::from_secs(1),
+            identifier: 44,
+            health: HealthConfig {
+                window_rounds: 1,
+                min_samples: 2,
+                loss_threshold_pct: 50.0,
+                rtt_threshold_ms: None,
+                recovery_loss_pct: 10.0,
+                recovery_rounds: 3,
+            },
+        };
+
+        let stats = tokio::time::timeout(
+            Duration::from_secs(5),
+            monitor_multi_interface(
+                &config,
+                &StableResolver,
+                &factory,
+                settings,
+                Some(scheduler),
+                &mut coordinator,
+                shutdown,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(stats.bandwidth_attempts, 1);
+        let events = journal.events.lock().unwrap();
+        let loaded = events
+            .iter()
+            .filter(|event| event.event_kind == EventKind::PingProbe && event.load_run_id.is_some())
+            .collect::<Vec<_>>();
+        assert!(!loaded.is_empty());
+        assert!(loaded.iter().all(|event| {
+            event.interface.as_deref() == Some("lo")
+                && event.source_ip == Some("127.0.0.1".parse().unwrap())
+        }));
+        assert!(
+            loaded
+                .iter()
+                .any(|event| event.load_phase == Some(LoadPhase::Download))
+        );
+        assert!(
+            loaded
+                .iter()
+                .any(|event| event.load_phase == Some(LoadPhase::Upload))
+        );
+        assert!(events.iter().any(|event| {
+            event.event_kind == EventKind::PingProbe
+                && event.load_run_id.is_none()
+                && event.interface.as_deref() == Some("test-other")
+        }));
+        assert_eq!(&order.lock().unwrap()[..2], ["lo", "lo"]);
+        assert!(
+            order
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(2)
+                .any(|name| name == "test-other")
+        );
+    }
+}

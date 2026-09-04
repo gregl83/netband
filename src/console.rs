@@ -11,8 +11,8 @@ use tokio::task::JoinHandle;
 
 use crate::cli::ConsoleMode;
 use crate::model::{
-    EventKind, MeasurementEvent, Outcome, ProviderKind, sanitize_endpoint, sanitize_message,
-    timestamp_text,
+    EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, sanitize_endpoint,
+    sanitize_message, timestamp_text,
 };
 
 #[derive(Debug, Error)]
@@ -268,13 +268,21 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
         .as_deref()
         .map(|message| format!(" reason=\"{}\"", quote_human(message)))
         .unwrap_or_default();
+    let load = event.load_phase.map_or_else(String::new, |phase| {
+        format!(
+            " load_phase={} load_run_id={}",
+            load_phase_name(phase),
+            event.load_run_id.as_deref().unwrap_or("-")
+        )
+    });
     match event.event_kind {
         EventKind::PingSummary => Some(format!(
-            "{timestamp} ping interface={interface} target={} outcome={} rtt_ms={} loss_pct={}{}\n",
+            "{timestamp} ping interface={interface} target={} outcome={} rtt_ms={} loss_pct={}{}{}\n",
             event.target.as_deref().unwrap_or("-"),
             outcome_name(event.outcome),
             decimal_or_dash(event.rtt_ms),
             decimal_or_dash(event.packet_loss_pct),
+            load,
             reason,
         )),
         EventKind::Bandwidth => Some(format!(
@@ -327,5 +335,13 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Mlab => "mlab",
         ProviderKind::Direct => "direct",
+    }
+}
+
+const fn load_phase_name(phase: LoadPhase) -> &'static str {
+    match phase {
+        LoadPhase::Setup => "setup",
+        LoadPhase::Download => "download",
+        LoadPhase::Upload => "upload",
     }
 }

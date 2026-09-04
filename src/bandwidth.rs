@@ -27,7 +27,8 @@ use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
 use crate::journal::{Journal, JournalError, OutputCoordinator};
 use crate::model::{
-    ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
+    TriggerReason,
 };
 use crate::provider::{
     EndpointCandidate, FailureDisposition, RequestFailure, USER_AGENT as NETBAND_USER_AGENT,
@@ -271,6 +272,25 @@ pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
     .await
 }
 
+pub async fn measure_bandwidth_with_gate_and_phase<G: ReservationGate>(
+    config: &ResolvedConfig,
+    run_id: &str,
+    shutdown: watch::Receiver<bool>,
+    reservation: &mut G,
+    phase: watch::Sender<LoadPhase>,
+) -> BandwidthReport {
+    measure_bandwidth_with_network_and_gate_observed(
+        config,
+        run_id,
+        shutdown,
+        &SystemTcpConnector,
+        &SystemAddressResolver,
+        reservation,
+        Some(&phase),
+    )
+    .await
+}
+
 pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
     config: &ResolvedConfig,
     run_id: &str,
@@ -315,11 +335,37 @@ pub async fn measure_bandwidth_with_network_and_gate<
 >(
     config: &ResolvedConfig,
     run_id: &str,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
     reservation: &mut G,
 ) -> BandwidthReport {
+    measure_bandwidth_with_network_and_gate_observed(
+        config,
+        run_id,
+        shutdown,
+        connector,
+        resolver,
+        reservation,
+        None,
+    )
+    .await
+}
+
+async fn measure_bandwidth_with_network_and_gate_observed<
+    C: TcpConnector,
+    R: AddressResolver,
+    G: ReservationGate,
+>(
+    config: &ResolvedConfig,
+    run_id: &str,
+    mut shutdown: watch::Receiver<bool>,
+    connector: &C,
+    resolver: &R,
+    reservation: &mut G,
+    phase: Option<&watch::Sender<LoadPhase>>,
+) -> BandwidthReport {
+    report_phase(phase, LoadPhase::Setup);
     let interface = config.interfaces.first().map(String::as_str);
     let whole_timeout = tokio::time::sleep(config.bandwidth.whole_test_timeout);
     tokio::pin!(whole_timeout);
@@ -382,7 +428,13 @@ pub async fn measure_bandwidth_with_network_and_gate<
         }
     };
 
-    let test = run_candidates(&resolution.candidates, interface, connector, resolver);
+    let test = run_candidates(
+        &resolution.candidates,
+        interface,
+        connector,
+        resolver,
+        phase,
+    );
     let candidate = tokio::select! {
         _ = &mut whole_timeout => {
             return apply_admission(command_failure_report(
@@ -472,10 +524,12 @@ async fn run_candidates<C: TcpConnector, R: AddressResolver>(
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
+    phase: Option<&watch::Sender<LoadPhase>>,
 ) -> CandidateResult {
     let mut all_failures = Vec::new();
     for candidate in candidates {
-        let download = run_download(candidate, interface, connector, resolver).await;
+        report_phase(phase, LoadPhase::Setup);
+        let download = run_download(candidate, interface, connector, resolver, phase).await;
         let download_retry = download.measurement.is_none()
             && download
                 .failures
@@ -490,7 +544,8 @@ async fn run_candidates<C: TcpConnector, R: AddressResolver>(
             continue;
         }
 
-        let upload = run_upload(candidate, interface, connector, resolver).await;
+        report_phase(phase, LoadPhase::Setup);
+        let upload = run_upload(candidate, interface, connector, resolver, phase).await;
         let provider_stop = upload.failures.last().and_then(provider_stop_outcome);
         all_failures.extend(upload.failures);
         let outcome = provider_stop;
@@ -535,6 +590,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
+    phase: Option<&watch::Sender<LoadPhase>>,
 ) -> DirectionResult {
     let connected = match connect_websocket(
         &candidate.download_url,
@@ -560,6 +616,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         source_ip,
         mut failures,
     } = connected;
+    report_phase(phase, LoadPhase::Download);
     let started = Instant::now();
     let mut bytes = 0_u64;
     let mut metrics = TcpMetrics::default();
@@ -600,6 +657,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         }
     }
     let elapsed = started.elapsed();
+    report_phase(phase, LoadPhase::Setup);
     if bytes == 0 {
         if failures.is_empty() {
             failures.push(stream_failure(
@@ -643,6 +701,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
+    phase: Option<&watch::Sender<LoadPhase>>,
 ) -> DirectionResult {
     let connected = match connect_websocket(
         &candidate.upload_url,
@@ -670,6 +729,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     } = connected;
     let (mut sender, mut receiver) = socket.split();
     let mut payload = Message::Binary(upload_payload().into());
+    report_phase(phase, LoadPhase::Upload);
     let started = Instant::now();
     let mut bytes = 0_u64;
     let mut metrics = TcpMetrics::default();
@@ -710,6 +770,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         }
     }
     let elapsed = started.elapsed();
+    report_phase(phase, LoadPhase::Setup);
     if bytes == 0 {
         if failures.is_empty() {
             failures.push(stream_failure(
@@ -745,6 +806,12 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
             metrics,
         }),
         failures,
+    }
+}
+
+fn report_phase(phase: Option<&watch::Sender<LoadPhase>>, value: LoadPhase) {
+    if let Some(phase) = phase {
+        phase.send_replace(value);
     }
 }
 

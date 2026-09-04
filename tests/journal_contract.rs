@@ -7,7 +7,8 @@ use netband::config::OutputTarget;
 use netband::console::ConsoleSink;
 use netband::journal::{CSV_HEADER, Journal, JournalError, JournalSink, OutputCoordinator};
 use netband::model::{
-    ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
+    TriggerReason,
 };
 use tempfile::tempdir;
 
@@ -28,6 +29,8 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     ping_failure.started_at_utc = Some(timestamp(0));
     ping_failure.interface = Some("eth0".into());
     ping_failure.source_ip = Some("192.0.2.10".parse().unwrap());
+    ping_failure.load_phase = Some(LoadPhase::Download);
+    ping_failure.load_run_id = Some("run-1".into());
     ping_failure.target = Some("1.1.1.1".into());
     ping_failure.sequence = Some(7);
     ping_failure.duration_ms = Some(2_000.125);
@@ -193,7 +196,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 40);
+    assert_eq!(partial_record.len(), 42);
     OpenOptions::new()
         .append(true)
         .open(&path)

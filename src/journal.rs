@@ -10,9 +10,9 @@ use crate::config::OutputTarget;
 use crate::console::ConsoleSink;
 use crate::model::MeasurementEvent;
 
-pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message";
+pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message";
 
-const CSV_FIELDS: [&str; 40] = [
+const CSV_FIELDS: [&str; 42] = [
     "schema_version",
     "run_id",
     "event_id",
@@ -23,6 +23,8 @@ const CSV_FIELDS: [&str; 40] = [
     "source_ip",
     "event_kind",
     "trigger_reason",
+    "load_phase",
+    "load_run_id",
     "target",
     "sequence",
     "outcome",
@@ -61,9 +63,9 @@ pub enum JournalError {
     Io(#[from] io::Error),
     #[error("journal CSV serialization failed: {0}")]
     Csv(#[from] csv::Error),
-    #[error("existing output has an incompatible v1 CSV header: {0}")]
+    #[error("existing output has an incompatible CSV header: {0}")]
     Header(PathBuf),
-    #[error("existing output contains a malformed v1 CSV record: {0}")]
+    #[error("existing output contains a malformed CSV record: {0}")]
     Corrupt(PathBuf),
     #[error("output file is already locked by another Netband process: {0}")]
     Locked(PathBuf),

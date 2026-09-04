@@ -9,7 +9,8 @@ use netband::cli::ConsoleMode;
 use netband::console::{Console, ConsoleDiagnostic, ConsoleSink, human_line, render_jsonl};
 use netband::journal::{Journal, OutputCoordinator};
 use netband::model::{
-    ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
+    TriggerReason,
 };
 use tokio::io::{AsyncReadExt, AsyncWrite};
 
@@ -61,6 +62,11 @@ fn human_output_is_concise_and_omits_internal_events() {
     );
     assert!(!line.contains("\u{1b}["));
 
+    ping.load_phase = Some(LoadPhase::Download);
+    ping.load_run_id = Some("run-1:bandwidth:0".into());
+    let line = human_line(&ping).unwrap();
+    assert!(line.contains("load_phase=download load_run_id=run-1:bandwidth:0"));
+
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial);
     bandwidth.provider_kind = Some(ProviderKind::Direct);
     bandwidth.server = Some("wss://ndt.example.net/down?token=secret".into());
@@ -99,6 +105,8 @@ fn jsonl_is_versioned_flat_and_sanitized() {
     assert_eq!(value["event_kind"], "request_failure");
     assert_eq!(value["request_stage"], "locate");
     assert_eq!(value["rtt_ms"], serde_json::Value::Null);
+    assert_eq!(value["load_phase"], serde_json::Value::Null);
+    assert_eq!(value["load_run_id"], serde_json::Value::Null);
     assert_eq!(value["server"], "https://locate.example/nearest?[redacted]");
 }
 

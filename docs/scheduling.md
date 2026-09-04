@@ -41,6 +41,11 @@ below 10 percent and, when enabled, p95 RTT strictly below its threshold. A pend
 trigger expires after 30 minutes by default and requires a successful ping in its
 originating interface before NDT7 admission.
 
+Ping rounds continue while an admitted NDT7 test runs. Those rows carry the bandwidth
+run ID and the `setup`, `download`, or `upload` phase captured when the round starts.
+They are recorded for loaded-latency analysis but do not enter the trigger or recovery
+health window, preventing Netband's own test traffic from creating another trigger.
+
 At the fixed fixture clock, a qualifying loss decision at `01:00Z` becomes one
 `ping_loss` opportunity, a successful reservation leaves three allowances, and the
 remaining three slots are recalculated between the spacing boundary and midnight.
@@ -68,6 +73,8 @@ global budget permits. A triggered opportunity remains attributed to its origina
 interface and counts against that interface's fairness deficit and the same provider
 allowance. An unavailable interface is skipped with bounded recovery backoff and cannot
 block another interface. Netband records only interface/source bindings actually used.
+While NDT7 is active, ping rounds temporarily stay on its selected interface so each
+loaded sample has direct interface attribution. Normal rotation resumes afterward.
 
 Scheduler state, its initialization marker, backup, reservation ledger, and lock are
 operational data. See [Service operation](service.md#state-recovery) before recovery.

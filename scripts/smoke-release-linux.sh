@@ -50,7 +50,7 @@ with pathlib.Path(sys.argv[2]).open(newline="", encoding="utf-8") as stream:
 assert rows
 kinds = {row["event_kind"] for row in rows}
 assert {"ping_probe", "bandwidth", "request_failure", "scheduler"} <= kinds
-assert len(rows[0]) == 40
+assert len(rows[0]) == 42
 PY
 
 size="$(stat -c '%s' "$binary")"

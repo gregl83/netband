@@ -15,7 +15,7 @@ use tokio::io::AsyncWrite;
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
 use crate::journal::{Journal, JournalError, OutputCoordinator};
-use crate::model::{ErrorKind, EventKind, MeasurementEvent, Outcome};
+use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -88,6 +88,8 @@ pub struct PingRoundRequest {
     pub timeout: Duration,
     pub scheduled_at_utc: DateTime<Utc>,
     pub identifier: u16,
+    pub load_phase: Option<LoadPhase>,
+    pub load_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +169,8 @@ where
             run_id: request.run_id.clone(),
             round_number: request.round_number,
             scheduled_at: request.scheduled_at_utc,
+            load_phase: request.load_phase,
+            load_run_id: request.load_run_id.clone(),
         };
         let probe_request = ProbeRequest {
             target,
@@ -188,9 +192,7 @@ where
         let measurement = match task.await {
             Ok(measurement) => measurement,
             Err(error) => internal_failure(
-                &request.run_id,
-                request.round_number,
-                request.scheduled_at_utc,
+                &request,
                 target,
                 sequence,
                 format!("ping task failed: {error}"),
@@ -247,6 +249,8 @@ where
         timeout: config.ping.timeout,
         scheduled_at_utc: scheduled_at,
         identifier,
+        load_phase: None,
+        load_run_id: None,
     };
     validate_round_request(&round_request)?;
     let (journal, output_path) = Journal::open_at(&config.output, scheduled_at)?;
@@ -300,6 +304,8 @@ struct MeasurementContext {
     run_id: String,
     round_number: u64,
     scheduled_at: DateTime<Utc>,
+    load_phase: Option<LoadPhase>,
+    load_run_id: Option<String>,
 }
 
 async fn measure_target<T: PingTransport + ?Sized>(
@@ -362,7 +368,7 @@ fn build_measurement(
     );
     apply_common(
         &mut probe,
-        context.scheduled_at,
+        context,
         started_at,
         &attempt.binding,
         &target,
@@ -388,7 +394,7 @@ fn build_measurement(
     );
     apply_common(
         &mut summary,
-        context.scheduled_at,
+        context,
         started_at,
         &attempt.binding,
         &target,
@@ -411,16 +417,18 @@ fn build_measurement(
 
 fn apply_common(
     event: &mut MeasurementEvent,
-    scheduled_at: DateTime<Utc>,
+    context: &MeasurementContext,
     started_at: DateTime<Utc>,
     binding: &ProbeBinding,
     target: &str,
     sequence: u16,
 ) {
-    event.scheduled_at_utc = Some(scheduled_at);
+    event.scheduled_at_utc = Some(context.scheduled_at);
     event.started_at_utc = Some(started_at);
     event.interface.clone_from(&binding.interface);
     event.source_ip = binding.source_ip;
+    event.load_phase = context.load_phase;
+    event.load_run_id.clone_from(&context.load_run_id);
     event.target = Some(target.to_owned());
     event.sequence = Some(sequence);
 }
@@ -554,18 +562,18 @@ fn failure_fields(failure: ProbeFailure, timeout: Duration) -> FailureFields {
 }
 
 fn internal_failure(
-    run_id: &str,
-    round_number: u64,
-    scheduled_at: DateTime<Utc>,
+    request: &PingRoundRequest,
     target: IpAddr,
     sequence: u16,
     message: String,
 ) -> TargetMeasurement {
     let now = Utc::now();
     let context = MeasurementContext {
-        run_id: run_id.to_owned(),
-        round_number,
-        scheduled_at,
+        run_id: request.run_id.clone(),
+        round_number: request.round_number,
+        scheduled_at: request.scheduled_at_utc,
+        load_phase: request.load_phase,
+        load_run_id: request.load_run_id.clone(),
     };
     build_measurement(
         &context,
