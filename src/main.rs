@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     // Tokio stdout performs writes on blocking worker threads. Owning the runtime instead
     // of using #[tokio::main] lets Netband bound runtime teardown if a downstream stdout
     // reader stops consuming output.
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
