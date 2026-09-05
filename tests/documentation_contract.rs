@@ -127,14 +127,42 @@ fn published_ndt7_validation_dataset_is_complete_and_sanitized() {
 
     let readme = fs::read_to_string(root().join("README.md")).unwrap();
     let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
-    for documented in ["21.84", "17.97", "22.24", "16.62"] {
-        assert!(readme.contains(documented));
-        assert!(validation.contains(documented));
-    }
     assert!(readme.contains("docs/ndt7-validation.md"));
     assert!(validation.contains("benchmarks/2026-09-03-akamai.csv"));
-    assert!(validation.contains("actual server endpoint and client"));
+    for field in 2..=5 {
+        let documented = format!("{:.2}", median(values(field)));
+        assert!(
+            validation.contains(&documented),
+            "missing benchmark median: {documented}"
+        );
+    }
     assert!(validation.contains("ndt.example.com"));
+}
+
+#[test]
+fn measurement_docs_describe_current_behavior_without_old_build_claims() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
+    let release = fs::read_to_string(root().join("docs/release.md")).unwrap();
+    for document in [&readme, &validation, &release] {
+        for historical in [
+            "0.2.0",
+            "0.3.0",
+            "0.4.0",
+            "7531961",
+            "revised",
+            "Baseline download",
+        ] {
+            assert!(
+                !document.contains(historical),
+                "obsolete documentation: {historical}"
+            );
+        }
+    }
+    assert!(validation.contains("Upload accepts payloads for ten seconds"));
+    assert!(validation.contains("separate two-second allowance"));
+    assert!(validation.contains("requires a dedicated paired run"));
+    assert!(validation.contains("numerical agreement alone does not prove"));
 }
 
 #[test]

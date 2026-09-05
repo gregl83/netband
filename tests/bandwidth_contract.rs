@@ -9,12 +9,12 @@ use futures_util::{SinkExt, StreamExt};
 use netband::bandwidth::{
     AddressResolver, AdmissionReservation, ConnectFuture, ReservationGate, ResolveFuture,
     TcpConnector, cancellation_channel, classify_handshake_status, execute_bandwidth_once,
-    measure_bandwidth, measure_bandwidth_with_network, measure_bandwidth_with_network_and_gate,
-    throughput_mbps,
+    measure_bandwidth, measure_bandwidth_with_gate_and_phase, measure_bandwidth_with_network,
+    measure_bandwidth_with_network_and_gate, throughput_mbps,
 };
 use netband::cli::{Cli, ConsoleMode};
 use netband::config::{OutputTarget, ResolveContext, resolve};
-use netband::model::{EventKind, Outcome, ProviderKind, RequestStage};
+use netband::model::{ErrorKind, EventKind, LoadPhase, Outcome, ProviderKind, RequestStage};
 use netband::provider::FailureDisposition;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::ServerConfig;
@@ -264,6 +264,182 @@ async fn upload_messages_scale_at_ndt7_boundaries() {
     assert!(sizes[..17].iter().all(|size| *size == 8 * 1024));
     assert!(sizes[17..25].iter().all(|size| *size == 16 * 1024));
     assert_eq!(sizes[25], 32 * 1024);
+}
+
+#[tokio::test]
+async fn upload_stops_after_ten_seconds_and_completes_the_close_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        serve_download(listener.accept().await.unwrap().0).await;
+        // Connection setup must not consume the ten-second measurement window.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let mut largest = 0;
+        while let Some(message) = socket.next().await {
+            match message.unwrap() {
+                Message::Binary(payload) => largest = largest.max(payload.len()),
+                Message::Close(_) => {
+                    socket.flush().await.unwrap();
+                    return (started.elapsed(), largest);
+                }
+                _ => {}
+            }
+        }
+        panic!("client disconnected without completing the close handshake");
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "14s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "upload-deadline", shutdown).await;
+    assert_eq!(report.outcome, Outcome::Success);
+    assert_eq!(report.events.len(), 1, "{:?}", report.events);
+    let (elapsed, largest) = server.await.unwrap();
+    assert!(elapsed >= Duration::from_secs(10));
+    assert!(elapsed < Duration::from_secs(12));
+    assert_eq!(largest, 1 << 20, "outbound payloads must cap at 1 MiB");
+}
+
+#[tokio::test]
+async fn upload_acknowledges_peer_close_before_disconnecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        serve_download(listener.accept().await.unwrap().0).await;
+        let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Binary(_)
+        ));
+        socket.close(None).await.unwrap();
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+                other => panic!("expected close acknowledgement, got {other:?}"),
+            }
+        }
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "upload-peer-close", shutdown).await;
+    assert_eq!(report.outcome, Outcome::Success);
+    assert_eq!(report.events.len(), 1, "{:?}", report.events);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        serve_download(listener.accept().await.unwrap().0).await;
+        let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        // Leave the receive side undrained so the client's bulk writes back up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        socket.send(Message::Ping(vec![1].into())).await.unwrap();
+        socket.send(Message::Text(METRICS.into())).await.unwrap();
+        socket.close(None).await.unwrap();
+        let _ = done_rx.await;
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "15s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = tokio::time::timeout(
+        Duration::from_secs(4),
+        measure_bandwidth(&config, "upload-backpressure", shutdown),
+    )
+    .await
+    .expect("peer Close must start bounded cleanup even behind a blocked Pong write");
+    let bandwidth = report.events.last().unwrap();
+    assert!(bandwidth.bytes_sent.unwrap() > 0);
+    assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5), "read metrics after Ping");
+    assert!(
+        report.events.iter().any(|event| {
+            event.request_stage == Some(RequestStage::Upload)
+                && event.error_kind == Some(ErrorKind::UploadFailed)
+                && event.outcome == Outcome::Error
+                && event.os_error_code.is_none()
+                && event.error_message.as_deref()
+                    == Some("upload close handshake timed out after 2s")
+        }),
+        "{:?}",
+        report.events
+    );
+    let _ = done_tx.send(());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
+    for (cancel, timeout, outcome) in [
+        (true, "15s", Outcome::Cancelled),
+        (false, "300ms", Outcome::Timeout),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            serve_download(listener.accept().await.unwrap().0).await;
+            let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+                .await
+                .unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Binary(_)
+            ));
+            socket.close(None).await.unwrap();
+            closing_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        let dir = tempdir().unwrap();
+        let config = direct_config(dir.path(), address, timeout);
+        let (shutdown_tx, shutdown) = cancellation_channel();
+        let (phase_tx, phase_rx) = tokio::sync::watch::channel(LoadPhase::Setup);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut gate = RecordingGate {
+            reserved: Arc::new(AtomicBool::new(false)),
+            calls: Arc::clone(&calls),
+        };
+        let task = tokio::spawn(async move {
+            measure_bandwidth_with_gate_and_phase(
+                &config,
+                "upload-cleanup-cancel",
+                shutdown,
+                &mut gate,
+                phase_tx,
+            )
+            .await
+        });
+        closing_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "cleanup must remain part of the bandwidth future"
+        );
+        assert_eq!(*phase_rx.borrow(), LoadPhase::Upload);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if cancel {
+            shutdown_tx.send(true).unwrap();
+        }
+        let report = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.outcome, outcome);
+        let _ = release_tx.send(());
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

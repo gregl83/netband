@@ -31,7 +31,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `target` | Ping target address |
 | `sequence` | ICMP sequence number |
 | `outcome` | Classified result listed below |
-| `duration_ms` | Whole attempt or test duration in milliseconds |
+| `duration_ms` | Attempt duration; for bandwidth, sum of direction measurement windows, excluding setup and upload close-handshake waiting |
 | `rtt_ms` | Successful ICMP round-trip time in milliseconds |
 | `packets_sent` | Probe count represented by the row |
 | `packets_received` | Successful reply count represented by the row |
@@ -50,7 +50,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `daily_runs_used` | Reserved starts for this provider and UTC day |
 | `download_mbps` | NDT7 download throughput in decimal Mb/s |
 | `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
-| `bytes_sent` | Binary application payload bytes accepted by the WebSocket sink; excludes WebSocket and TLS overhead |
+| `bytes_sent` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
 | `bytes_received` | Application payload bytes received |
 | `tcp_min_rtt_ms` | NDT7 TCPInfo minimum RTT in milliseconds |
 | `tcp_rtt_ms` | NDT7 TCPInfo current/smoothed RTT in milliseconds |
@@ -81,9 +81,21 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 Failures are data. A failed ping still produces a `ping_probe` and `ping_summary`; HTTP,
 TLS, WebSocket, download, and upload failures produce sanitized `request_failure` rows.
 
+NDT7 upload accepts new payloads for at most ten seconds after its handshake, or until
+the peer closes or a transport error occurs. Its rate uses locally accepted bytes and
+that active window, not confirmed server receipt. An accepted final payload may still
+drain during cleanup; neither those bytes nor pure close-handshake waiting are counted
+again. Upload cleanup has a separate two-second limit, subject to earlier cancellation
+or the whole-test timeout. A normal active-window deadline is not an error. A stalled
+close handshake produces an `upload_failed` diagnostic with
+`upload close handshake timed out after 2s`; other transport errors retain their details.
+Collected direction measurements remain available even when cleanup fails, so a
+bandwidth `success` means both rates are available, not that transport shutdown was clean.
+
 During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
 interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`
 covers discovery and connection work that does not itself represent throughput load.
+The upload phase includes bounded cleanup because buffered traffic can still drain.
 Load-classified pings remain durable measurements but are excluded from the health window
 that can request another bandwidth test. Join `load_run_id` to the bandwidth row's
 `run_id` when analyzing loaded latency. Because rows are committed as operations finish,

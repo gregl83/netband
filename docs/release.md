@@ -115,6 +115,5 @@ committed because they contain network metadata.
 - [ ] Package version is changed to `1.0.0`, `cargo package --locked` succeeds, and only
   then is the signed `v1.0.0` tag created.
 
-Current development version remains `0.2.0` until this checklist passes. Creating a tag
-or claiming a completed v1 without the live/provider and hardware evidence would make
-the checklist meaningless.
+The package version is defined in `Cargo.toml`. Do not create a release tag or claim
+release readiness until the required live/provider and hardware evidence is available.

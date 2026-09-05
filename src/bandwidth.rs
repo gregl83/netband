@@ -1,14 +1,15 @@
 use std::collections::HashSet;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
@@ -40,7 +41,10 @@ const NDT7_SUBPROTOCOL: &str = "net.measurementlab.ndt.v7";
 const MAX_RESOLVED_ADDRESSES: usize = 8;
 const MAX_MESSAGE_SIZE: usize = 1 << 24;
 const INITIAL_UPLOAD_MESSAGE_SIZE: usize = 1 << 13;
+const MAX_UPLOAD_MESSAGE_SIZE: usize = 1 << 20;
 const UPLOAD_SCALING_FRACTION: u64 = 16;
+const UPLOAD_DURATION: Duration = Duration::from_secs(10);
+const UPLOAD_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -727,50 +731,28 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         source_ip,
         mut failures,
     } = connected;
-    let (mut sender, mut receiver) = socket.split();
-    let mut payload = Message::Binary(upload_payload().into());
     report_phase(phase, LoadPhase::Upload);
-    let started = Instant::now();
-    let mut bytes = 0_u64;
-    let mut metrics = TcpMetrics::default();
-    let mut completed = false;
-    loop {
-        tokio::select! {
-            incoming = receiver.next() => match incoming {
-                Some(Ok(Message::Text(text))) => update_metrics(&mut metrics, text.as_ref()),
-                Some(Ok(Message::Ping(payload))) => {
-                    if let Err(error) = sender.send(Message::Pong(payload)).await {
-                        failures.push(stream_failure(candidate, RequestStage::Upload, remote_ip, source_ip, error.to_string(), websocket_os_error(&error)));
-                        break;
-                    }
-                }
-                Some(Ok(Message::Close(_))) => {
-                    completed = true;
-                    break;
-                }
-                Some(Ok(_)) => {}
-                Some(Err(error)) => {
-                    failures.push(stream_failure(candidate, RequestStage::Upload, remote_ip, source_ip, error.to_string(), websocket_os_error(&error)));
-                    break;
-                }
-                None => break,
-            },
-            sent = send_upload_payload(&mut sender, payload.clone(), &mut bytes) => match sent {
-                Ok(()) => {
-                    let next_size = next_upload_message_size(payload.len(), bytes);
-                    if next_size != payload.len() {
-                        payload = Message::Binary(upload_payload_with_size(next_size).into());
-                    }
-                }
-                Err(error) => {
-                    failures.push(stream_failure(candidate, RequestStage::Upload, remote_ip, source_ip, error.to_string(), websocket_os_error(&error)));
-                    break;
-                }
-            }
-        }
-    }
-    let elapsed = started.elapsed();
+    let UploadTransfer {
+        bytes,
+        elapsed,
+        metrics,
+        error,
+    } = transfer_upload(socket).await;
     report_phase(phase, LoadPhase::Setup);
+    if let Some(error) = error {
+        let os_error = match &error {
+            UploadError::Transport(error) => websocket_os_error(error),
+            _ => None,
+        };
+        failures.push(stream_failure(
+            candidate,
+            RequestStage::Upload,
+            remote_ip,
+            source_ip,
+            error.to_string(),
+            os_error,
+        ));
+    }
     if bytes == 0 {
         if failures.is_empty() {
             failures.push(stream_failure(
@@ -786,16 +768,6 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
             measurement: None,
             failures,
         };
-    }
-    if !completed && failures.is_empty() {
-        failures.push(stream_failure(
-            candidate,
-            RequestStage::Upload,
-            remote_ip,
-            source_ip,
-            "upload connection ended without a close frame".to_owned(),
-            None,
-        ));
     }
     DirectionResult {
         measurement: Some(DirectionMeasurement {
@@ -815,20 +787,140 @@ fn report_phase(phase: Option<&watch::Sender<LoadPhase>>, value: LoadPhase) {
     }
 }
 
-async fn send_upload_payload<S>(
-    sender: &mut S,
-    payload: Message,
-    bytes: &mut u64,
-) -> Result<(), S::Error>
+#[derive(Debug, Error)]
+enum UploadError {
+    #[error(transparent)]
+    Transport(#[from] WebSocketError),
+    #[error("upload connection ended without a close frame")]
+    MissingClose,
+    #[error("upload close handshake timed out after 2s")]
+    CloseTimeout,
+}
+
+#[derive(Debug)]
+struct UploadTransfer {
+    bytes: u64,
+    elapsed: Duration,
+    metrics: TcpMetrics,
+    error: Option<UploadError>,
+}
+
+enum UploadProgress {
+    Incoming(Option<Message>),
+    Accepted,
+    Flushed,
+}
+
+// Poll both directions without awaiting a write inside the receive path. The
+// caller retains flush state across incoming messages, so only one bulk frame
+// can be pending and an accepted frame is never replayed or counted twice.
+fn poll_upload_io<S>(
+    socket: &mut WebSocketStream<S>,
+    payload: Option<&Message>,
+    flushing: bool,
+    context: &mut Context<'_>,
+) -> Poll<Result<UploadProgress, WebSocketError>>
 where
-    S: Sink<Message> + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
-    let payload_bytes = payload.len() as u64;
-    sender.feed(payload).await?;
-    // feed returns immediately after the sink accepts the frame. Account here so a
-    // concurrent inbound message cannot cancel the following flush and lose these bytes.
-    *bytes = bytes.saturating_add(payload_bytes);
-    sender.flush().await
+    if let Poll::Ready(incoming) = Pin::new(&mut *socket).poll_next(context) {
+        return Poll::Ready(incoming.transpose().map(UploadProgress::Incoming));
+    }
+    if flushing {
+        ready!(Pin::new(socket).poll_flush(context))?;
+        return Poll::Ready(Ok(UploadProgress::Flushed));
+    }
+    if let Some(payload) = payload {
+        ready!(Pin::new(&mut *socket).poll_ready(context))?;
+        Pin::new(socket).start_send(payload.clone())?;
+        return Poll::Ready(Ok(UploadProgress::Accepted));
+    }
+    Poll::Pending
+}
+
+async fn transfer_upload<S>(mut socket: WebSocketStream<S>) -> UploadTransfer
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let started = tokio::time::Instant::now();
+    let mut deadline = started + UPLOAD_DURATION;
+    // None while Uploading; frozen on transition to Closing.
+    let mut elapsed = None;
+    let mut bytes = 0_u64;
+    let mut metrics = TcpMetrics::default();
+    let mut payload = Message::Binary(upload_payload().into());
+    let close = Message::Close(None);
+    let mut flushing = false;
+    let mut close_queued = false;
+    let mut peer_closed = false;
+
+    let error = loop {
+        let outgoing = if elapsed.is_none() {
+            Some(&payload)
+        } else if !close_queued {
+            Some(&close)
+        } else {
+            None
+        };
+        let progress = tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => {
+                if elapsed.is_some() {
+                    break Some(UploadError::CloseTimeout);
+                }
+                // The rate describes local payload acceptance during the active
+                // window, not delivery of the buffered tail or handshake waiting.
+                elapsed = Some(started.elapsed());
+                deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
+                continue;
+            }
+            progress = poll_fn(|context| poll_upload_io(&mut socket, outgoing, flushing, context)) => progress,
+        };
+        match progress {
+            Ok(UploadProgress::Incoming(Some(Message::Text(text)))) => {
+                update_metrics(&mut metrics, text.as_ref());
+            }
+            Ok(UploadProgress::Incoming(Some(Message::Close(_)))) => {
+                if elapsed.is_none() {
+                    elapsed = Some(started.elapsed());
+                    deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
+                }
+                peer_closed = true;
+                // Tungstenite queues the reply automatically, behind any partial
+                // bulk frame. Keep driving it until the peer closes the transport.
+                close_queued = true;
+                flushing = true;
+            }
+            Ok(UploadProgress::Incoming(Some(_))) => {}
+            Ok(UploadProgress::Incoming(None)) => {
+                break (!peer_closed).then_some(UploadError::MissingClose);
+            }
+            Ok(UploadProgress::Accepted) => {
+                flushing = true;
+                if elapsed.is_none() {
+                    bytes = bytes.saturating_add(payload.len() as u64);
+                } else {
+                    close_queued = true;
+                }
+            }
+            Ok(UploadProgress::Flushed) => {
+                flushing = false;
+                if elapsed.is_none() {
+                    let next_size = next_upload_message_size(payload.len(), bytes);
+                    if next_size != payload.len() {
+                        payload = Message::Binary(upload_payload_with_size(next_size).into());
+                    }
+                }
+            }
+            Err(error) => break Some(UploadError::Transport(error)),
+        }
+    };
+    UploadTransfer {
+        bytes,
+        elapsed: elapsed.unwrap_or_else(|| started.elapsed()),
+        metrics,
+        error,
+    }
 }
 
 struct ConnectedSocket {
@@ -1374,12 +1466,12 @@ fn update_metrics(metrics: &mut TcpMetrics, text: &str) {
 
 fn next_upload_message_size(current_size: usize, total_bytes: u64) -> usize {
     // Follow the adaptive sizing algorithm from the NDT7 specification appendix.
-    if current_size >= MAX_MESSAGE_SIZE
+    if current_size >= MAX_UPLOAD_MESSAGE_SIZE
         || current_size as u64 >= total_bytes / UPLOAD_SCALING_FRACTION
     {
         current_size
     } else {
-        current_size.saturating_mul(2).min(MAX_MESSAGE_SIZE)
+        current_size.saturating_mul(2).min(MAX_UPLOAD_MESSAGE_SIZE)
     }
 }
 
@@ -1412,65 +1504,25 @@ fn provider_kind(config: &ResolvedConfig) -> ProviderKind {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
+    use std::time::Duration;
 
-    use futures_util::{Sink, SinkExt};
-    use tokio_tungstenite::tungstenite::Message;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{DuplexStream, duplex};
+    use tokio::time::{Instant, advance};
+    use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::{Message, protocol::Role};
 
     use super::{
-        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_MESSAGE_SIZE, next_upload_message_size,
-        send_upload_payload, upload_payload,
+        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, UploadError,
+        next_upload_message_size, transfer_upload, upload_payload,
     };
 
-    #[derive(Debug, Default)]
-    struct PendingFlushSink {
-        accepted_bytes: usize,
-        accepted_frames: usize,
-        flush_polls: usize,
-        flush_ready: bool,
-        queued: bool,
-    }
-
-    impl Sink<Message> for PendingFlushSink {
-        type Error = io::Error;
-
-        fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            if self.queued {
-                Poll::Pending
-            } else {
-                Poll::Ready(Ok(()))
-            }
-        }
-
-        fn start_send(mut self: Pin<&mut Self>, message: Message) -> io::Result<()> {
-            assert!(!self.queued, "poll_ready must complete before start_send");
-            let Message::Binary(payload) = message else {
-                panic!("the upload helper must send a binary payload");
-            };
-            self.accepted_bytes += payload.len();
-            self.accepted_frames += 1;
-            self.queued = true;
-            Ok(())
-        }
-
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            _context: &mut Context<'_>,
-        ) -> Poll<io::Result<()>> {
-            self.flush_polls += 1;
-            if self.flush_ready {
-                self.queued = false;
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            }
-        }
-
-        fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            self.poll_flush(context)
-        }
+    async fn upload_pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+        let (client, server) = duplex(64);
+        (
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            WebSocketStream::from_raw_socket(server, Role::Server, None).await,
+        )
     }
 
     #[test]
@@ -1494,39 +1546,132 @@ mod tests {
             INITIAL_UPLOAD_MESSAGE_SIZE * 2
         );
 
-        let half_max = MAX_MESSAGE_SIZE / 2;
+        let half_max = MAX_UPLOAD_MESSAGE_SIZE / 2;
         assert_eq!(
             next_upload_message_size(half_max, (half_max * 16) as u64 + 16),
-            MAX_MESSAGE_SIZE
+            MAX_UPLOAD_MESSAGE_SIZE
         );
         assert_eq!(
-            next_upload_message_size(MAX_MESSAGE_SIZE, u64::MAX),
-            MAX_MESSAGE_SIZE
+            next_upload_message_size(MAX_UPLOAD_MESSAGE_SIZE, u64::MAX),
+            MAX_UPLOAD_MESSAGE_SIZE
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn accepted_payload_is_accounted_before_a_pending_flush_can_be_cancelled() {
-        let mut sink = PendingFlushSink::default();
-        let mut bytes = 0_u64;
-        let payload = Message::Binary(vec![7_u8; INITIAL_UPLOAD_MESSAGE_SIZE].into());
+    #[tokio::test(start_paused = true)]
+    async fn stalled_upload_stops_at_twelve_seconds_without_counting_cleanup_time() {
+        let (client, _server) = upload_pair().await;
+        let started = Instant::now();
+        let result = transfer_upload(client).await;
+        assert_eq!(started.elapsed(), Duration::from_secs(12));
+        assert_eq!(result.elapsed, Duration::from_secs(10));
+        assert_eq!(result.bytes, INITIAL_UPLOAD_MESSAGE_SIZE as u64);
+        assert!(matches!(result.error, Some(UploadError::CloseTimeout)));
+    }
 
-        let mut operation = Box::pin(send_upload_payload(&mut sink, payload, &mut bytes));
-        assert!(matches!(futures_util::poll!(&mut operation), Poll::Pending));
-        drop(operation);
+    #[tokio::test(start_paused = true)]
+    async fn incoming_messages_do_not_requeue_or_recount_a_blocked_payload() {
+        let (client, mut server) = upload_pair().await;
+        let upload = tokio::spawn(transfer_upload(client));
+        tokio::task::yield_now().await;
+        advance(Duration::from_secs(1)).await;
+        server.send(Message::Ping(vec![1].into())).await.unwrap();
+        for _ in 0..20 {
+            server
+                .send(Message::Text(r#"{"TCPInfo":{"RTT":2500}}"#.into()))
+                .await
+                .unwrap();
+        }
+        server.close(None).await.unwrap();
+        let result = upload.await.unwrap();
+        assert_eq!(result.bytes, INITIAL_UPLOAD_MESSAGE_SIZE as u64);
+        assert_eq!(result.elapsed, Duration::from_secs(1));
+        assert_eq!(result.metrics.rtt_ms, Some(2.5));
+        assert!(matches!(result.error, Some(UploadError::CloseTimeout)));
+    }
 
-        assert_eq!(sink.flush_polls, 1, "the operation must reach flush");
-        assert_eq!(sink.accepted_frames, 1);
-        assert_eq!(sink.accepted_bytes, INITIAL_UPLOAD_MESSAGE_SIZE);
-        assert_eq!(bytes, sink.accepted_bytes as u64);
+    #[tokio::test(start_paused = true)]
+    async fn upload_automatically_replies_to_ping_and_preserves_partial_frame_on_close() {
+        let (client, mut server) = upload_pair().await;
+        let upload = tokio::spawn(transfer_upload(client));
+        server.send(Message::Ping(vec![7].into())).await.unwrap();
+        let mut received = 0;
+        loop {
+            match server.next().await.unwrap().unwrap() {
+                Message::Binary(payload) => received += payload.len(),
+                Message::Pong(payload) => {
+                    assert_eq!(&payload[..], &[7]);
+                    break;
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        server.close(None).await.unwrap();
+        loop {
+            match server.next().await.unwrap().unwrap() {
+                Message::Binary(payload) => received += payload.len(),
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        drop(server);
+        let result = upload.await.unwrap();
+        assert!(result.error.is_none(), "{result:?}");
+        assert_eq!(result.bytes, received as u64);
+    }
 
-        sink.flush_ready = true;
-        sink.flush().await.unwrap();
-        assert!(!sink.queued);
-        assert_eq!(
-            sink.accepted_frames, 1,
-            "cancellation must not resend the frame"
-        );
+    #[tokio::test(start_paused = true)]
+    async fn abrupt_disconnect_retains_transport_error_and_accepted_bytes() {
+        let (client, server) = upload_pair().await;
+        let upload = tokio::spawn(transfer_upload(client));
+        tokio::task::yield_now().await;
+        drop(server);
+        let result = upload.await.unwrap();
+        assert_eq!(result.bytes, INITIAL_UPLOAD_MESSAGE_SIZE as u64);
+        assert!(matches!(result.error, Some(UploadError::Transport(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_drains_only_the_pending_payload_and_excludes_close_waiting() {
+        let (client, mut server) = upload_pair().await;
+        let started = Instant::now();
+        let upload = tokio::spawn(transfer_upload(client));
+        let Message::Binary(first) = server.next().await.unwrap().unwrap() else {
+            panic!("expected initial payload");
+        };
+        let mut received = first.len();
+        advance(Duration::from_secs(10)).await;
+        loop {
+            match server.next().await.unwrap().unwrap() {
+                Message::Binary(payload) => received += payload.len(),
+                Message::Close(_) => break,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        // Receiving Close queues the reply, but deliberately delay flushing it.
+        advance(Duration::from_secs(1)).await;
+        server.flush().await.unwrap();
+        drop(server);
+        let result = upload.await.unwrap();
+        assert!(result.error.is_none(), "{result:?}");
+        assert_eq!(result.elapsed, Duration::from_secs(10));
+        assert_eq!(started.elapsed(), Duration::from_secs(11));
+        assert_eq!(result.bytes, received as u64);
+        assert!(received <= 2 * INITIAL_UPLOAD_MESSAGE_SIZE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_peer_close_does_not_invent_measurement_bytes() {
+        let (client, mut server) = upload_pair().await;
+        server.close(None).await.unwrap();
+        let upload = tokio::spawn(transfer_upload(client));
+        assert!(matches!(
+            server.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+        drop(server);
+        let result = upload.await.unwrap();
+        assert!(result.error.is_none(), "{result:?}");
+        assert_eq!(result.bytes, 0);
     }
 }
 

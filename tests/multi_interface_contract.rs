@@ -398,7 +398,13 @@ mod loaded_tests {
                 }
             }
         }
-        let _ = upload.close(None).await;
+        upload.close(None).await.unwrap();
+        while let Some(message) = upload.next().await {
+            if matches!(message.unwrap(), Message::Close(_)) {
+                break;
+            }
+        }
+        drop(upload);
         tokio::time::sleep(Duration::from_millis(60)).await;
         let _ = shutdown.send(true);
     }

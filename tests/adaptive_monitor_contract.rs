@@ -131,7 +131,13 @@ async fn ndt_server(
         }
     }
     assert!(bytes >= 16 * 1024);
-    let _ = upload.close(None).await;
+    upload.close(None).await.unwrap();
+    while let Some(message) = upload.next().await {
+        if matches!(message.unwrap(), Message::Close(_)) {
+            break;
+        }
+    }
+    drop(upload);
     bandwidth_active.fetch_sub(1, Ordering::SeqCst);
     tokio::time::sleep(post_test_delay).await;
     let _ = shutdown.send(true);
