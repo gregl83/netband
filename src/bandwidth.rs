@@ -1105,9 +1105,11 @@ async fn connect_tcp(remote: SocketAddr, interface: Option<&str>) -> io::Result<
     if let Some(interface) = interface {
         bind_socket(&socket, interface, remote.is_ipv4())?;
     }
-    tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(remote))
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(remote))
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TCP connect timed out"))?
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TCP connect timed out"))??;
+    stream.set_nodelay(true)?;
+    Ok(stream)
 }
 
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
