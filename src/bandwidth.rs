@@ -9,7 +9,7 @@ use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{Sink, Stream, StreamExt};
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
@@ -629,19 +629,9 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         match message {
             Ok(Message::Binary(payload)) => bytes = bytes.saturating_add(payload.len() as u64),
             Ok(Message::Text(text)) => update_metrics(&mut metrics, text.as_ref()),
-            Ok(Message::Ping(payload)) => {
-                if let Err(error) = socket.send(Message::Pong(payload)).await {
-                    failures.push(stream_failure(
-                        candidate,
-                        RequestStage::Download,
-                        remote_ip,
-                        source_ip,
-                        error.to_string(),
-                        websocket_os_error(&error),
-                    ));
-                    break;
-                }
-            }
+            // tungstenite queues the pong automatically. subsequent reads drive
+            // its delivery while continuing to receive if writes are blocked.
+            Ok(Message::Ping(_)) => {}
             Ok(Message::Close(_)) => {
                 completed = true;
                 break;

@@ -21,7 +21,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::tempdir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -118,6 +118,107 @@ async fn successful_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<(
         serve_upload(upload).await;
     });
     (address, task)
+}
+
+#[tokio::test]
+async fn download_replies_to_ping_with_the_same_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        let payload = vec![0, 1, 127, 128, 255];
+        download
+            .send(Message::Ping(payload.clone().into()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(2), download.next())
+            .await
+            .expect("download must drive the automatic Pong without more incoming data")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, Message::Pong(payload.into()));
+        download
+            .send(Message::Binary(vec![3; 1024].into()))
+            .await
+            .unwrap();
+        download.close(None).await.unwrap();
+        serve_upload(listener.accept().await.unwrap().0).await;
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "download-pong", shutdown).await;
+    assert_eq!(report.outcome, Outcome::Success);
+    assert_eq!(report.events.last().unwrap().bytes_received, Some(1024));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn download_continues_while_pong_writes_are_backpressured() {
+    const MESSAGES: u64 = 4096;
+    const PAYLOAD_SIZE: u64 = 1024;
+
+    struct SmallSendBuffer;
+    impl TcpConnector for SmallSendBuffer {
+        fn connect<'a>(
+            &'a self,
+            remote: std::net::SocketAddr,
+            _interface: Option<&str>,
+        ) -> ConnectFuture<'a> {
+            Box::pin(async move {
+                let socket = TcpSocket::new_v4()?;
+                socket.set_send_buffer_size(1024)?;
+                socket.connect(remote).await
+            })
+        }
+    }
+
+    let listener = TcpSocket::new_v4().unwrap();
+    listener.set_recv_buffer_size(1024).unwrap();
+    listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = listener.listen(8).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        // Never drain the client's Pongs. Their volume exceeds both TCP buffers,
+        // while binary data must continue flowing in the opposite direction.
+        for _ in 0..MESSAGES {
+            download
+                .feed(Message::Ping(vec![7; 125].into()))
+                .await
+                .unwrap();
+            download
+                .feed(Message::Binary(vec![3; PAYLOAD_SIZE as usize].into()))
+                .await
+                .unwrap();
+        }
+        download.close(None).await.unwrap();
+        // Keep the download transport open and unread until the client has
+        // completed download and started upload; dropping it would unblock writes.
+        serve_upload(listener.accept().await.unwrap().0).await;
+        drop(download);
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth_with_network(
+        &config,
+        "download-pong-backpressure",
+        shutdown,
+        &SmallSendBuffer,
+        &netband::bandwidth::SystemAddressResolver,
+    )
+    .await;
+    assert_eq!(report.outcome, Outcome::Success, "{:?}", report.events);
+    assert_eq!(
+        report.events.last().unwrap().bytes_received,
+        Some(MESSAGES * PAYLOAD_SIZE)
+    );
+    server.await.unwrap();
 }
 
 async fn upload_size_server(
