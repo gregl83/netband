@@ -782,6 +782,57 @@ async fn every_direct_connection_receives_the_selected_interface() {
 }
 
 #[tokio::test]
+async fn tls_download_preserves_large_messages_and_replies_to_ping() {
+    let dir = tempdir().unwrap();
+    let (ca_path, server_config) = tls_material(dir.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(server_config);
+    let server = tokio::spawn(async move {
+        let tls = acceptor
+            .accept(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let mut download = accept_hdr_async(tls, accept_protocol).await.unwrap();
+        download
+            .send(Message::Binary(vec![3; 1024 * 1024].into()))
+            .await
+            .unwrap();
+        download.send(Message::Text(METRICS.into())).await.unwrap();
+        let payload = vec![0, 127, 128, 255];
+        download
+            .send(Message::Ping(payload.clone().into()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), download.next())
+            .await
+            .expect("TLS read buffering must not prevent automatic Pong delivery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, Message::Pong(payload.into()));
+        download
+            .send(Message::Binary(vec![5; 8192].into()))
+            .await
+            .unwrap();
+        download.close(None).await.unwrap();
+        let tls = acceptor
+            .accept(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        serve_upload(tls).await;
+    });
+    let config = tls_direct_config(dir.path(), address, &ca_path, "localhost");
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "tls-buffered-download", shutdown).await;
+    server.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    assert_eq!(
+        report.events.last().unwrap().bytes_received,
+        Some(1024 * 1024 + 8192)
+    );
+}
+
+#[tokio::test]
 async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_validation() {
     let dir = tempdir().unwrap();
     let (ca_path, server_config) = tls_material(dir.path());

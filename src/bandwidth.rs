@@ -14,7 +14,7 @@ use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::watch;
 use tokio_rustls::TlsConnector;
@@ -40,6 +40,7 @@ use crate::scheduler::{BandwidthOpportunity, ManualDecision, Scheduler, Schedule
 const NDT7_SUBPROTOCOL: &str = "net.measurementlab.ndt.v7";
 const MAX_RESOLVED_ADDRESSES: usize = 8;
 const MAX_MESSAGE_SIZE: usize = 1 << 24;
+const TLS_READ_BUFFER_SIZE: usize = 64 * 1024;
 const INITIAL_UPLOAD_MESSAGE_SIZE: usize = 1 << 13;
 const MAX_UPLOAD_MESSAGE_SIZE: usize = 1 << 20;
 const UPLOAD_SCALING_FRACTION: u64 = 16;
@@ -1156,6 +1157,9 @@ async fn wrap_stream(
                 .to_owned();
             let server_name = ServerName::try_from(name)
                 .map_err(|error| format!("invalid TLS server name: {error}"))?;
+            // batch TCP reads beneath TLS, which otherwise reads records in small chunks.
+            // keep this buffer for the entire connection so read-ahead bytes are preserved.
+            let tcp = BufReader::with_capacity(TLS_READ_BUFFER_SIZE, tcp);
             TlsConnector::from(Arc::new(config))
                 .connect(server_name, tcp)
                 .await
