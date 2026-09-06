@@ -113,14 +113,17 @@ by their operator.
 
 ## Validation against the NDT7 reference client
 
-Netband's measurement lifecycle is covered by automated contracts and local throughput
-checks. Upload runs for ten seconds with a separate bounded close handshake. Its rate
-uses locally accepted payload bytes, while the reference client uses server-side upload
-measurements; these observation points are not numerically interchangeable.
+A twenty-pair comparison of the current build against M-Lab's Go reference client
+completed all forty runs without diagnostics. Download medians were **53.17 Mb/s
+for Netband and 49.72 Mb/s for Go**, with a **+7.28% median paired difference**.
+The aggregate download deficit did not recur; results remained sensitive to run order.
 
-External reference-client agreement has not been established for the current
-implementation. See [NDT7 measurement validation](docs/ndt7-validation.md) for current
-coverage, local results, limitations, and the comparison procedure.
+Upload medians were 20.56 and 19.44 Mb/s respectively. Netband measures locally
+accepted payload bytes, while Go uses server-side upload measurements, so these
+values describe different observation points.
+
+See [NDT7 measurement validation](docs/ndt7-validation.md) for the recorded dataset,
+build identities, uncertainty, protocol coverage and reproduction commands.
 
 ## Running as a service
 

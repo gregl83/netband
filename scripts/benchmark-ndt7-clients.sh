@@ -183,3 +183,4 @@ done
 
 printf 'finished_at_utc=%s\n' "$(date -u --iso-8601=seconds)" >>"$output_dir/metadata.txt"
 python3 "$script_dir/summarize-ndt7-benchmark.py" "$measurements" "$output_dir"
+python3 "$script_dir/analyze-ndt7-benchmark.py" "$measurements" "$output_dir"

@@ -68,73 +68,103 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
 
 #[test]
 fn published_ndt7_validation_dataset_is_complete_and_sanitized() {
-    let path = root().join("docs/benchmarks/2026-09-03-akamai.csv");
-    let mut reader = csv::Reader::from_path(path).unwrap();
-    let headers = reader.headers().unwrap().clone();
+    let directory = root().join("docs/benchmarks/2026-09-06-akamai");
+    let mut reader = csv::Reader::from_path(directory.join("measurements.csv")).unwrap();
     assert_eq!(
-        headers.iter().collect::<Vec<_>>(),
+        reader.headers().unwrap().iter().collect::<Vec<_>>(),
         [
             "pair",
-            "first_client",
-            "netband_download_mbps",
-            "netband_upload_mbps",
-            "reference_download_mbps",
-            "reference_upload_mbps",
-            "netband_upload_end",
+            "position",
+            "client",
+            "exit_code",
+            "outcome",
+            "download_mbps",
+            "upload_mbps",
+            "diagnostic",
         ]
     );
-    assert!(headers.iter().all(|field| {
-        !field.contains("ip") && !field.contains("address") && !field.contains("timestamp")
-    }));
-
     let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(rows.len(), 20);
-    let mut warning_count = 0;
+    assert_eq!(rows.len(), 40);
     for (index, row) in rows.iter().enumerate() {
-        let pair = index + 1;
-        assert_eq!(row.get(0).unwrap().parse::<usize>().unwrap(), pair);
-        let expected_first = if pair % 2 == 1 {
-            "netband"
-        } else {
-            "reference"
-        };
-        assert_eq!(row.get(1), Some(expected_first));
-        for field in 2..=5 {
-            let value = row.get(field).unwrap().parse::<f64>().unwrap();
-            assert!(value.is_finite() && value > 0.0);
-        }
-        match row.get(6).unwrap() {
-            "clean" => {}
-            "broken_pipe" | "connection_reset" => warning_count += 1,
-            status => panic!("unexpected upload-end status {status}"),
-        }
-    }
-    assert_eq!(warning_count, 9);
-
-    fn median(mut values: Vec<f64>) -> f64 {
-        values.sort_by(f64::total_cmp);
-        (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
-    }
-    let values = |field: usize| {
-        rows.iter()
-            .map(|row| row.get(field).unwrap().parse::<f64>().unwrap())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(format!("{:.2}", median(values(2))), "21.84");
-    assert_eq!(format!("{:.2}", median(values(3))), "17.97");
-    assert_eq!(format!("{:.2}", median(values(4))), "22.24");
-    assert_eq!(format!("{:.2}", median(values(5))), "16.62");
-
-    let readme = fs::read_to_string(root().join("README.md")).unwrap();
-    let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
-    assert!(readme.contains("docs/ndt7-validation.md"));
-    assert!(validation.contains("benchmarks/2026-09-03-akamai.csv"));
-    for field in 2..=5 {
-        let documented = format!("{:.2}", median(values(field)));
-        assert!(
-            validation.contains(&documented),
-            "missing benchmark median: {documented}"
+        let pair = index / 2 + 1;
+        let first = index % 2 == 0;
+        assert_eq!(row[0].parse::<usize>().unwrap(), pair);
+        assert_eq!(&row[1], if first { "first" } else { "second" });
+        assert_eq!(
+            &row[2],
+            if (pair % 2 == 1) == first {
+                "netband"
+            } else {
+                "reference"
+            }
         );
+        row[3].parse::<i32>().unwrap();
+        assert!(matches!(
+            &row[4],
+            "success"
+                | "partial"
+                | "timeout"
+                | "unreachable"
+                | "permission_denied"
+                | "cancelled"
+                | "error"
+                | "no_capacity"
+                | "rate_limited"
+        ));
+        for field in 5..=6 {
+            if &row[4] == "success" {
+                let value = row[field].parse::<f64>().unwrap();
+                assert!(value.is_finite() && value > 0.0);
+            } else if !row[field].is_empty() {
+                assert!(row[field].parse::<f64>().unwrap().is_finite());
+            }
+        }
+        for diagnostic in row[7].split(';').filter(|value| !value.is_empty()) {
+            let (kind, code) = diagnostic.split_once(':').unwrap_or((diagnostic, ""));
+            assert!(matches!(
+                kind,
+                "download_failed"
+                    | "upload_failed"
+                    | "timeout"
+                    | "io"
+                    | "protocol"
+                    | "dns"
+                    | "connect"
+                    | "tls"
+                    | "websocket_handshake"
+                    | "http_status"
+                    | "cancelled"
+                    | "internal"
+            ));
+            if !code.is_empty() {
+                code.parse::<i32>().unwrap();
+            }
+        }
+    }
+    let summary: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("summary.json")).unwrap()).unwrap();
+    let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(readme.contains("docs/ndt7-validation.md"));
+    assert!(validation.contains("benchmarks/2026-09-06-akamai/measurements.csv"));
+    for client in ["netband", "reference"] {
+        for (field, direction) in [(5, "download_mbps"), (6, "upload_mbps")] {
+            let mut values: Vec<f64> = rows
+                .iter()
+                .filter(|row| &row[2] == client && &row[3] == "0" && &row[4] == "success")
+                .map(|row| row[field].parse().unwrap())
+                .collect();
+            values.sort_by(f64::total_cmp);
+            assert!(!values.is_empty());
+            let median = (values[(values.len() - 1) / 2] + values[values.len() / 2]) / 2.0;
+            let recorded = &summary["clients"][client][direction];
+            assert_eq!(recorded["n"].as_u64().unwrap(), values.len() as u64);
+            assert!((recorded["median"].as_f64().unwrap() - median).abs() < 1e-9);
+            assert!(
+                validation.contains(&format!("{median:.2}")),
+                "missing median for {client} {direction}"
+            );
+        }
     }
     assert!(validation.contains("ndt.example.com"));
 }
@@ -161,7 +191,8 @@ fn measurement_docs_describe_current_behavior_without_old_build_claims() {
     }
     assert!(validation.contains("Upload accepts payloads for ten seconds"));
     assert!(validation.contains("separate two-second allowance"));
-    assert!(validation.contains("requires a dedicated paired run"));
+    assert!(validation.contains("64 KiB"));
+    assert!(validation.contains("twenty pairs"));
     assert!(validation.contains("numerical agreement alone does not prove"));
 }
 

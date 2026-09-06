@@ -1,0 +1,24 @@
+{
+  "netband_revision": "8c214f5e810726fcd024174f3ee55dbf185f5487",
+  "reference_revision": "1f6adcf81a3f29cae933a2e317e86e24826e2900",
+  "build_command": "cargo build --release --locked",
+  "binaries": {
+    "netband": "b4857ba51b5a3077753ae43ccdd4beb62245418ba41e794277d0ad757b1e0519",
+    "ndt7-client": "26ba017c8bd37ad056b0f61ffc45b21027e90b314609cbeb355f64b3d6f6989f"
+  },
+  "pair_count": 20,
+  "cooldown_seconds": 10,
+  "date_utc": "2026-09-06",
+  "netband_version": "0.5.0",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "go": "go version go1.27.1 linux/amd64",
+  "environment": "Linux x86_64 host connected over Wi-Fi",
+  "server": "Same operator-authorized Akamai Cloud NDT7 server for both clients",
+  "order": "Netband first in odd pairs; reference first in even pairs",
+  "netband_measurement": "Binary application bytes / elapsed; upload uses locally accepted application bytes",
+  "reference_measurement": "Download uses last client AppInfo snapshot including text; upload uses server TCPInfo",
+  "source_clean_at_build": true,
+  "runtime": "Tokio multithreaded",
+  "tls_tcp_read_buffer_bytes": 65536,
+  "tcp_nodelay": true
+}

@@ -1,117 +1,166 @@
 # NDT7 measurement validation
 
-Validation addresses three separate questions:
-
-1. **Reliability:** are both direction measurements available, and do diagnostics
-   qualify their completion?
-2. **Repeatability:** how tightly do measurements cluster under fixed conditions?
-3. **Agreement:** how close are Netband and the NDT7 reference client's throughput
-   distributions?
-
-Agreement does not establish absolute accuracy. That requires calibrated traffic
-generation or a separately measured path with a known bottleneck.
+Validation addresses reliability, repeatability and agreement with the Go reference
+client. Agreement does not establish absolute accuracy: that requires calibrated
+traffic generation or a separately measured path with a known bottleneck.
 
 ## Measurement behavior
 
-Download throughput uses client-received application bytes and elapsed time. Upload
-throughput uses application payload bytes accepted by the local WebSocket sink during
-the active upload window. These bytes include any buffered tail, not confirmed server
-receipt. WebSocket and TLS overhead are excluded.
+Each direction uses one TCP/WebSocket connection. Download and upload run
+sequentially. Netband performs asynchronous I/O and batches TCP reads through a
+64 KiB buffer beneath TLS. TLS certificate validation, WebSocket framing and
+control responses remain active throughout the test.
+
+Download throughput uses client-received binary application bytes and elapsed time.
+Go's download summary uses its last periodic client snapshot and includes text
+measurement bytes. These are both client-side observations, with different sampling
+boundaries. Netband's upload throughput uses application payload bytes accepted by
+the local WebSocket sink during the active upload window, including any buffered
+tail. Go summarizes upload from server-side TCP measurements. Neither WebSocket nor
+TLS overhead is counted in Netband's application-byte rates.
 
 Upload accepts payloads for ten seconds after the handshake, or until the peer closes
-or a transport error occurs. Reads remain responsive while writes are blocked. Adaptive
-outbound payload sizing starts at 8 KiB and caps at 1 MiB; the inbound limit is 16 MiB.
-The close handshake has a separate two-second allowance, subject to earlier cancellation
-or the whole-test timeout. Cleanup adds neither measurement bytes nor measurement time.
+or a transport error occurs. Adaptive outbound payload sizing starts at 8 KiB and
+caps at 1 MiB; the inbound limit is 16 MiB. The close handshake has a
+separate two-second allowance, subject to earlier cancellation or the whole-test
+timeout. Cleanup adds neither
+measurement bytes nor measurement time. Incoming control messages remain responsive
+while writes are blocked.
 
-Normal expiration of the active window is not a failure. Unexpected transport errors
-and cleanup timeouts remain diagnostics. A terminal bandwidth `success` means both
-rates are available, not that shutdown was clean. See [Data format](data-format.md).
+A terminal bandwidth `success` means both rates are available, not that shutdown was
+clean. Unexpected transport errors and cleanup timeouts remain diagnostics. See
+[Data format](data-format.md).
 
 ## Reference-client benchmark
 
-M-Lab's Go `ndt7-client` was used alongside Netband to check comparable throughput
-and interoperability, complementing specification-oriented implementation tests.
-The [recorded paired measurements](benchmarks/2026-09-03-akamai.csv) contain twenty
-runs per client against the same nearby Akamai Cloud NDT7 server from one Wi-Fi-connected
-Linux host. Client order alternated within each pair, with a ten-second cooldown
-between individual runs.
+The current release build was compared with M-Lab's Go `ndt7-client` on
+**2026-09-06 UTC**: twenty pairs, forty sequential measurements, against the same
+operator-authorized Akamai Cloud NDT7 server from one Wi-Fi-connected Linux host.
+Netband ran first in odd-numbered pairs and Go ran first in even-numbered pairs.
+There was a ten-second cooldown between individual runs. Both directions ran in
+every measurement, with normal production binaries and no receive instrumentation.
+No compilation ran during measurement.
 
-| Client | Complete runs | Download median (p10–p90) | Upload median (p10–p90) |
+The [sanitized measurements](benchmarks/2026-09-06-akamai/measurements.csv),
+[generated summary](benchmarks/2026-09-06-akamai/summary.md),
+[machine-readable summary](benchmarks/2026-09-06-akamai/summary.json),
+[paired analysis](benchmarks/2026-09-06-akamai/paired-analysis.json), and
+[build metadata and binary hashes](benchmarks/2026-09-06-akamai/metadata.json)
+are checked in. Raw journals and client addresses are kept private.
+
+Netband revision: `8c214f5e810726fcd024174f3ee55dbf185f5487`. Go reference revision:
+`1f6adcf81a3f29cae933a2e317e86e24826e2900`. Netband was built with `cargo build --release --locked`
+and rustc 1.98.0 (88d9e12ae 2026-08-18); the reference used go version go1.27.1 linux/amd64.
+
+| Client | Complete runs | Diagnostic runs | Download median (p10–p90) Mb/s | Download CV | Upload median (p10–p90) Mb/s | Upload CV |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Go reference | 20/20 | 0 | 49.72 (47.58–54.49) | 6.52% | 19.44 (17.08–20.77) | 10.86% |
+| Netband | 20/20 | 0 | 53.17 (48.79–56.19) | 6.23% | 20.56 (19.30–22.65) | 6.63% |
+
+CV is the sample standard deviation divided by the mean. p10–p90 is the central
+80% of observed rates, not a confidence interval.
+
+| Direction | Complete pairs | Median paired difference | Median absolute paired difference | p90 absolute paired difference |
+| --- | ---: | ---: | ---: | ---: |
+| Download | 20 | +7.28% | 9.15% | 17.51% |
+| Upload | 20 | +6.68% | 7.32% | 25.17% |
+
+Paired differences are `(Netband / reference - 1) × 100`; positive values favor
+Netband. The median paired difference is distinct from the percentage difference
+between the two clients' median rates.
+
+### Run order and uncertainty
+
+| Direction | Netband first: median paired difference | Netband second: median paired difference | Exploratory 95% interval |
 | --- | ---: | ---: | ---: |
-| NDT7 reference client | 20/20 | 22.24 (19.75–23.17) Mb/s | 16.62 (16.05–17.33) Mb/s |
-| Netband | 20/20 | 21.84 (19.77–23.99) Mb/s | 17.97 (16.93–19.07) Mb/s |
+| Download | -4.96% | +11.48% | +2.43% to +12.17% |
+| Upload | +7.32% | +5.78% | +5.29% to +9.08% |
 
-Download medians differed by approximately 1.8%, with closely overlapping central
-80% ranges. Netband's upload median was approximately 8.1% higher. Different upload
-observation points, buffering, timing boundaries, and conditions between sequential
-runs can contribute to that offset; the results are similar, not interchangeable.
-Nine Netband runs retained upload-end diagnostics while still producing both rates.
+Intervals use 20,000 bootstrap resamples of adjacent two-pair blocks, preserving
+both run orders within each block. They are exploratory: longer-term path
+variation is not controlled. This is a comparison with the reference, not an
+isolated A/B test of the TCP buffer change.
 
-These measurements support comparable throughput under the tested conditions.
-Specification consistency is assessed separately through protocol behavior, message
-sizing, timing, and control-frame tests; numerical agreement alone does not prove
-conformance or absolute accuracy. The upload lifecycle's live reference-client agreement
-requires a dedicated paired run; the local checks below do not establish it.
+All forty runs completed with both direction rates and no recorded diagnostics.
+Netband's download median was 6.94% higher than Go's, and its median paired
+advantage was 7.28%. Netband was faster in 13 of 20 download pairs. The aggregate
+10% download deficit did not recur in this run.
+
+The order effect remains substantial: Netband's median paired difference was
+-4.96% when it ran first and +11.48% when it ran second. The positive aggregate
+result therefore does not establish an order-independent speed advantage. The
+exploratory download interval was +2.43% to +12.17% under the stated resampling
+method; its assumptions do not remove longer-term network variation.
+
+Upload medians were 20.56 Mb/s for Netband and 19.44 Mb/s for Go; the median paired
+difference was +6.68%. Those native measurements are not interchangeable.
+
+Native upload values describe different observation points. A higher Netband upload
+number does not by itself establish higher server-received throughput. Reported
+network variation and diagnostic counts are part of the result. One server and
+one Wi-Fi path cannot establish universal equivalence or a general speed advantage;
+numerical agreement alone does not prove protocol conformance or absolute accuracy.
 
 ## Automated coverage
 
-Upload unit and contract tests exercise:
+Download contracts verify TLS validation, exact application-byte counts across large
+messages, automatic matching Pong replies, and continued reception when control
+writes are backpressured. Upload unit and contract tests exercise:
 
-- the active deadline and bounded cleanup under blocked writes;
-- incoming Ping, measurement, and Close messages during backpressure;
-- automatic Pong responses and close acknowledgement;
-- partial-frame integrity, exact byte accounting, and adaptive payload limits;
-- early disconnects, no-data closure, and retained diagnostics;
-- exclusion of connection setup and close-handshake waiting from the upload window;
-- cancellation, whole-test timeout, and load-phase retention during cleanup.
+- active deadlines and bounded cleanup under blocked writes;
+- incoming Ping, measurement and Close messages during backpressure;
+- partial-frame integrity, exact byte accounting and adaptive payload limits;
+- early disconnects, no-data closure and retained diagnostics;
+- cancellation, whole-test timeout and load-phase retention during cleanup.
 
-Monitoring contracts also verify concurrent pings and serialized bandwidth execution.
+Monitoring contracts verify concurrent pings and serialized bandwidth execution.
+Published-data contracts verify the paired dataset, sanitized fields, and agreement
+between the dataset, generated summary and documented medians.
 
-## Local throughput checks
+## Reproduce the comparison
 
-A localhost-only WebSocket fixture exercised two runs per profile, three-second
-downloads, ten-second server upload windows, periodic Ping/measurement messages, and
-a fifteen-second hard disconnect. The throttled fixture paced application I/O at
-44 Mb/s down and 17.6 Mb/s up; the fast fixture had no rate limit.
-
-| Profile | Download median | Upload median |
-| --- | ---: | ---: |
-| Throttled | 43.987 Mb/s | 21.395 Mb/s |
-| Fast loopback | 46.700 Gb/s | 26.229 Gb/s |
-
-All four upload measurement windows ended at approximately 10.001 seconds. One
-throttled run exhausted the close allowance and reported a cleanup timeout; the other
-three had no diagnostics. Buffered data cannot always drain within two seconds.
-
-These are small functional/performance checks, not a calibrated path test or an
-external reference-client comparison. Sender-side buffering makes the throttled upload
-estimate exceed the fixture's receive pacing. Fast-loopback results are sensitive to
-host and fixture overhead. Neither profile establishes absolute accuracy or a general
-throughput guarantee. Treat these checks separately from the recorded reference-client
-benchmark and from a dedicated live comparison of the upload lifecycle.
-
-## Reference-client comparison procedure
-
-Run Netband and M-Lab's Go reference client sequentially against the same authorized
-endpoint, alternating their order and allowing a cooldown between runs:
+Build Netband and run both clients sequentially against an authorized endpoint:
 
 ```sh
+cargo build --release --locked
 NDT7_CLIENT_BIN=/path/to/ndt7-client \
-NETBAND_BIN=/path/to/netband \
+NETBAND_BIN="$PWD/target/release/netband" \
 ./scripts/benchmark-ndt7-clients.sh \
   ndt.example.com 20 10
 ```
 
-The arguments are server, pair count, and cooldown seconds. A fourth argument selects
-the output directory. Raw results and the generated summary default to the Git-ignored
-`.netband/benchmarks/` directory. Keep raw journals private: they can contain public and
-local client addresses. Use `ndt.example.com` as a documentation placeholder, not a
-public testing endpoint.
+The arguments are server, pair count and cooldown seconds. A fourth argument selects
+the output directory. The default is twenty pairs; any positive pair count is
+accepted, so `ndt.example.com 4 10` gives a quick four-pair screen. Use
+`ndt.example.com` as a documentation placeholder, not a public testing endpoint.
 
-Retain each client's native counters and timing boundaries. The reference client
-summarizes upload from server-side TCP measurements, whereas Netband uses local payload
-acceptance. Compare distributions rather than treating individual values as equivalent.
-Report medians, p10/p90, coefficients of variation, paired differences, and diagnostic
-counts separately. Repeat at different times and monitor server CPU and network limits
-before generalizing results. See [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md).
+Raw output and generated summaries default to the Git-ignored `.netband/benchmarks/`
+directory. Raw journals can contain client addresses; publish only whitelisted
+measurement fields. To regenerate the checked-in summary from the sanitized data:
+
+```sh
+python3 scripts/summarize-ndt7-benchmark.py \
+  docs/benchmarks/2026-09-06-akamai/measurements.csv \
+  docs/benchmarks/2026-09-06-akamai
+python3 scripts/analyze-ndt7-benchmark.py \
+  docs/benchmarks/2026-09-06-akamai/measurements.csv \
+  docs/benchmarks/2026-09-06-akamai
+```
+
+The benchmark harness runs both shared analysis scripts automatically. Each accepts
+a measurements CSV and an optional output directory, defaulting to the CSV's
+directory. Paired medians support small runs too; bootstrap intervals require at
+least two complete adjacent blocks with alternating run order and no unmatched
+successful pairs. Otherwise the intervals are `null`.
+
+Keep shared tooling in `scripts/`. Publish each retained run under
+`docs/benchmarks/<UTC-date>-<label>/` with sanitized `measurements.csv`,
+`metadata.json`, and generated `summary.json`, `summary.md`, and
+`paired-analysis.json`. Use a distinct label for multiple runs on the same date.
+Keep raw output and binaries in `.netband/benchmarks/`, and update this page to
+link to the current findings. Future runs reuse the tools without copying scripts.
+
+Retain exact binaries, hashes, source revisions, native counters and timing
+boundaries. Compare distributions, paired differences, run order and diagnostic
+counts. Repeat under other conditions before generalizing. See
+[Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md).
