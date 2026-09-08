@@ -163,7 +163,9 @@ interface exists, is up, and has an address suitable for each target family.
 
 **Exit 4 or repeated restart**
 
-Only one process may append an explicit CSV or own a scheduler state. Stop duplicate
+Only one process may write a CSV measurement journal (explicit or automatically named)
+or own a scheduler state. CSV locks are held on the open files, separate from
+systemd journal storage and the scheduler lock file. Stop duplicate
 units/manual runs. Inspect the unit with `systemctl status` and directory permissions with
 `sudo ls -ld /var/lib/netband/`; do not
 delete lock files while a process is running. The CSV header must match the

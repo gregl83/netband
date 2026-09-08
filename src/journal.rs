@@ -178,6 +178,7 @@ impl Journal<File> {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        lock_file(&file, &path)?;
         let mut journal = Self::from_writer(file)?;
         journal.sync = Some(File::sync_data);
         journal.flush()?;

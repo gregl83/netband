@@ -248,11 +248,11 @@ async fn upload_size_server(
 }
 
 fn tls_material(root: &std::path::Path) -> (PathBuf, Arc<ServerConfig>) {
-    let CertifiedKey { cert, key_pair } =
+    let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let ca_path = root.join("local-ca.pem");
     std::fs::write(&ca_path, cert.pem()).unwrap();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
     let server = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], key)

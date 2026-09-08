@@ -6,6 +6,12 @@ when their header exactly matches. On startup, an unterminated trailing record i
 discarded and reported to the operational log; completed malformed records fail closed.
 Each completed batch is flushed and synced.
 
+Explicit and automatically named CSV files hold an exclusive OS file lock from before
+header initialization or recovery until the file closes. A competing Netband writer
+fails without changing the file. The OS releases the lock when the process exits,
+including after a crash; there is no separate CSV lock file to remove. On Linux the
+lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
+
 ```csv
 schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message
 ```

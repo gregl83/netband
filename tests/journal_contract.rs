@@ -242,30 +242,33 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
 }
 
 #[test]
-fn explicit_output_lock_rejects_competing_writer_and_releases_on_drop() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("locked.csv");
-    let output = OutputTarget::File(path.clone());
+fn output_lock_rejects_competing_writers_and_releases_on_drop() {
+    for timestamped in [false, true] {
+        let dir = tempdir().unwrap();
+        let output = if timestamped {
+            OutputTarget::Directory(dir.path().to_path_buf())
+        } else {
+            OutputTarget::File(dir.path().join("locked.csv"))
+        };
+        let events = fixture_events();
+        let (mut first, path) = Journal::open_at(&output, timestamp(0)).unwrap();
+        first.append_batch(&events[..1]).unwrap();
+        let before = fs::read(&path).unwrap();
+        let explicit = OutputTarget::File(path.clone());
+        assert!(matches!(
+            Journal::open_at(&explicit, timestamp(1)),
+            Err(JournalError::Locked(locked)) if locked == path
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        drop(first);
 
-    let (first, _) = Journal::open_at(&output, timestamp(0)).unwrap();
-    assert!(matches!(
-        Journal::open_at(&output, timestamp(1)),
-        Err(JournalError::Locked(locked)) if locked == path
-    ));
-    drop(first);
-
-    let (mut restarted, _) = Journal::open_at(&output, timestamp(2)).unwrap();
-    restarted
-        .append_batch(&[fixture_events()[0].clone()])
-        .unwrap();
-    drop(restarted);
-    assert_eq!(
-        fs::read_to_string(path)
-            .unwrap()
-            .matches(CSV_HEADER)
-            .count(),
-        1
-    );
+        let (mut restarted, _) = Journal::open_at(&explicit, timestamp(2)).unwrap();
+        restarted.append_batch(&events[1..2]).unwrap();
+        drop(restarted);
+        let mut expected = Journal::from_writer(Vec::new()).unwrap();
+        expected.append_batch(&events[..2]).unwrap();
+        assert_eq!(fs::read(path).unwrap(), expected.into_inner().unwrap());
+    }
 }
 
 #[test]
