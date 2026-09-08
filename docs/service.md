@@ -67,6 +67,28 @@ The unit deliberately specifies `--console off`, `StandardOutput=null`, and
 measurement records are not duplicated into journald while startup, failures,
 scheduler decisions, and shutdown diagnostics remain available there.
 
+## Measurements and logs
+
+The packaged configuration writes measurements to `/var/lib/netband/netband.csv`.
+Change `output` in `/etc/netband/netband.toml` to select another file within the
+service's writable state directory.
+
+With `DynamicUser=yes` and `StateDirectory=netband`, systemd stores the directory at
+`/var/lib/private/netband` and exposes it through `/var/lib/netband` as a symlink.
+The CSV at either path is the same file. The private parent protects data when dynamic
+user IDs are reused; use `sudo` to inspect it from an administrator's shell.
+
+```sh
+sudo tail -f /var/lib/netband/netband.csv
+sudo journalctl -u netband.service -f
+sudo journalctl -u netband.service -n 100 --no-pager
+sudo journalctl -u netband.service -b
+```
+
+The journal contains operational diagnostics. CSV contains measurement and scheduler
+events; use a [CSV reader](data-format.md) for analysis. Press `Ctrl-C` to stop following
+output, or `q` to exit the journal pager.
+
 ## ICMP permissions
 
 Netband first uses the socket behavior provided by `surge-ping`. The reviewed unit
@@ -142,9 +164,11 @@ interface exists, is up, and has an address suitable for each target family.
 **Exit 4 or repeated restart**
 
 Only one process may append an explicit CSV or own a scheduler state. Stop duplicate
-units/manual runs. Check `/var/lib/netband` ownership through `systemctl status`; do not
-delete lock files while a process is running. An incompatible CSV header requires a new
-output file or an explicit migration, not manual header editing.
+units/manual runs. Inspect the unit with `systemctl status` and directory permissions with
+`sudo ls -ld /var/lib/netband/`; do not
+delete lock files while a process is running. The CSV header must match the
+[documented schema](data-format.md). If it does not, choose a new output file and
+preserve the existing journal; do not manually edit its header.
 
 **Bandwidth never starts**
 
@@ -174,13 +198,14 @@ recreate daily allowances. Recovery must preserve the reservation ledger.
    does not exceed the configured provider maximum.
 
 Never recover by deleting the initialization marker or reservation ledger. If neither
-state file is valid, retain all files and wait until the next UTC day or reconstruct the
-allowance conservatively before restarting.
+state file is valid, retain all files and keep bandwidth disabled until a complete,
+validated recovery set is available. Waiting until the next UTC day does not repair
+invalid or missing state. Ping-only monitoring can continue with `--no-bandwidth`.
 
 ## Raspberry Pi
 
 Use a 64-bit Raspberry Pi Linux image (`aarch64-unknown-linux-gnu`) and the pre-built
-binary above, or follow [Build from source](#build-from-source). Before a release is
-tagged, run [the release smoke](release.md) on real Pi hardware; CI's QEMU aarch64
-execution validates architecture/startup compatibility but not the board's kernel,
-interfaces, capabilities, thermals, or sustained NDT7 behavior.
+binary above, or follow [Build from source](#build-from-source). For hardware
+validation, run [the release smoke checks](release.md) on real Pi hardware; CI's QEMU
+aarch64 execution validates architecture/startup compatibility but not the board's
+kernel, interfaces, capabilities, thermals, or sustained NDT7 behavior.

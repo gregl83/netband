@@ -74,8 +74,8 @@ The default scheduler file is independent of the current working directory:
 
 If no platform home directory is available, Netband falls back to
 `.netband/state/scheduler.json` under the current directory. `--state-file` and the
-TOML `state_file` key always override these defaults. System services should continue
-to use an explicitly managed state path such as `/var/lib/netband/scheduler.json`.
+TOML `state_file` key always override these defaults. System services should use an
+explicitly managed state path such as `/var/lib/netband/scheduler.json`.
 
 ## M-Lab provider
 

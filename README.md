@@ -12,7 +12,7 @@ it keeps measuring and classifies latency by NDT7 phase for loaded-latency analy
 is built for unattended home lab and Raspberry Pi monitoring, especially when
 intermittent failures disappear before a manual speed test can capture them.
 
-**One speed test is a snapshot; Netband builds the timestamped evidence to show when your ISP falls short.**
+**Track network performance over time with timestamped measurements you can inspect and compare.**
 
 ## Five-minute quick start
 
@@ -113,10 +113,10 @@ by their operator.
 
 ## Validation against the NDT7 reference client
 
-A twenty-pair comparison of the current build against M-Lab's Go reference client
+A twenty-pair comparison recorded on 2026-09-06 against M-Lab's Go reference client
 completed all forty runs without diagnostics. Download medians were **53.17 Mb/s
 for Netband and 49.72 Mb/s for Go**, with a **+7.28% median paired difference**.
-The aggregate download deficit did not recur; results remained sensitive to run order.
+Results were sensitive to run order.
 
 Upload medians were 20.56 and 19.44 Mb/s respectively. Netband measures locally
 accepted payload bytes, while Go uses server-side upload measurements, so these
@@ -125,6 +125,22 @@ values describe different observation points.
 See [NDT7 measurement validation](docs/ndt7-validation.md) for the recorded dataset,
 build identities, uncertainty, protocol coverage and reproduction commands.
 
+## Research use
+
+Start with the [recorded-data analysis](docs/ndt7-validation.md#analyze-recorded-data-offline)
+to inspect the benchmark without sending network traffic. Preserve the executable
+hash, source revision, effective configuration, and measurement environment with
+each study's CSV journals. Review addresses and diagnostics before sharing data;
+token redaction does not anonymize a journal.
+
+Netband measures ICMP latency/loss and one TCP/WebSocket stream per NDT7 direction.
+These observations do not isolate an ISP as a cause or establish cluster interconnect,
+MPI, or RDMA performance. The recorded comparison covers one host and one server.
+
+Provider limits are enforced per scheduler state file. Separate hosts or independent
+state files do not share a budget. Coordinate targets, aggregate traffic, and provider
+authorization with the network operator before deploying across shared infrastructure.
+
 ## Running as a service
 
 The reviewed [systemd unit](packaging/netband.service) uses a non-root dynamic user,
@@ -132,16 +148,10 @@ keeps measurements out of journald, and grants only `CAP_NET_RAW`. Installation,
 ICMP permission setup, exit codes, state recovery, and troubleshooting are documented
 in [Service operation](docs/service.md).
 
-## Reference
+## Documentation
 
-- [Configuration and providers](docs/configuration.md)
-- [NDT7 reference-client validation](docs/ndt7-validation.md)
-- [Self-hosted NDT7 on Akamai Cloud](docs/akamai-ndt-server.md)
-- [CSV schema and outcomes](docs/data-format.md)
-- [Scheduling, triggers, cooldowns, and fairness](docs/scheduling.md)
-- [Privacy and provider data](PRIVACY.md)
-- [Service operation and recovery](docs/service.md)
-- [Release validation](docs/release.md)
+See the [documentation directory](docs/README.md) for configuration, service operation,
+data formats, scheduling, measurement validation, and release maintenance.
 
 ## License
 

@@ -20,7 +20,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `run_id` | Identifier for a measurement stream; automatic bandwidth attempts use a nested run ID |
 | `event_id` | Unique event identifier within the run |
 | `scheduled_at_utc` | Planned opportunity or trigger creation time |
-| `started_at_utc` | Actual attempt start time |
+| `started_at_utc` | Attempt start timestamp; bandwidth values are reconstructed as described below |
 | `finished_at_utc` | Event completion time |
 | `interface` | Selected Linux interface; empty means default route |
 | `source_ip` | Source address actually bound/used when known |
@@ -54,10 +54,23 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `bytes_received` | Application payload bytes received |
 | `tcp_min_rtt_ms` | NDT7 TCPInfo minimum RTT in milliseconds |
 | `tcp_rtt_ms` | NDT7 TCPInfo current/smoothed RTT in milliseconds |
-| `tcp_retransmissions` | NDT7 TCPInfo retransmitted-byte/count metric supplied by server |
+| `tcp_retransmissions` | NDT7 server TCPInfo `BytesRetrans` in bytes, despite the field name |
 | `os_error_code` | Operating-system error number when available |
 | `error_kind` | Stable machine-readable failure classification |
-| `error_message` | Sanitized human diagnostic; may change between versions |
+| `error_message` | Sanitized human diagnostic; wording may change in future releases |
+
+## Bandwidth field limitations
+
+Bandwidth `started_at_utc` is reconstructed from report time minus the download
+measurement window, or the upload window when download is unavailable. It excludes
+parts of the attempt and can be empty when no direction measurement is available;
+it is not a precise setup-start timestamp.
+
+`duration_ms` combines both direction windows. Separate windows are not exported, so
+both rates cannot be independently recomputed from that field and the byte counts.
+Source and remote addresses prefer upload when available. Each TCP metric independently
+prefers upload and falls back to download; the row does not identify the contributing
+connection for each metric. Treat `tcp_retransmissions` as bytes, not a packet count.
 
 ## Outcomes
 

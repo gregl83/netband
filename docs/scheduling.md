@@ -1,7 +1,8 @@
 # Scheduling, health, cooldowns, and fairness
 
-Netband maintains one persisted schedule per canonical provider ID. The cap is global
-to the provider, not per process, command, or interface. A reservation is recorded
+Netband maintains one persisted schedule per canonical provider ID. The cap is shared
+by processes, commands, and interfaces using that state file. Independent state files
+and hosts do not coordinate allowances. A reservation is recorded
 before the first NDT7 network connection, so crashes and restarts cannot restore it.
 
 ## Planned opportunities

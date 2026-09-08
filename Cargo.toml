@@ -1,6 +1,6 @@
 [package]
 name = "netband"
-version = "0.6.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Continuous network latency and bandwidth measurement daemon"
@@ -41,6 +41,6 @@ url = "2.5.8"
 webpki-roots = "1.0.9"
 
 [dev-dependencies]
-rcgen = "0.13.2"
+rcgen = "0.14.10"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["test-util"] }
