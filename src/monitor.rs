@@ -500,7 +500,7 @@ where
             }
         }
     }
-    if let Some(scheduler) = scheduler.as_ref() {
+    if let Some(scheduler) = scheduler.as_mut() {
         scheduler.flush()?;
     }
     Ok(stats)

@@ -77,6 +77,12 @@ If no platform home directory is available, Netband falls back to
 TOML `state_file` key always override these defaults. System services should use an
 explicitly managed state path such as `/var/lib/netband/scheduler.json`.
 
+The snapshot's accounting log and checkpoint must remain together. See
+[State recovery](service.md#state-recovery) before restoring or moving
+scheduler files; replacing only the snapshot does not reset provider allowances.
+State filenames ending in `.lock`, `.bak`, or `.initialized` conflict with recovery
+files and are rejected.
+
 ## M-Lab provider
 
 M-Lab uses its Locate API to select NDT7 servers. Automated operation is disabled until

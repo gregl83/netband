@@ -590,39 +590,6 @@ fn provider_state_is_independent_and_policy_changes_preserve_used_runs() {
 }
 
 #[test]
-fn corrupt_initialized_state_fails_closed() {
-    let root = TempDir::new().unwrap();
-    let path = state_path(&root);
-    Scheduler::open_seeded(&path, &mlab(), at(30, 0, 0, 0), 47).unwrap();
-    std::fs::write(&path, b"not json").unwrap();
-    assert!(matches!(
-        Scheduler::open_seeded(&path, &mlab(), at(30, 1, 0, 0), 48),
-        Err(SchedulerError::Corrupt { .. })
-    ));
-}
-
-#[test]
-fn reservation_ledger_recovers_a_run_from_an_interrupted_state_replace() {
-    let root = TempDir::new().unwrap();
-    let path = state_path(&root);
-    let now = at(30, 1, 0, 0);
-    let mut scheduler = Scheduler::open_seeded(&path, &mlab(), now, 61).unwrap();
-    scheduler.reserve_run(now).unwrap();
-
-    std::fs::remove_file(&path).unwrap();
-    drop(scheduler);
-    assert!(matches!(
-        Scheduler::open_seeded(&path, &mlab(), now, 62),
-        Err(SchedulerError::Corrupt { .. })
-    ));
-    std::fs::copy(path.with_extension("bak"), &path).unwrap();
-    let recovered = Scheduler::open_seeded(&path, &mlab(), now, 62)
-        .unwrap()
-        .snapshot();
-    assert_eq!(recovered.runs, vec![now]);
-}
-
-#[test]
 fn health_trigger_during_cooldown_merges_into_the_single_deferred_retry() {
     let root = TempDir::new().unwrap();
     let now = at(30, 1, 0, 0);

@@ -191,23 +191,53 @@ with a CSV reader; journald contains operational diagnostics only.
 
 ## State recovery
 
-Netband fails closed when initialized scheduler state is missing or corrupt. It does not
-recreate daily allowances. Recovery must preserve the reservation ledger.
+Scheduler state uses internal format 1, independent of CSV schema 1. The recovery set
+contains:
 
-1. Stop `netband.service` and confirm no Netband process holds `scheduler.lock`.
-2. Preserve `scheduler.json`, `scheduler.bak`, `scheduler.initialized`, and
-   `scheduler.reservations.jsonl` before making changes.
-3. Validate `scheduler.json` as JSON. If it is missing or invalid, validate
-   `scheduler.bak`, then copy the backup to `scheduler.json` without deleting the
-   initialization marker or reservation ledger.
-4. Restart the service. `StateDirectory` restores dynamic-user ownership.
-5. Confirm the startup log reports a state flush and the retained `daily_runs_used`
-   does not exceed the configured provider maximum.
+| File | Purpose |
+| --- | --- |
+| `scheduler.json` | Current scheduler snapshot |
+| `scheduler.bak` | Previous snapshot, when available |
+| `scheduler.accounting.jsonl` | Sequenced, checksummed accounting records for all providers |
+| `scheduler.initialized` | Installation identity and committed accounting checkpoint |
+| `scheduler.lock` | Exclusive scheduler ownership |
 
-Never recover by deleting the initialization marker or reservation ledger. If neither
-state file is valid, retain all files and keep bandwidth disabled until a complete,
-validated recovery set is available. Waiting until the next UTC day does not repair
-invalid or missing state. Ping-only monitoring can continue with `--no-bandwidth`.
+Reservations and cooldown changes are synced to the accounting log and checkpoint
+before snapshot replacement. A reservation is granted only after persistence succeeds.
+Restoring an older snapshot replays newer accounting, preserving consumed starts,
+last-start spacing, and provider cooldowns. Complete records beyond the checkpoint
+are retained conservatively after an interrupted commit; an incomplete or inconsistent
+log blocks bandwidth admission. Any persistence error requires reopening the scheduler
+before further admission.
+
+To recover a missing or corrupt primary snapshot:
+
+1. Stop `netband.service` and confirm no process owns `scheduler.lock`.
+2. Preserve the entire state directory, including temporary files, before making
+   changes.
+3. If a backup is available, copy `scheduler.bak` to `scheduler.json`. Leave the
+   accounting log and checkpoint untouched. Valid JSON alone does not establish a
+   valid recovery set; Netband checks installation identity, sequence, digests, and
+   snapshot accounting when opening it.
+4. Restart the service. Netband validates the recovery set under the state lock before
+   updating it or admitting traffic. Review `journalctl -u netband.service` for errors.
+
+If validation fails, retain the files and keep bandwidth disabled until a complete
+recovery set is available. Do not delete the checkpoint, trim accounting records, or
+hand-edit consumed allowances. Waiting for the next UTC day does not repair missing
+or invalid evidence. Ping-only monitoring can continue with `--no-bandwidth`.
+
+Interrupted initialization resumes automatically when the retained files establish
+that only the initial, zero-accounting state exists. An incomplete log is rejected.
+For a failed first installation known never to have admitted traffic, preserve and
+move aside its state directory before retrying initialization. This is not a recovery
+procedure for an installation that has already run bandwidth tests.
+
+These guarantees depend on local filesystem locking, atomic replacement, and file and
+directory syncing. They do not establish shared/network-filesystem support, recover a
+provider response that was never durably recorded, or detect replacement of every file
+with a mutually consistent older recovery set. The accounting log grows as accounting
+changes; CSV rotation does not rotate it.
 
 ## Raspberry Pi
 

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
@@ -14,6 +13,10 @@ use crate::health::{DegradationReason, HealthDecision};
 use crate::model::{
     ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
 };
+
+mod persistence;
+
+use persistence::{Checkpoint, Persistence};
 
 const STATE_SCHEMA_VERSION: u8 = 1;
 const DAY_SECONDS: i64 = 86_400;
@@ -44,6 +47,8 @@ impl SchedulerError {
 struct SchedulerStore {
     schema_version: u8,
     providers: BTreeMap<String, ProviderState>,
+    #[serde(default)]
+    checkpoint: Option<Checkpoint>,
 }
 
 impl Default for SchedulerStore {
@@ -51,6 +56,7 @@ impl Default for SchedulerStore {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             providers: BTreeMap::new(),
+            checkpoint: None,
         }
     }
 }
@@ -73,7 +79,7 @@ struct ProviderState {
     last_observed_utc: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DeferredOpportunity {
     reason: TriggerReason,
     #[serde(default)]
@@ -94,12 +100,6 @@ struct PendingTrigger {
 struct InterfaceTriggerState {
     pending: Option<PendingTrigger>,
     latched: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReservationLedgerEntry {
-    provider_id: String,
-    started_at_utc: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +175,7 @@ pub struct Reservation {
 #[derive(Debug)]
 pub struct Scheduler {
     path: PathBuf,
-    _lock: File,
+    persistence: Persistence,
     store: SchedulerStore,
     policy: SchedulerPolicy,
     event_number: u64,
@@ -197,25 +197,19 @@ impl Scheduler {
         seed: u64,
     ) -> Result<Self, SchedulerError> {
         let path = path.into();
-        let lock = acquire_state_lock(&path)?;
-        let store = load_store(&path)?;
-        if store.schema_version != STATE_SCHEMA_VERSION {
-            return Err(SchedulerError::UnsupportedSchema(store.schema_version));
-        }
+        let (persistence, store, recovered) = Persistence::open(&path)?;
         let mut scheduler = Self {
             path,
-            _lock: lock,
+            persistence,
             store,
             policy: SchedulerPolicy::from(config),
             event_number: 0,
         };
-        let mut changed = scheduler.reconcile(now, seed);
-        let ledger_changed = scheduler.merge_reservation_ledger()?;
-        if ledger_changed {
+        let changed = scheduler.reconcile(now, seed);
+        if recovered {
             scheduler.replan_remaining(now);
-            changed = true;
         }
-        if changed || !scheduler.path.exists() {
+        if changed || recovered || scheduler.persistence.needs_snapshot(&scheduler.store) {
             scheduler.persist()?;
         }
         Ok(scheduler)
@@ -554,12 +548,11 @@ impl Scheduler {
                 blocked.message
             )));
         }
-        append_reservation(&self.path, &self.policy.provider_id, now)?;
         let daily_runs_used = {
             let state = self.state_mut();
             state.runs.push(now);
             state.runs.sort_unstable();
-            state.last_started_at_utc = Some(now);
+            state.last_started_at_utc = state.last_started_at_utc.max(Some(now));
             state.last_observed_utc = state.last_observed_utc.max(now);
             runs_on_day(state, now.date_naive())
         };
@@ -583,7 +576,6 @@ impl Scheduler {
                 .unwrap_or_else(|| self.next_backoff());
             let deadline = add_duration(now, cooldown);
             let day_deadline = day_end(now.date_naive());
-            let deadline = deadline.min(day_deadline);
             {
                 let state = self.state_mut();
                 state.cooldown_until_utc = Some(deadline);
@@ -786,24 +778,6 @@ impl Scheduler {
         jitter_duration(state, base)
     }
 
-    fn merge_reservation_ledger(&mut self) -> Result<bool, SchedulerError> {
-        let entries = load_reservations(&self.path)?;
-        let provider_id = self.policy.provider_id.clone();
-        let state = self.state_mut();
-        let before = state.runs.len();
-        for entry in entries
-            .into_iter()
-            .filter(|entry| entry.provider_id == provider_id)
-        {
-            if !state.runs.contains(&entry.started_at_utc) {
-                state.runs.push(entry.started_at_utc);
-            }
-            state.last_started_at_utc = state.last_started_at_utc.max(Some(entry.started_at_utc));
-        }
-        state.runs.sort_unstable();
-        Ok(state.runs.len() != before)
-    }
-
     fn block_reason(&self, now: DateTime<Utc>) -> Option<BlockReason> {
         let state = self.state();
         let used = runs_on_day(state, now.date_naive());
@@ -945,11 +919,11 @@ impl Scheduler {
         event
     }
 
-    fn persist(&self) -> Result<(), SchedulerError> {
-        persist_store(&self.path, &self.store)
+    fn persist(&mut self) -> Result<(), SchedulerError> {
+        self.persistence.persist(&mut self.store)
     }
 
-    pub fn flush(&self) -> Result<(), SchedulerError> {
+    pub fn flush(&mut self) -> Result<(), SchedulerError> {
         self.persist()?;
         tracing::info!(path = %self.path.display(), "scheduler state flushed");
         Ok(())
@@ -1179,252 +1153,4 @@ fn stage_text(stage: RequestStage) -> &'static str {
         RequestStage::Download => "download",
         RequestStage::Upload => "upload",
     }
-}
-
-fn load_store(path: &Path) -> Result<SchedulerStore, SchedulerError> {
-    if !path.exists() {
-        if marker_path(path).exists() {
-            return Err(SchedulerError::Corrupt {
-                path: path.to_path_buf(),
-                message: format!(
-                    "initialized state is missing; stop Netband and recover explicitly from {}",
-                    backup_path(path).display()
-                ),
-            });
-        }
-        return Ok(SchedulerStore::default());
-    }
-    let bytes = fs::read(path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    parse_store(path, &bytes)
-}
-
-fn parse_store(path: &Path, bytes: &[u8]) -> Result<SchedulerStore, SchedulerError> {
-    serde_json::from_slice(bytes).map_err(|source| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: source.to_string(),
-    })
-}
-
-fn persist_store(path: &Path, store: &SchedulerStore) -> Result<(), SchedulerError> {
-    let parent = path.parent().ok_or_else(|| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: "state file has no parent".to_owned(),
-    })?;
-    fs::create_dir_all(parent).map_err(|source| SchedulerError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let bytes = serde_json::to_vec_pretty(store).expect("scheduler state serializes");
-    let temporary = temporary_path(path);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    drop(file);
-
-    preserve_backup(path)?;
-    replace_state_file(&temporary, path)?;
-    sync_parent(parent)?;
-    let marker = marker_path(path);
-    if !marker.exists() {
-        File::create(&marker)
-            .and_then(|file| file.sync_all())
-            .map_err(|source| SchedulerError::Io {
-                path: marker,
-                source,
-            })?;
-        sync_parent(parent)?;
-    }
-    Ok(())
-}
-
-fn acquire_state_lock(path: &Path) -> Result<File, SchedulerError> {
-    let parent = path.parent().ok_or_else(|| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: "state file has no parent".to_owned(),
-    })?;
-    fs::create_dir_all(parent).map_err(|source| SchedulerError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let lock_path = lock_path(path);
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| SchedulerError::Io {
-            path: lock_path.clone(),
-            source,
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(SchedulerError::Locked(lock_path)),
-        Err(std::fs::TryLockError::Error(source)) => Err(SchedulerError::Io {
-            path: lock_path,
-            source,
-        }),
-    }
-}
-
-fn preserve_backup(path: &Path) -> Result<(), SchedulerError> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let backup = backup_path(path);
-    let temporary = backup.with_extension(format!("bak.tmp.{}", std::process::id()));
-    let contents = fs::read(path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    file.write_all(&contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    drop(file);
-    if backup.exists() {
-        fs::remove_file(&backup).map_err(|source| SchedulerError::Io {
-            path: backup.clone(),
-            source,
-        })?;
-    }
-    fs::rename(&temporary, &backup).map_err(|source| SchedulerError::Io {
-        path: backup,
-        source,
-    })
-}
-
-#[cfg(unix)]
-fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
-    fs::rename(temporary, path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|source| SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
-    if let Err(source) = fs::rename(temporary, path) {
-        let backup = backup_path(path);
-        if backup.exists() {
-            let _ = fs::copy(&backup, path);
-        }
-        return Err(SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> Result<(), SchedulerError> {
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> Result<(), SchedulerError> {
-    Ok(())
-}
-
-fn append_reservation(
-    state_path: &Path,
-    provider_id: &str,
-    started_at_utc: DateTime<Utc>,
-) -> Result<(), SchedulerError> {
-    let path = reservation_path(state_path);
-    let entry = ReservationLedgerEntry {
-        provider_id: provider_id.to_owned(),
-        started_at_utc,
-    };
-    let mut bytes = serde_json::to_vec(&entry).expect("reservation entry serializes");
-    bytes.push(b'\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|source| SchedulerError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io { path, source })
-}
-
-fn load_reservations(state_path: &Path) -> Result<Vec<ReservationLedgerEntry>, SchedulerError> {
-    let path = reservation_path(state_path);
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(SchedulerError::Io { path, source }),
-    };
-    contents
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, line)| {
-            serde_json::from_str(line).map_err(|source| SchedulerError::Corrupt {
-                path: path.clone(),
-                message: format!("reservation ledger line {}: {source}", index + 1),
-            })
-        })
-        .collect()
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("tmp.{}", std::process::id()))
-}
-
-fn backup_path(path: &Path) -> PathBuf {
-    path.with_extension("bak")
-}
-
-fn marker_path(path: &Path) -> PathBuf {
-    path.with_extension("initialized")
-}
-
-fn reservation_path(path: &Path) -> PathBuf {
-    path.with_extension("reservations.jsonl")
-}
-
-fn lock_path(path: &Path) -> PathBuf {
-    path.with_extension("lock")
 }

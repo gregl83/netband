@@ -55,7 +55,8 @@ Four reservations suppress any fifth manual, scheduled, or triggered start.
 ## Rate limits
 
 Provider-wide limits are retained in scheduler state. A valid `Retry-After` value is
-used exactly, bounded by the end of the UTC day. Without one, backoff starts at 60
+retained across UTC day boundaries and restarts. A day rollover does not shorten the
+provider cooldown. Without a valid value, backoff starts at 60
 seconds, doubles through the configured 16-minute ceiling, and adds persisted random
 jitter. Locate `204`, `429`, and relevant `503` responses and direct WebSocket `503`
 responses are classified according to provider scope. Deferred discovery is attempted
@@ -77,5 +78,5 @@ block another interface. Netband records only interface/source bindings actually
 While NDT7 is active, ping rounds temporarily stay on its selected interface so each
 loaded sample has direct interface attribution. Normal rotation resumes afterward.
 
-Scheduler state, its initialization marker, backup, reservation ledger, and lock are
+Scheduler state, its accounting checkpoint, backup, accounting log, and lock are
 operational data. See [Service operation](service.md#state-recovery) before recovery.
