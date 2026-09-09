@@ -353,3 +353,110 @@ async fn one_shot_cli_pipeline_records_all_rows_and_separates_console_modes() {
     assert!(off.is_empty());
     assert_eq!(off_csv.len(), 4);
 }
+
+#[tokio::test]
+async fn invalid_rounds_fail_before_transport_work() {
+    use netband::ping::PingRoundError;
+    let transport = Arc::new(FakeTransport::new([]));
+    for (targets, expected) in [
+        (vec![], "empty"),
+        (vec![ip("192.0.2.1"); 2], "duplicate"),
+        (vec![ip("192.0.2.1"); 65_537], "too many"),
+    ] {
+        let error = measure_round(Arc::clone(&transport), round(targets))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            (expected, error),
+            ("empty", PingRoundError::NoTargets)
+                | ("duplicate", PingRoundError::DuplicateTarget(_))
+                | ("too many", PingRoundError::TooManyTargets)
+        ));
+    }
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn panicked_probe_keeps_other_targets_and_load_context() {
+    let targets = vec![ip("192.0.2.1"), ip("192.0.2.2")];
+    // The absent first behavior intentionally panics inside its spawned probe task.
+    let transport = Arc::new(FakeTransport::new([(
+        targets[1],
+        behavior(0, success(targets[1], 1, 3)),
+    )]));
+    let mut request = round(targets.clone());
+    request.load_phase = Some(LoadPhase::Upload);
+    request.load_run_id = Some("load-1".to_owned());
+    let report = measure_round(transport, request).await.unwrap();
+    assert_eq!((report.successful_targets, report.failed_targets), (1, 1));
+    let failed = &report.events[..2];
+    assert!(
+        failed
+            .iter()
+            .all(|event| event.error_kind == Some(ErrorKind::Protocol)
+                && event.load_phase == Some(LoadPhase::Upload)
+                && event.load_run_id.as_deref() == Some("load-1")
+                && event.duration_ms == Some(0.0))
+    );
+    assert_eq!(failed[1].packets_sent, Some(0));
+    assert_eq!(report.events[2].outcome, Outcome::Success);
+    assert_eq!(report.events[2].target, Some(targets[1].to_string()));
+}
+
+#[tokio::test]
+async fn sequence_wrap_and_ipv6_reply_validation_preserve_measurements() {
+    let targets = vec![ip("::1"), ip("2001:db8::1")];
+    let transport = Arc::new(FakeTransport::new(targets.iter().enumerate().map(
+        |(index, target)| {
+            let mut attempt = success(*target, index as u16, 0);
+            let reply = attempt.result.as_mut().unwrap();
+            reply.identifier = Some(42);
+            reply.icmp_type = 129;
+            reply.rtt = Duration::from_micros(125);
+            (*target, behavior(0, attempt))
+        },
+    )));
+    let mut request = round(targets);
+    request.round_number = 32_768;
+    let report = measure_round(Arc::clone(&transport), request)
+        .await
+        .unwrap();
+    assert_eq!(report.exit_status().code(), 0);
+    for (index, pair) in report.events.as_chunks::<2>().0.iter().enumerate() {
+        assert_eq!(pair[0].sequence, Some(index as u16));
+        assert_eq!(pair[0].icmp_type, Some(129));
+        assert_eq!(pair[0].rtt_ms, Some(0.125));
+        assert_eq!(pair[1].packets_received, Some(1));
+        assert_eq!(pair[1].packet_loss_pct, Some(0.0));
+    }
+}
+
+#[tokio::test]
+async fn io_failure_retains_os_error_and_unsent_accounting() {
+    let target = ip("192.0.2.1");
+    let transport = Arc::new(FakeTransport::new([(
+        target,
+        behavior(
+            0,
+            ProbeAttemptResult {
+                binding: binding("192.0.2.10"),
+                sent: false,
+                result: Err(ProbeFailure::Io {
+                    os_error_code: Some(5),
+                    message: "send failed".to_owned(),
+                }),
+            },
+        ),
+    )]));
+    let report = measure_round(transport, round(vec![target])).await.unwrap();
+    for event in &report.events {
+        assert_eq!(event.outcome, Outcome::Error);
+        assert_eq!(event.error_kind, Some(ErrorKind::Io));
+        assert_eq!(event.os_error_code, Some(5));
+        assert_eq!(event.error_message.as_deref(), Some("send failed"));
+        assert_eq!(event.rtt_ms, None);
+    }
+    assert_eq!(report.events[1].packets_sent, Some(0));
+    assert_eq!(report.events[1].packets_received, Some(0));
+    assert_eq!(report.events[1].packet_loss_pct, Some(100.0));
+}

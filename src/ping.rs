@@ -917,3 +917,203 @@ fn map_io_reference(error: &io::Error) -> ProbeFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use if_addrs::{IfAddr, IfOperStatus, Ifv4Addr, Ifv6Addr, Interface};
+
+    fn interface(address: &str) -> Interface {
+        let addr = match address.parse().unwrap() {
+            IpAddr::V4(ip) => IfAddr::V4(Ifv4Addr {
+                ip,
+                netmask: Ipv4Addr::UNSPECIFIED,
+                prefixlen: 0,
+                broadcast: None,
+            }),
+            IpAddr::V6(ip) => IfAddr::V6(Ifv6Addr {
+                ip,
+                netmask: Ipv6Addr::UNSPECIFIED,
+                prefixlen: 0,
+                broadcast: None,
+            }),
+        };
+        Interface {
+            name: "test0".to_owned(),
+            addr,
+            index: Some(7),
+            oper_status: IfOperStatus::Up,
+            is_p2p: false,
+            #[cfg(windows)]
+            adapter_name: "test0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn source_selection_preserves_family_scope_and_interface_index() {
+        let addresses = [
+            interface("192.0.2.1"),
+            interface("127.0.0.1"),
+            interface("2001:db8::1"),
+            interface("fe80::1"),
+        ];
+        for (target, expected) in [
+            ("192.0.2.2", "192.0.2.1"),
+            ("127.0.0.2", "127.0.0.1"),
+            ("2001:db8::2", "2001:db8::1"),
+            ("fe80::2", "fe80::1"),
+        ] {
+            let source =
+                resolve_source(target.parse().unwrap(), Some("test0"), Ok(&addresses)).unwrap();
+            assert_eq!(source.address, expected.parse::<IpAddr>().unwrap());
+            assert_eq!(source.index, Some(7));
+        }
+        let fallback = resolve_source(
+            "127.0.0.2".parse().unwrap(),
+            Some("test0"),
+            Ok(&addresses[..1]),
+        )
+        .unwrap();
+        assert_eq!(fallback.address, "192.0.2.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn default_route_selects_a_local_source_without_interface_enumeration() {
+        let unavailable = io::Error::other("interface enumeration unavailable");
+        let source =
+            resolve_source(IpAddr::V4(Ipv4Addr::LOCALHOST), None, Err(&unavailable)).unwrap();
+        assert_eq!(source.address, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(source.index, None);
+    }
+
+    #[test]
+    fn source_selection_reports_missing_down_wrong_family_and_enumeration_failures() {
+        let target = "192.0.2.2".parse().unwrap();
+        let mut down = interface("192.0.2.1");
+        down.oper_status = IfOperStatus::Down;
+        for (addresses, expected) in [
+            (vec![], "does not exist"),
+            (vec![down], "not up"),
+            (vec![interface("::1")], "no address matching"),
+        ] {
+            let failure = resolve_source(target, Some("test0"), Ok(&addresses)).unwrap_err();
+            assert!(
+                matches!(failure, ProbeFailure::Io { ref message, .. } if message.contains(expected))
+            );
+        }
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            let error = io::Error::new(kind, "enumeration failed");
+            let failure = resolve_source(target, Some("test0"), Err(&error)).unwrap_err();
+            assert_eq!(failure, map_io(io::Error::new(kind, "enumeration failed")));
+        }
+        assert!(matches!(
+            resolve_source("fe80::1".parse().unwrap(), None, Ok(&[])),
+            Err(ProbeFailure::Io { message, .. }) if message.contains("interface is required")
+        ));
+    }
+
+    #[test]
+    fn io_mapping_preserves_kind_os_code_and_diagnostic() {
+        for code in [13, 5] {
+            let error = io::Error::from_raw_os_error(code);
+            let expected = match error.kind() {
+                io::ErrorKind::PermissionDenied => ProbeFailure::PermissionDenied {
+                    os_error_code: Some(code),
+                    message: error.to_string(),
+                },
+                _ => ProbeFailure::Io {
+                    os_error_code: Some(code),
+                    message: error.to_string(),
+                },
+            };
+            assert_eq!(map_io_reference(&error), expected);
+            assert_eq!(map_io(error), expected);
+        }
+    }
+
+    #[test]
+    fn transport_error_mapping_distinguishes_sent_and_unsent_failures() {
+        use surge_ping::{PingSequence, SurgeError};
+        for (error, expected, sent) in [
+            (
+                SurgeError::Timeout {
+                    seq: PingSequence(1),
+                },
+                ProbeFailure::Timeout,
+                true,
+            ),
+            (SurgeError::ClientDestroyed, ProbeFailure::Cancelled, false),
+            (
+                SurgeError::NetworkError,
+                ProbeFailure::Io {
+                    os_error_code: None,
+                    message: "ICMP receive task stopped before a reply arrived".to_owned(),
+                },
+                true,
+            ),
+            (
+                SurgeError::IOError(io::Error::other("send failed")),
+                ProbeFailure::Io {
+                    os_error_code: None,
+                    message: "send failed".to_owned(),
+                },
+                false,
+            ),
+            (
+                SurgeError::IncorrectBufferSize,
+                ProbeFailure::Protocol {
+                    message: SurgeError::IncorrectBufferSize.to_string(),
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(map_surge_error(error), (expected, sent));
+        }
+    }
+
+    #[test]
+    fn packet_type_and_code_are_read_for_both_protocols() {
+        assert_eq!(
+            packet_type_code(&surge_ping::IcmpPacket::V4(Default::default())),
+            (0, 0)
+        );
+        assert_eq!(
+            packet_type_code(&surge_ping::IcmpPacket::V6(
+                surge_ping::Icmpv6Packet::decode(&[129, 3, 0, 0, 0, 7, 0, 8], Ipv6Addr::LOCALHOST)
+                    .unwrap(),
+            )),
+            (129, 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_and_failed_targets_never_claim_a_sent_probe() {
+        let target = "127.0.0.1".parse().unwrap();
+        let request = ProbeRequest {
+            target,
+            identifier: 7,
+            sequence: 8,
+            timeout: Duration::from_millis(100),
+        };
+        let transport = SurgePingTransport::new(Some("netband-missing-interface"), &[target]);
+        let failed = transport.probe(request.clone()).await;
+        assert!(!failed.sent);
+        assert_eq!(
+            failed.binding.interface.as_deref(),
+            Some("netband-missing-interface")
+        );
+        assert_eq!(failed.binding.source_ip, None);
+        assert!(
+            matches!(failed.result, Err(ProbeFailure::Io { message, .. }) if message.contains("does not exist"))
+        );
+        let unknown = transport
+            .probe(ProbeRequest {
+                target: "::1".parse().unwrap(),
+                ..request
+            })
+            .await;
+        assert!(!unknown.sent);
+        assert_eq!(unknown.binding, ProbeBinding::default());
+        assert!(matches!(unknown.result, Err(ProbeFailure::Protocol { .. })));
+    }
+}
