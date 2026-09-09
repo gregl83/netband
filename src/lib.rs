@@ -306,3 +306,100 @@ mod state_directory_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod orchestration_tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn journal_failures_have_consistent_exit_codes_across_commands() {
+        for case in 0..6 {
+            let make = || match case {
+                0 => journal::JournalError::Io(io::Error::from(io::ErrorKind::PermissionDenied)),
+                1 => journal::JournalError::Io(io::Error::other("write failed")),
+                2 => journal::JournalError::Header("results.csv".into()),
+                3 => journal::JournalError::Corrupt("results.csv".into()),
+                4 => journal::JournalError::Locked("results.csv".into()),
+                _ => journal::JournalError::Csv(csv::Error::from(io::Error::other("CSV failed"))),
+            };
+            let expected = if case == 0 { 3 } else { 4 };
+            assert_eq!(ping_error_code(&make().into()), expected);
+            assert_eq!(monitor_error_code(&make().into()), expected);
+            assert_eq!(bandwidth_error_code(&make().into()), expected);
+        }
+    }
+
+    #[test]
+    fn scheduler_failures_have_consistent_exit_codes_across_commands() {
+        for case in 0..6 {
+            let make = || match case {
+                0 | 1 => scheduler::SchedulerError::Io {
+                    path: "scheduler.json".into(),
+                    source: io::Error::from(if case == 0 {
+                        io::ErrorKind::PermissionDenied
+                    } else {
+                        io::ErrorKind::Other
+                    }),
+                },
+                2 => scheduler::SchedulerError::Locked("scheduler.lock".into()),
+                3 => scheduler::SchedulerError::Corrupt {
+                    path: "scheduler.json".into(),
+                    message: "fixture".into(),
+                },
+                4 => scheduler::SchedulerError::UnsupportedSchema(99),
+                _ => scheduler::SchedulerError::Admission("fixture".into()),
+            };
+            let expected = if case == 0 { 3 } else { 4 };
+            assert_eq!(monitor_error_code(&make().into()), expected);
+            assert_eq!(bandwidth_error_code(&make().into()), expected);
+        }
+        assert_eq!(ping_error_code(&ping::PingRoundError::NoTargets.into()), 5);
+        assert_eq!(
+            monitor_error_code(&ping::PingRoundError::NoTargets.into()),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn task_failure_maps_to_internal_error() {
+        let error = tokio::spawn(async { panic!("fixture task failure") })
+            .await
+            .unwrap_err();
+        assert_eq!(monitor_error_code(&error.into()), 5);
+    }
+
+    #[tokio::test]
+    async fn normal_completion_preserves_result_without_requesting_shutdown() {
+        for result in [Ok(()), Err("operation error")] {
+            let (sender, receiver) = tokio::sync::watch::channel(false);
+            let completion =
+                supervise_command(std::time::Duration::from_secs(1), sender, async { result })
+                    .await
+                    .unwrap();
+            assert_eq!(completion.result, result);
+            assert!(!completion.shutdown_requested);
+            assert!(!*receiver.borrow());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_commands_reject_multiple_interfaces_before_execution() {
+        use clap::Parser;
+        let root = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(["netband", "config", "check"]).unwrap();
+        let mut config = resolve(
+            &cli,
+            &ResolveContext {
+                stdout_is_terminal: false,
+                current_dir: root.path().to_owned(),
+                state_dir: root.path().join("state"),
+            },
+        )
+        .unwrap();
+        config.interfaces = vec!["fixture-a".into(), "fixture-b".into()];
+        assert_eq!(run_once_ping(&config).await, ExitCode::from(2));
+        assert_eq!(run_once_bandwidth(&config).await, ExitCode::from(2));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
