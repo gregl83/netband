@@ -1,4 +1,5 @@
 [![Build](https://github.com/gregl83/netband/actions/workflows/ci.yml/badge.svg)](https://github.com/gregl83/netband/actions/workflows/ci.yml)
+[![Coverage Status](https://codecov.io/gh/gregl83/netband/graph/badge.svg?token=CL93O7DW9C)](https://codecov.io/gh/gregl83/netband)
 [![Crates.io](https://img.shields.io/crates/v/netband.svg)](https://crates.io/crates/netband)
 [![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
