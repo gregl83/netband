@@ -100,20 +100,40 @@ pub struct DirectionMeasurement {
 }
 
 #[derive(Debug)]
-struct DirectionResult {
-    measurement: Option<DirectionMeasurement>,
-    failures: Vec<RequestFailure>,
-}
-
-#[derive(Debug)]
-struct CandidateResult {
+struct AttemptProgress {
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
     failures: Vec<RequestFailure>,
-    server: String,
-    provider_id: String,
-    provider_kind: ProviderKind,
-    terminal_outcome: Option<Outcome>,
+    server: Option<String>,
+    active: RequestFailure,
+}
+
+impl AttemptProgress {
+    fn new(stage: RequestStage) -> Self {
+        Self {
+            download: None,
+            upload: None,
+            failures: Vec::new(),
+            server: None,
+            active: RequestFailure::simple(stage, ErrorKind::Internal, "", None, 1),
+        }
+    }
+
+    fn interrupt(&mut self, outcome: Outcome, timeout: Duration) {
+        let mut failure = self.active.clone();
+        failure.outcome = outcome;
+        (failure.error_kind, failure.message) = match outcome {
+            Outcome::Timeout => (
+                ErrorKind::Timeout,
+                format!(
+                    "NDT7 test timed out after {}",
+                    humantime::format_duration(timeout)
+                ),
+            ),
+            _ => (ErrorKind::Cancelled, "NDT7 test was cancelled".to_owned()),
+        };
+        self.failures.push(failure);
+    }
 }
 
 #[derive(Debug)]
@@ -372,120 +392,75 @@ async fn measure_bandwidth_with_network_and_gate_observed<
 ) -> BandwidthReport {
     report_phase(phase, LoadPhase::Setup);
     let interface = config.interfaces.first().map(String::as_str);
-    let whole_timeout = tokio::time::sleep(config.bandwidth.whole_test_timeout);
-    tokio::pin!(whole_timeout);
-    let resolution = tokio::select! {
-        _ = &mut whole_timeout => {
-            return command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Timeout,
-                ErrorKind::Timeout,
-                format!(
-                    "NDT7 test timed out after {}",
-                    humantime::format_duration(config.bandwidth.whole_test_timeout)
-                ),
-            );
-        }
-        _ = cancellation_requested(&mut shutdown) => {
-            return command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Cancelled,
-                ErrorKind::Cancelled,
-                "NDT7 test was cancelled".to_owned(),
-            );
-        }
-        resolution = resolve_endpoints(&config.bandwidth, interface) => resolution,
-    };
-    let mut failures = resolution.failures;
-    if let Some(terminal) = resolution.terminal {
-        let outcome = terminal.outcome;
-        failures.push(terminal);
-        return report_from_result(ReportInput {
-            run_id,
-            interface,
-            provider_id: &config.bandwidth.provider_id,
-            provider_kind: provider_kind(config),
-            server: None,
-            failures,
-            download: None,
-            upload: None,
-            outcome,
-        });
-    }
-
-    let reservation = match reservation.reserve(Utc::now()) {
-        Ok(reservation) => reservation,
-        Err(message) => {
-            let mut report = command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Error,
-                ErrorKind::Internal,
-                format!("cannot persist bandwidth reservation: {message}"),
-            );
-            report.reservation_error = Some(message);
-            return report;
-        }
-    };
-
-    let test = run_candidates(
-        &resolution.candidates,
-        interface,
-        connector,
-        resolver,
-        phase,
-    );
-    let candidate = tokio::select! {
-        _ = &mut whole_timeout => {
-            return apply_admission(command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Timeout,
-                ErrorKind::Timeout,
-                format!(
-                    "NDT7 test timed out after {}",
-                    humantime::format_duration(config.bandwidth.whole_test_timeout)
-                ),
-            ), reservation);
-        }
-        _ = cancellation_requested(&mut shutdown) => {
-            return apply_admission(command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Cancelled,
-                ErrorKind::Cancelled,
-                "NDT7 test was cancelled".to_owned(),
-            ), reservation);
-        },
-        result = test => result,
-    };
-    failures.extend(candidate.failures);
-    let outcome = candidate.terminal_outcome.unwrap_or_else(|| {
-        match (candidate.download.is_some(), candidate.upload.is_some()) {
-            (true, true) => Outcome::Success,
-            (true, false) | (false, true) => Outcome::Partial,
-            (false, false) => Outcome::Error,
-        }
+    let mut progress = AttemptProgress::new(match provider_kind(config) {
+        ProviderKind::Mlab => RequestStage::Locate,
+        ProviderKind::Direct => RequestStage::Dns,
     });
-    let report = report_from_result(ReportInput {
+    if let crate::config::ProviderConfig::Mlab(mlab) = &config.bandwidth.provider {
+        progress.active.server = Some(mlab.locate_url.to_string());
+    }
+    let mut admission = AdmissionReservation::Untracked;
+    let mut reservation_error = None;
+    let result = {
+        let attempt = async {
+            let resolution = resolve_endpoints(&config.bandwidth, interface).await;
+            progress.failures.extend(resolution.failures);
+            if let Some(terminal) = resolution.terminal {
+                let outcome = terminal.outcome;
+                progress.failures.push(terminal);
+                return outcome;
+            }
+            admission = match reservation.reserve(Utc::now()) {
+                Ok(admission) => admission,
+                Err(message) => {
+                    let mut failure = RequestFailure::simple(
+                        RequestStage::Connect,
+                        ErrorKind::Internal,
+                        format!("cannot persist bandwidth reservation: {message}"),
+                        None,
+                        1,
+                    );
+                    failure.outcome = Outcome::Error;
+                    progress.failures.push(failure);
+                    reservation_error = Some(message);
+                    return Outcome::Error;
+                }
+            };
+            run_candidates(
+                &resolution.candidates,
+                interface,
+                connector,
+                resolver,
+                phase,
+                &mut progress,
+            )
+            .await
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation_requested(&mut shutdown) => Err(Outcome::Cancelled),
+            _ = tokio::time::sleep(config.bandwidth.whole_test_timeout) => Err(Outcome::Timeout),
+            outcome = attempt => Ok(outcome),
+        }
+    };
+    // The attempt and its sockets are dropped before finalizing retained results.
+    let outcome = result.unwrap_or_else(|outcome| {
+        progress.interrupt(outcome, config.bandwidth.whole_test_timeout);
+        outcome
+    });
+    let mut report = report_from_result(ReportInput {
         run_id,
         interface,
-        provider_id: &candidate.provider_id,
-        provider_kind: candidate.provider_kind,
-        server: Some(candidate.server),
-        failures,
-        download: candidate.download,
-        upload: candidate.upload,
+        provider_id: &config.bandwidth.provider_id,
+        provider_kind: provider_kind(config),
+        server: progress.server,
+        failures: progress.failures,
+        download: progress.download,
+        upload: progress.upload,
         outcome,
     });
-    apply_admission(report, reservation)
+    report.reservation_error = reservation_error;
+    apply_admission(report, admission)
 }
 
 fn apply_admission(
@@ -501,89 +476,47 @@ fn apply_admission(
     report
 }
 
-fn command_failure_report(
-    config: &ResolvedConfig,
-    run_id: &str,
-    interface: Option<&str>,
-    outcome: Outcome,
-    error_kind: ErrorKind,
-    message: String,
-) -> BandwidthReport {
-    let mut failure = RequestFailure::simple(RequestStage::Connect, error_kind, message, None, 1);
-    failure.outcome = outcome;
-    report_from_result(ReportInput {
-        run_id,
-        interface,
-        provider_id: &config.bandwidth.provider_id,
-        provider_kind: provider_kind(config),
-        server: None,
-        failures: vec![failure],
-        download: None,
-        upload: None,
-        outcome,
-    })
-}
-
 async fn run_candidates<C: TcpConnector, R: AddressResolver>(
     candidates: &[EndpointCandidate],
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> CandidateResult {
-    let mut all_failures = Vec::new();
+    progress: &mut AttemptProgress,
+) -> Outcome {
     for candidate in candidates {
+        progress.server = Some(candidate.logical_server.clone());
         report_phase(phase, LoadPhase::Setup);
-        let download = run_download(candidate, interface, connector, resolver, phase).await;
-        let download_retry = download.measurement.is_none()
-            && download
+        progress.download =
+            run_download(candidate, interface, connector, resolver, phase, progress).await;
+        if let Some(outcome) = progress.failures.last().and_then(provider_stop_outcome) {
+            return outcome;
+        }
+        if progress.download.is_none()
+            && progress
                 .failures
                 .last()
-                .is_some_and(|failure| failure.disposition == FailureDisposition::TryNextTarget);
-        let provider_stop = download.failures.last().and_then(provider_stop_outcome);
-        all_failures.extend(download.failures);
-        if let Some(outcome) = provider_stop {
-            return failed_candidate(candidate, all_failures, outcome);
-        }
-        if download_retry {
+                .is_some_and(|failure| failure.disposition == FailureDisposition::TryNextTarget)
+        {
             continue;
         }
 
         report_phase(phase, LoadPhase::Setup);
-        let upload = run_upload(candidate, interface, connector, resolver, phase).await;
-        let provider_stop = upload.failures.last().and_then(provider_stop_outcome);
-        all_failures.extend(upload.failures);
-        let outcome = provider_stop;
-        return CandidateResult {
-            download: download.measurement,
-            upload: upload.measurement,
-            failures: all_failures,
-            server: candidate.logical_server.clone(),
-            provider_id: candidate.provider_id.clone(),
-            provider_kind: candidate.provider_kind,
-            terminal_outcome: outcome,
-        };
+        progress.upload =
+            run_upload(candidate, interface, connector, resolver, phase, progress).await;
+        return progress
+            .failures
+            .last()
+            .and_then(provider_stop_outcome)
+            .unwrap_or_else(
+                || match (progress.download.is_some(), progress.upload.is_some()) {
+                    (true, true) => Outcome::Success,
+                    (true, false) | (false, true) => Outcome::Partial,
+                    (false, false) => Outcome::Error,
+                },
+            );
     }
-    let candidate = candidates
-        .first()
-        .expect("endpoint resolution returned candidates");
-    failed_candidate(candidate, all_failures, Outcome::NoCapacity)
-}
-
-fn failed_candidate(
-    candidate: &EndpointCandidate,
-    failures: Vec<RequestFailure>,
-    outcome: Outcome,
-) -> CandidateResult {
-    CandidateResult {
-        download: None,
-        upload: None,
-        failures,
-        server: candidate.logical_server.clone(),
-        provider_id: candidate.provider_id.clone(),
-        provider_kind: candidate.provider_kind,
-        terminal_outcome: Some(outcome),
-    }
+    Outcome::NoCapacity
 }
 
 fn provider_stop_outcome(failure: &RequestFailure) -> Option<Outcome> {
@@ -596,31 +529,28 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> DirectionResult {
+    progress: &mut AttemptProgress,
+) -> Option<DirectionMeasurement> {
+    let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.download_url,
         candidate,
         interface,
         connector,
         resolver,
-        1,
+        progress,
     )
     .await
     {
         Ok(connected) => connected,
-        Err(failures) => {
-            return DirectionResult {
-                measurement: None,
-                failures,
-            };
-        }
+        Err(()) => return None,
     };
     let ConnectedSocket {
         mut socket,
         remote_ip,
         source_ip,
-        mut failures,
     } = connected;
+    progress.active.stage = RequestStage::Download;
     report_phase(phase, LoadPhase::Download);
     let started = Instant::now();
     let mut bytes = 0_u64;
@@ -639,7 +569,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
             }
             Ok(_) => {}
             Err(error) => {
-                failures.push(stream_failure(
+                progress.failures.push(stream_failure(
                     candidate,
                     RequestStage::Download,
                     remote_ip,
@@ -654,8 +584,8 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     let elapsed = started.elapsed();
     report_phase(phase, LoadPhase::Setup);
     if bytes == 0 {
-        if failures.is_empty() {
-            failures.push(stream_failure(
+        if progress.failures.len() == failures_before {
+            progress.failures.push(stream_failure(
                 candidate,
                 RequestStage::Download,
                 remote_ip,
@@ -664,13 +594,10 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
                 None,
             ));
         }
-        return DirectionResult {
-            measurement: None,
-            failures,
-        };
+        return None;
     }
-    if !completed && failures.is_empty() {
-        failures.push(stream_failure(
+    if !completed && progress.failures.len() == failures_before {
+        progress.failures.push(stream_failure(
             candidate,
             RequestStage::Download,
             remote_ip,
@@ -679,16 +606,13 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
             None,
         ));
     }
-    DirectionResult {
-        measurement: Some(DirectionMeasurement {
-            bytes,
-            elapsed,
-            remote_ip,
-            source_ip,
-            metrics,
-        }),
-        failures,
-    }
+    Some(DirectionMeasurement {
+        bytes,
+        elapsed,
+        remote_ip,
+        source_ip,
+        metrics,
+    })
 }
 
 async fn run_upload<C: TcpConnector, R: AddressResolver>(
@@ -697,45 +621,51 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> DirectionResult {
+    progress: &mut AttemptProgress,
+) -> Option<DirectionMeasurement> {
+    let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.upload_url,
         candidate,
         interface,
         connector,
         resolver,
-        1,
+        progress,
     )
     .await
     {
         Ok(connected) => connected,
-        Err(failures) => {
-            return DirectionResult {
-                measurement: None,
-                failures,
-            };
-        }
+        Err(()) => return None,
     };
     let ConnectedSocket {
         socket,
         remote_ip,
         source_ip,
-        mut failures,
     } = connected;
+    progress.active.stage = RequestStage::Upload;
     report_phase(phase, LoadPhase::Upload);
     let UploadTransfer {
         bytes,
         elapsed,
         metrics,
         error,
-    } = transfer_upload(socket).await;
+    } = transfer_upload(socket, |bytes, elapsed, metrics| {
+        progress.upload = (bytes > 0).then_some(DirectionMeasurement {
+            bytes,
+            elapsed,
+            metrics,
+            source_ip,
+            remote_ip,
+        });
+    })
+    .await;
     report_phase(phase, LoadPhase::Setup);
     if let Some(error) = error {
         let os_error = match &error {
             UploadError::Transport(error) => websocket_os_error(error),
             _ => None,
         };
-        failures.push(stream_failure(
+        progress.failures.push(stream_failure(
             candidate,
             RequestStage::Upload,
             remote_ip,
@@ -745,8 +675,8 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         ));
     }
     if bytes == 0 {
-        if failures.is_empty() {
-            failures.push(stream_failure(
+        if progress.failures.len() == failures_before {
+            progress.failures.push(stream_failure(
                 candidate,
                 RequestStage::Upload,
                 remote_ip,
@@ -755,21 +685,15 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
                 None,
             ));
         }
-        return DirectionResult {
-            measurement: None,
-            failures,
-        };
+        return None;
     }
-    DirectionResult {
-        measurement: Some(DirectionMeasurement {
-            bytes,
-            elapsed,
-            remote_ip,
-            source_ip,
-            metrics,
-        }),
-        failures,
-    }
+    Some(DirectionMeasurement {
+        bytes,
+        elapsed,
+        remote_ip,
+        source_ip,
+        metrics,
+    })
 }
 
 fn report_phase(phase: Option<&watch::Sender<LoadPhase>>, value: LoadPhase) {
@@ -829,7 +753,10 @@ where
     Poll::Pending
 }
 
-async fn transfer_upload<S>(mut socket: WebSocketStream<S>) -> UploadTransfer
+async fn transfer_upload<S>(
+    mut socket: WebSocketStream<S>,
+    mut completed: impl FnMut(u64, Duration, TcpMetrics),
+) -> UploadTransfer
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -862,6 +789,7 @@ where
                 // The rate describes local payload acceptance during the active
                 // window, not delivery of the buffered tail or handshake waiting.
                 elapsed = Some(started.elapsed());
+                completed(bytes, elapsed.unwrap(), metrics);
                 deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
                 continue;
             }
@@ -870,10 +798,14 @@ where
         match progress {
             Ok(UploadProgress::Incoming(Some(Message::Text(text)))) => {
                 update_metrics(&mut metrics, text.as_ref());
+                if let Some(elapsed) = elapsed {
+                    completed(bytes, elapsed, metrics);
+                }
             }
             Ok(UploadProgress::Incoming(Some(Message::Close(_)))) => {
                 if elapsed.is_none() {
                     elapsed = Some(started.elapsed());
+                    completed(bytes, elapsed.unwrap(), metrics);
                     deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
                 }
                 peer_closed = true;
@@ -918,7 +850,6 @@ struct ConnectedSocket {
     socket: NdtSocket,
     remote_ip: IpAddr,
     source_ip: IpAddr,
-    failures: Vec<RequestFailure>,
 }
 
 async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
@@ -927,36 +858,49 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
-    attempt: u32,
-) -> Result<ConnectedSocket, Vec<RequestFailure>> {
+    progress: &mut AttemptProgress,
+) -> Result<ConnectedSocket, ()> {
+    let attempt = 1;
+    progress.active = RequestFailure::simple(
+        RequestStage::Dns,
+        ErrorKind::Internal,
+        "",
+        Some(url.to_string()),
+        attempt,
+    );
     let host = match url.host_str() {
         Some(host) => host,
         None => {
-            return Err(vec![RequestFailure::simple(
+            progress.failures.push(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 "NDT7 URL has no host",
                 Some(url.to_string()),
                 attempt,
-            )]);
+            ));
+            return Err(());
         }
     };
     let port = url.port_or_known_default().unwrap_or(443);
     let addresses = match resolver.resolve(host, port).await {
         Ok(addresses) => addresses,
         Err(message) => {
-            return Err(vec![RequestFailure::simple(
+            progress.failures.push(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 message,
                 Some(url.to_string()),
                 attempt,
-            )]);
+            ));
+            return Err(());
         }
     };
-    let mut failures = Vec::new();
     for (address_index, remote) in addresses.into_iter().enumerate() {
         let request_attempt = attempt + address_index as u32;
+        progress.active.stage = RequestStage::Connect;
+        progress.active.attempt = request_attempt;
+        progress.active.remote_ip = Some(remote.ip());
+        progress.active.source_ip = None;
         let tcp = match connector.connect(remote, interface).await {
             Ok(tcp) => tcp,
             Err(error) => {
@@ -969,7 +913,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 );
                 failure.remote_ip = Some(remote.ip());
                 failure.os_error_code = error.raw_os_error();
-                failures.push(failure);
+                progress.failures.push(failure);
                 continue;
             }
         };
@@ -983,6 +927,8 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
                 }
             });
+        progress.active.source_ip = Some(source_ip);
+        progress.active.stage = RequestStage::Tls;
         let stream = match wrap_stream(tcp, url, candidate).await {
             Ok(stream) => stream,
             Err(message) => {
@@ -995,21 +941,22 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 );
                 failure.source_ip = Some(source_ip);
                 failure.remote_ip = Some(remote.ip());
-                failures.push(failure);
+                progress.failures.push(failure);
                 continue;
             }
         };
+        progress.active.stage = RequestStage::WebsocketHandshake;
         let request = match websocket_request(url, candidate) {
             Ok(request) => request,
             Err(message) => {
-                failures.push(RequestFailure::simple(
+                progress.failures.push(RequestFailure::simple(
                     RequestStage::WebsocketHandshake,
                     ErrorKind::WebsocketHandshake,
                     message,
                     Some(url.to_string()),
                     request_attempt,
                 ));
-                return Err(failures);
+                return Err(());
             }
         };
         let websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -1022,7 +969,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     .get(SEC_WEBSOCKET_PROTOCOL)
                     .and_then(|value| value.to_str().ok());
                 if selected != Some(NDT7_SUBPROTOCOL) {
-                    failures.push(handshake_failure(
+                    progress.failures.push(handshake_failure(
                         candidate,
                         url,
                         remote.ip(),
@@ -1031,13 +978,12 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                         None,
                         "server did not select the NDT7 WebSocket subprotocol".to_owned(),
                     ));
-                    return Err(failures);
+                    return Err(());
                 }
                 return Ok(ConnectedSocket {
                     socket,
                     remote_ip: remote.ip(),
                     source_ip,
-                    failures,
                 });
             }
             Err(WebSocketError::Http(response)) => {
@@ -1051,7 +997,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     (true, false) => "Retry-After malformed",
                     (false, _) => "Retry-After missing",
                 };
-                failures.push(handshake_failure(
+                progress.failures.push(handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
@@ -1060,10 +1006,10 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     Some((status, retry_after)),
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
                 ));
-                return Err(failures);
+                return Err(());
             }
             Err(error) => {
-                failures.push(handshake_failure(
+                progress.failures.push(handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
@@ -1075,7 +1021,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
             }
         }
     }
-    Err(failures)
+    Err(())
 }
 
 async fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
@@ -1509,7 +1455,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::{Message, protocol::Role};
 
     use super::{
-        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, UploadError,
+        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, TcpMetrics, UploadError,
         next_upload_message_size, transfer_upload, upload_payload,
     };
 
@@ -1557,7 +1503,7 @@ mod tests {
     async fn stalled_upload_stops_at_twelve_seconds_without_counting_cleanup_time() {
         let (client, _server) = upload_pair().await;
         let started = Instant::now();
-        let result = transfer_upload(client).await;
+        let result = transfer_upload(client, |_, _, _| {}).await;
         assert_eq!(started.elapsed(), Duration::from_secs(12));
         assert_eq!(result.elapsed, Duration::from_secs(10));
         assert_eq!(result.bytes, INITIAL_UPLOAD_MESSAGE_SIZE as u64);
@@ -1565,9 +1511,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn interrupted_upload_publishes_only_a_completed_window() {
+        for seconds in [5, 11] {
+            let (client, _server) = upload_pair().await;
+            let mut completed = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(seconds),
+                transfer_upload(client, |bytes, elapsed, metrics| {
+                    completed = Some((bytes, elapsed, metrics));
+                }),
+            )
+            .await;
+            assert!(result.is_err());
+            if seconds < 10 {
+                assert!(completed.is_none());
+            } else {
+                assert_eq!(
+                    completed,
+                    Some((
+                        INITIAL_UPLOAD_MESSAGE_SIZE as u64,
+                        Duration::from_secs(10),
+                        TcpMetrics::default(),
+                    ))
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn incoming_messages_do_not_requeue_or_recount_a_blocked_payload() {
         let (client, mut server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         tokio::task::yield_now().await;
         advance(Duration::from_secs(1)).await;
         server.send(Message::Ping(vec![1].into())).await.unwrap();
@@ -1588,7 +1562,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn upload_automatically_replies_to_ping_and_preserves_partial_frame_on_close() {
         let (client, mut server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         server.send(Message::Ping(vec![7].into())).await.unwrap();
         let mut received = 0;
         loop {
@@ -1618,7 +1592,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn abrupt_disconnect_retains_transport_error_and_accepted_bytes() {
         let (client, server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         tokio::task::yield_now().await;
         drop(server);
         let result = upload.await.unwrap();
@@ -1630,7 +1604,7 @@ mod tests {
     async fn deadline_drains_only_the_pending_payload_and_excludes_close_waiting() {
         let (client, mut server) = upload_pair().await;
         let started = Instant::now();
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         let Message::Binary(first) = server.next().await.unwrap().unwrap() else {
             panic!("expected initial payload");
         };
@@ -1659,7 +1633,7 @@ mod tests {
     async fn immediate_peer_close_does_not_invent_measurement_bytes() {
         let (client, mut server) = upload_pair().await;
         server.close(None).await.unwrap();
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         assert!(matches!(
             server.next().await.unwrap().unwrap(),
             Message::Close(_)

@@ -83,7 +83,7 @@ connection for each metric. Treat `tcp_retransmissions` as bytes, not a packet c
 | Outcome | Meaning |
 | --- | --- |
 | `success` | Requested operation completed |
-| `partial` | At least one bandwidth direction completed |
+| `partial` | One bandwidth direction is available without an overriding timeout, cancellation, or provider-wide failure |
 | `timeout` | Configured operation deadline expired |
 | `unreachable` | ICMP/network unreachable response |
 | `permission_denied` | Host denied the required socket or file operation |
@@ -110,6 +110,19 @@ close handshake produces an `upload_failed` diagnostic with
 `upload close handshake timed out after 2s`; other transport errors retain their details.
 Collected direction measurements remain available even when cleanup fails, so a
 bandwidth `success` means both rates are available, not that transport shutdown was clean.
+
+If the whole-test deadline or shutdown interrupts an attempt, its bandwidth row keeps
+`timeout` or `cancelled` as the outcome and retains all completed direction measurements.
+For example, a completed download remains available when upload setup or transfer is
+interrupted. Upload bytes, rate, and measurement duration are retained once its active
+window ends, even if cleanup is interrupted. An unfinished direction is left empty,
+not reported as zero throughput. Earlier request diagnostics are preserved, and the
+terminal `request_failure` identifies the interrupted stage.
+
+Use field availability alongside `outcome` when analyzing these rows; filtering only
+for `success` discards usable measurements from interrupted attempts. Retained rates
+keep their normal observation points and exclude cleanup time. Interruption does not
+refund a reserved start or change the CSV schema.
 
 During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
 interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`

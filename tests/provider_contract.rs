@@ -204,31 +204,64 @@ async fn direct_provider_never_contacts_locate() {
 }
 
 #[tokio::test]
-async fn locate_is_included_in_the_whole_test_timeout() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = vec![0_u8; 8192];
-        let _ = socket.read(&mut request).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    });
-    let dir = tempdir().unwrap();
-    let cli = Cli::try_parse_from([
-        "netband",
-        "--mlab-locate-url",
-        &format!("http://{address}"),
-        "--bandwidth-timeout",
-        "20ms",
-        "--accept-mlab-policy",
-        "once",
-        "bandwidth",
-    ])
-    .unwrap();
-    let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
-    let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-locate-timeout", shutdown).await;
-    server.abort();
-    assert_eq!(report.outcome, Outcome::Timeout);
-    assert_eq!(report.events.last().unwrap().outcome, Outcome::Timeout);
+async fn locate_interruption_preserves_stage_without_measurements_or_reservation() {
+    for cancel in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8192];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            ready_tx.send(()).unwrap();
+            let _ = socket.read_to_end(&mut Vec::new()).await;
+        });
+        let dir = tempdir().unwrap();
+        let mut config = mlab_config(dir.path(), &format!("http://{address}"));
+        config.bandwidth.whole_test_timeout =
+            Duration::from_millis(if cancel { 5000 } else { 500 });
+        let (shutdown_tx, shutdown) = cancellation_channel();
+        let task = tokio::spawn(async move {
+            measure_bandwidth(&config, "locate-interrupted", shutdown).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel {
+            shutdown_tx.send(true).unwrap();
+        }
+        let report = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = if cancel {
+            Outcome::Cancelled
+        } else {
+            Outcome::Timeout
+        };
+        assert_eq!(report.outcome, outcome);
+        assert!(!report.reserved);
+        assert_eq!(report.events.len(), 2);
+        let failure = &report.events[0];
+        assert_eq!(failure.request_stage, Some(RequestStage::Locate));
+        assert_eq!(failure.outcome, outcome);
+        assert!(failure.server.is_some());
+        let bandwidth = report.events.last().unwrap();
+        assert_eq!(bandwidth.outcome, outcome);
+        assert!(bandwidth.download_mbps.is_none());
+        assert!(bandwidth.upload_mbps.is_none());
+        assert!(bandwidth.bytes_received.is_none());
+        assert!(bandwidth.bytes_sent.is_none());
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.daily_runs_used.is_none())
+        );
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

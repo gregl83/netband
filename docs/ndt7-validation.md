@@ -28,8 +28,10 @@ measurement bytes nor measurement time. Incoming control messages remain respons
 while writes are blocked.
 
 A terminal bandwidth `success` means both rates are available, not that shutdown was
-clean. Unexpected transport errors and cleanup timeouts remain diagnostics. See
-[Data format](data-format.md).
+clean. Unexpected transport errors and cleanup timeouts remain diagnostics. Whole-test
+timeout or cancellation retains completed direction measurements while preserving the
+terminal outcome; unfinished direction counters remain unavailable. See
+[Data format](data-format.md#outcomes).
 
 ## Reference-client benchmark
 
@@ -110,7 +112,9 @@ writes are backpressured. Upload unit and contract tests exercise:
 - incoming Ping, measurement and Close messages during backpressure;
 - partial-frame integrity, exact byte accounting and adaptive payload limits;
 - early disconnects, no-data closure and retained diagnostics;
-- cancellation, whole-test timeout and load-phase retention during cleanup.
+- cancellation and whole-test timeout across setup and transfer stages;
+- completed-direction and diagnostic retention, including interrupted upload cleanup;
+- unchanged reservation accounting and load-phase retention during cleanup.
 
 Monitoring contracts verify concurrent pings and serialized bandwidth execution.
 Published-data contracts verify the paired dataset, sanitized fields, and agreement

@@ -46,7 +46,7 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--bandwidth-daily-max COUNT` | `bandwidth.daily_max` | `4`; `0` disables bandwidth; M-Lab rejects values above 4 |
 | `--bandwidth-min-spacing DURATION` | `bandwidth.min_spacing` | `36m`; direct minimum is at least timeout + shutdown margin and 60s |
 | `--bandwidth-slot-jitter-pct PERCENT` | `bandwidth.slot_jitter_pct` | `50`, range 0-100 |
-| `--bandwidth-timeout DURATION` | `bandwidth.whole_test_timeout` | `55s` for discovery, download, and upload together |
+| `--bandwidth-timeout DURATION` | `bandwidth.whole_test_timeout` | `55s` for discovery, download, upload, and cleanup together; completed directions survive timeout |
 | `--bandwidth-shutdown-margin DURATION` | `bandwidth.shutdown_margin` | `15s` reserved for clean cancellation |
 | `--loss-window-rounds ROUNDS` | `bandwidth.trigger.window_rounds` | `6` rounds |
 | `--loss-min-samples COUNT` | `bandwidth.trigger.min_samples` | `6` probes |

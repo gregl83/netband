@@ -133,6 +133,11 @@ Netband stops admitting work, cancels/drains active network work, flushes journa
 and returns zero within the configured grace period. A second signal or grace timeout
 returns 6 after a final best-effort flush.
 
+An interrupted bandwidth attempt records `cancelled` or `timeout` and retains any
+completed download/upload measurements. An unfinished direction remains empty. These
+measurement outcomes are separate from the service process exit code; see
+[CSV outcomes](data-format.md#outcomes).
+
 ## Troubleshooting
 
 **Configuration fails before startup**

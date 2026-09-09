@@ -538,6 +538,30 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
             .unwrap()
             .unwrap();
         assert_eq!(report.outcome, outcome);
+        assert_eq!(report.exit_code(), 1);
+        assert!(report.reserved);
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.daily_runs_used == Some(1))
+        );
+        assert_eq!(
+            report
+                .events
+                .iter()
+                .filter(|event| event.event_kind == EventKind::Bandwidth)
+                .count(),
+            1
+        );
+        let bandwidth = report.events.last().unwrap();
+        assert_eq!(bandwidth.bytes_received, Some(16 * 1024));
+        assert!(bandwidth.bytes_sent.unwrap() >= 8192);
+        assert!(bandwidth.download_mbps.unwrap() > 0.0);
+        assert!(bandwidth.upload_mbps.unwrap() > 0.0);
+        let terminal = &report.events[report.events.len() - 2];
+        assert_eq!(terminal.request_stage, Some(RequestStage::Upload));
+        assert_eq!(terminal.outcome, outcome);
         let _ = release_tx.send(());
         server.await.unwrap();
     }
@@ -920,4 +944,270 @@ async fn one_shot_pipeline_keeps_csv_authoritative_across_console_modes() {
     let (off, off_csv) = execute_mode(ConsoleMode::Off).await;
     assert!(off.is_empty());
     assert_eq!(off_csv.last().unwrap().get(8), Some("bandwidth"));
+}
+
+struct InterruptNetwork {
+    stage: RequestStage,
+    after_download: bool,
+    resolutions: AtomicUsize,
+    connections: AtomicUsize,
+    address: std::net::SocketAddr,
+    ready: Arc<tokio::sync::Notify>,
+}
+
+impl AddressResolver for InterruptNetwork {
+    fn resolve<'a>(&'a self, _host: &'a str, _port: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.resolutions.fetch_add(1, Ordering::SeqCst);
+            if self.stage == RequestStage::Dns && call == usize::from(self.after_download) {
+                self.ready.notify_one();
+                return std::future::pending().await;
+            }
+            // An injected failed address tests retention of earlier diagnostics.
+            Ok(vec!["127.0.0.1:0".parse().unwrap(), self.address])
+        })
+    }
+}
+
+impl TcpConnector for InterruptNetwork {
+    fn connect<'a>(
+        &'a self,
+        remote: std::net::SocketAddr,
+        interface: Option<&'a str>,
+    ) -> ConnectFuture<'a> {
+        Box::pin(async move {
+            if remote.port() == 0 {
+                return Err(std::io::Error::other("injected address failure"));
+            }
+            let call = self.connections.fetch_add(1, Ordering::SeqCst);
+            if self.stage == RequestStage::Connect && call == usize::from(self.after_download) {
+                self.ready.notify_one();
+                return std::future::pending().await;
+            }
+            netband::bandwidth::SystemTcpConnector
+                .connect(remote, interface)
+                .await
+        })
+    }
+}
+
+#[tokio::test]
+async fn interruption_preserves_completed_directions_diagnostics_and_admission() {
+    for after_download in [false, true] {
+        for stage in [
+            RequestStage::Dns,
+            RequestStage::Connect,
+            RequestStage::Tls,
+            RequestStage::WebsocketHandshake,
+            if after_download {
+                RequestStage::Upload
+            } else {
+                RequestStage::Download
+            },
+        ] {
+            for cancel in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let ready = Arc::new(tokio::sync::Notify::new());
+                let server_ready = Arc::clone(&ready);
+                let server = tokio::spawn(async move {
+                    if after_download {
+                        serve_download(listener.accept().await.unwrap().0).await;
+                    }
+                    if matches!(stage, RequestStage::Dns | RequestStage::Connect) {
+                        return;
+                    }
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    if matches!(stage, RequestStage::Tls | RequestStage::WebsocketHandshake) {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap();
+                        server_ready.notify_one();
+                        // EOF proves cancellation dropped the connection, with no detached I/O.
+                        let _ = stream.read_to_end(&mut Vec::new()).await;
+                    } else {
+                        let mut socket = accept_hdr_async(stream, accept_protocol).await.unwrap();
+                        if after_download {
+                            assert!(matches!(
+                                socket.next().await.unwrap().unwrap(),
+                                Message::Binary(_)
+                            ));
+                        } else {
+                            socket.send(Message::Ping(vec![1].into())).await.unwrap();
+                            assert!(matches!(
+                                socket.next().await.unwrap().unwrap(),
+                                Message::Pong(_)
+                            ));
+                        }
+                        server_ready.notify_one();
+                        while let Some(Ok(_)) = socket.next().await {}
+                    }
+                });
+                let dir = tempdir().unwrap();
+                let mut config =
+                    direct_config(dir.path(), address, if cancel { "5s" } else { "500ms" });
+                if stage == RequestStage::Tls {
+                    let netband::config::ProviderConfig::Direct(direct) =
+                        &mut config.bandwidth.provider
+                    else {
+                        unreachable!();
+                    };
+                    let url = if after_download {
+                        &mut direct.upload_url
+                    } else {
+                        &mut direct.download_url
+                    };
+                    url.set_scheme("wss").unwrap();
+                }
+                let network = InterruptNetwork {
+                    stage,
+                    after_download,
+                    address,
+                    ready: Arc::clone(&ready),
+                    resolutions: AtomicUsize::new(0),
+                    connections: AtomicUsize::new(0),
+                };
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mut gate = RecordingGate {
+                    reserved: Arc::new(AtomicBool::new(false)),
+                    calls: Arc::clone(&calls),
+                };
+                let (shutdown_tx, shutdown) = cancellation_channel();
+                let task = tokio::spawn(async move {
+                    measure_bandwidth_with_network_and_gate(
+                        &config,
+                        "interrupted",
+                        shutdown,
+                        &network,
+                        &network,
+                        &mut gate,
+                    )
+                    .await
+                });
+                tokio::time::timeout(Duration::from_secs(2), ready.notified())
+                    .await
+                    .unwrap();
+                if cancel {
+                    shutdown_tx.send(true).unwrap();
+                }
+                let report = tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let outcome = if cancel {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Timeout
+                };
+                assert_eq!(
+                    report.outcome, outcome,
+                    "{stage:?}, after download: {after_download}"
+                );
+                assert_eq!(report.exit_code(), 1);
+                assert!(report.reserved);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(
+                    report
+                        .events
+                        .iter()
+                        .all(|event| event.daily_runs_used == Some(1))
+                );
+                assert_eq!(
+                    report
+                        .events
+                        .iter()
+                        .filter(|event| event.event_kind == EventKind::Bandwidth)
+                        .count(),
+                    1
+                );
+                let bandwidth = report.events.last().unwrap();
+                assert_eq!(
+                    bandwidth.bytes_received,
+                    after_download.then_some(16 * 1024)
+                );
+                assert_eq!(bandwidth.download_mbps.is_some(), after_download);
+                assert!(bandwidth.upload_mbps.is_none());
+                assert!(bandwidth.bytes_sent.is_none());
+                if after_download {
+                    assert!(bandwidth.download_mbps.unwrap() > 0.0);
+                    assert!(bandwidth.duration_ms.unwrap() > 0.0);
+                    assert!(bandwidth.tcp_rtt_ms.is_some());
+                }
+                let terminal = &report.events[report.events.len() - 2];
+                assert_eq!(terminal.event_kind, EventKind::RequestFailure);
+                assert_eq!(terminal.request_stage, Some(stage));
+                assert_eq!(terminal.outcome, outcome);
+                if after_download || stage != RequestStage::Dns {
+                    assert!(report.events.iter().any(|event| {
+                        event
+                            .error_message
+                            .as_deref()
+                            .is_some_and(|message| message.contains("injected address failure"))
+                    }));
+                }
+                tokio::time::timeout(Duration::from_secs(1), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reservation_failure_and_prior_cancellation_never_start_connections() {
+    struct RejectGate(usize);
+    impl ReservationGate for RejectGate {
+        fn reserve(
+            &mut self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<AdmissionReservation, String> {
+            self.0 += 1;
+            Err("injected reservation failure".to_owned())
+        }
+    }
+    for cancel in [false, true] {
+        let dir = tempdir().unwrap();
+        let address = "127.0.0.1:443".parse().unwrap();
+        let config = direct_config(dir.path(), address, "1s");
+        let connector = RecordingConnector::default();
+        let mut gate = RejectGate(0);
+        let (shutdown_tx, shutdown) = cancellation_channel();
+        if cancel {
+            shutdown_tx.send(true).unwrap();
+        }
+        let report = measure_bandwidth_with_network_and_gate(
+            &config,
+            "not-admitted",
+            shutdown,
+            &connector,
+            &FixedResolver(vec![address]),
+            &mut gate,
+        )
+        .await;
+        assert!(connector.calls.lock().unwrap().is_empty());
+        assert_eq!(gate.0, usize::from(!cancel));
+        assert!(!report.reserved);
+        assert_eq!(
+            report.outcome,
+            if cancel {
+                Outcome::Cancelled
+            } else {
+                Outcome::Error
+            }
+        );
+        assert_eq!(
+            report.reservation_error.as_deref(),
+            (!cancel).then_some("injected reservation failure")
+        );
+        assert_eq!(report.events.len(), 2);
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.daily_runs_used.is_none())
+        );
+        let bandwidth = report.events.last().unwrap();
+        assert!(bandwidth.download_mbps.is_none());
+        assert!(bandwidth.upload_mbps.is_none());
+    }
 }
