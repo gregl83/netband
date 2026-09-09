@@ -54,10 +54,14 @@ Four reservations suppress any fifth manual, scheduled, or triggered start.
 
 ## Rate limits
 
-Provider-wide limits are retained in scheduler state. A valid `Retry-After` value is
-retained across UTC day boundaries and restarts. A day rollover does not shorten the
-provider cooldown. Without a valid value, backoff starts at 60
-seconds, doubles through the configured 16-minute ceiling, and adds persisted random
+Provider-wide limits are retained in scheduler state. A numeric `Retry-After` delay
+starts when the response arrives; an HTTP-date retains its absolute deadline.
+Report processing never restarts that countdown. An expired deadline adds no waiting,
+and an existing later cooldown is preserved. Deadlines survive UTC day boundaries,
+restarts, and backup recovery. A valid numeric delay that exceeds the representable
+UTC range is capped at the latest representable timestamp.
+Without a valid value, backoff starts at 60 seconds, doubles through the configured
+16-minute ceiling, and adds persisted random
 jitter. Locate `204`, `429`, and relevant `503` responses and direct WebSocket `503`
 responses are classified according to provider scope. Deferred discovery is attempted
 at most five times; a run already reserved is never refunded.

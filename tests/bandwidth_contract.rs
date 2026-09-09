@@ -746,7 +746,12 @@ async fn provider_wide_handshake_rate_limit_stops_before_upload() {
     let failure = &report.events[0];
     assert_eq!(failure.http_status, Some(429));
     assert_eq!(failure.retry_after_ms, Some(60_000));
-    assert!(failure.rate_limit_until_utc.is_some());
+    assert_eq!(
+        failure.rate_limit_until_utc,
+        failure
+            .finished_at_utc
+            .map(|time| time + chrono::Duration::seconds(60))
+    );
 }
 
 #[derive(Default)]

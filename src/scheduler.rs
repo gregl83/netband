@@ -571,15 +571,18 @@ impl Scheduler {
         let reserved = report.reserved;
         let rate_limit = rate_limit_from_report(report, self.policy.provider_kind);
         if let Some(rate_limit) = rate_limit {
-            let cooldown = rate_limit
-                .retry_after
-                .unwrap_or_else(|| self.next_backoff());
-            let deadline = add_duration(now, cooldown);
+            let deadline = rate_limit
+                .deadline
+                .unwrap_or_else(|| add_duration(now, self.next_backoff()));
+            let deadline = self
+                .state()
+                .cooldown_until_utc
+                .map_or(deadline, |existing| existing.max(deadline));
             let day_deadline = day_end(now.date_naive());
             {
                 let state = self.state_mut();
                 state.cooldown_until_utc = Some(deadline);
-                if rate_limit.retry_after.is_some() {
+                if rate_limit.deadline.is_some() {
                     state.backoff_step = state.backoff_step.saturating_add(1).min(4);
                 }
                 if !reserved {
@@ -623,7 +626,10 @@ impl Scheduler {
                         .map_or_else(|| "none".to_owned(), |value| value.to_string()),
                     rate_limit
                         .retry_after
-                        .map_or_else(|| "fallback".to_owned(), |value| format!("{}ms", value.as_millis())),
+                        .map_or_else(
+                            || if rate_limit.deadline.is_some() { "unrepresentable".to_owned() } else { "fallback".to_owned() },
+                            |value| format!("{}ms", value.as_millis()),
+                        ),
                     reserved,
                     self.state()
                         .deferred
@@ -989,6 +995,7 @@ fn interface_from_key(key: &str) -> Option<&str> {
 
 #[derive(Debug, Clone, Copy)]
 struct RateLimit {
+    deadline: Option<DateTime<Utc>>,
     stage: RequestStage,
     status: Option<u16>,
     retry_after: Option<Duration>,
@@ -1013,6 +1020,7 @@ fn rate_limit_from_report(
                 && provider_kind == ProviderKind::Direct
                 && status == Some(503));
         rate_limited.then_some(RateLimit {
+            deadline: event.rate_limit_until_utc,
             stage,
             status,
             retry_after: event.retry_after_ms.map(Duration::from_millis),

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -48,7 +48,7 @@ pub struct RequestFailure {
     pub os_error_code: Option<i32>,
     pub attempt: u32,
     pub http_status: Option<u16>,
-    pub retry_after: Option<Duration>,
+    pub retry_after: Option<RetryAfter>,
     pub disposition: FailureDisposition,
 }
 
@@ -199,11 +199,12 @@ async fn resolve_mlab(
         }
     };
 
+    let received_at = Utc::now();
     let status = response.status();
     let retry_after_present = response
         .headers()
         .contains_key(reqwest::header::RETRY_AFTER);
-    let retry_after = parse_retry_after(response.headers(), SystemTime::now());
+    let retry_after = parse_retry_after(response.headers(), received_at);
     if status != StatusCode::OK {
         let (outcome, base_message) = match status {
             StatusCode::NO_CONTENT => (Outcome::NoCapacity, "Locate returned no capacity"),
@@ -220,10 +221,9 @@ async fn resolve_mlab(
             (true, false) => "Retry-After malformed",
             (false, _) => "Retry-After missing",
         };
-        let finished_at = Utc::now();
         return terminal_resolution(RequestFailure {
-            started_at_utc: finished_at,
-            finished_at_utc: finished_at,
+            started_at_utc: received_at,
+            finished_at_utc: received_at,
             stage: RequestStage::Locate,
             outcome,
             error_kind: ErrorKind::HttpStatus,
@@ -344,27 +344,34 @@ fn terminal_resolution(failure: RequestFailure) -> EndpointResolution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryAfter {
+    pub delay: Duration,
+    pub deadline: DateTime<Utc>,
+}
+
 pub fn parse_retry_after(
     headers: &reqwest::header::HeaderMap,
-    now: SystemTime,
-) -> Option<Duration> {
+    received_at: DateTime<Utc>,
+) -> Option<RetryAfter> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after_value(value, now)
+    parse_retry_after_value(value, received_at)
 }
 
-pub fn parse_retry_after_value(value: &str, now: SystemTime) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+pub fn parse_retry_after_value(value: &str, received_at: DateTime<Utc>) -> Option<RetryAfter> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let delay = Duration::from_secs(value.parse().ok()?);
+        // A valid delay beyond the UTC range must not remove the provider's limit.
+        let deadline = chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delay| received_at.checked_add_signed(delay))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        return Some(RetryAfter { delay, deadline });
     }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(now)
-        .ok()
-}
-
-pub fn retry_until(now: DateTime<Utc>, delay: Option<Duration>) -> Option<DateTime<Utc>> {
-    let delay = chrono::Duration::from_std(delay?).ok()?;
-    now.checked_add_signed(delay)
+    let deadline = DateTime::<Utc>::from(httpdate::parse_http_date(value).ok()?);
+    let delay = (deadline - received_at).to_std().unwrap_or_default();
+    Some(RetryAfter { delay, deadline })
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,5 +430,50 @@ fn bind_http_interface(
             "binding Locate requests to interface {interface} is unsupported"
         )),
         None => Ok(builder),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_deadlines_preserve_dates_and_check_numeric_boundaries() {
+        let received = DateTime::from_timestamp(120, 500_000_000).unwrap();
+        for seconds in [0, 60, 172_800, u64::MAX] {
+            let retry = parse_retry_after_value(&seconds.to_string(), received).unwrap();
+            assert_eq!(retry.delay, Duration::from_secs(seconds));
+            let expected = if seconds == u64::MAX {
+                DateTime::<Utc>::MAX_UTC
+            } else {
+                received + chrono::Duration::seconds(seconds as i64)
+            };
+            assert_eq!(retry.deadline, expected);
+        }
+        assert_eq!(
+            parse_retry_after_value("1", DateTime::<Utc>::MAX_UTC)
+                .unwrap()
+                .deadline,
+            DateTime::<Utc>::MAX_UTC
+        );
+        for (date, seconds, delay_ms) in [
+            ("Thu, 01 Jan 1970 00:01:00 GMT", 60, 0),
+            ("Thu, 01 Jan 1970 00:02:00 GMT", 120, 0),
+            ("Thu, 01 Jan 1970 00:03:00 GMT", 180, 59_500),
+        ] {
+            let retry = parse_retry_after_value(date, received).unwrap();
+            assert_eq!(
+                retry.deadline,
+                DateTime::from_timestamp(seconds, 0).unwrap()
+            );
+            assert_eq!(retry.delay, Duration::from_millis(delay_ms));
+        }
+        for value in ["", "later", "-1", "+1", "1.5", "18446744073709551616"] {
+            assert_eq!(parse_retry_after_value(value, received), None, "{value}");
+        }
+        assert_eq!(
+            parse_retry_after_value(" 60 ", received),
+            parse_retry_after_value("60", received)
+        );
     }
 }

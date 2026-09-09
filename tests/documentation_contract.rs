@@ -349,6 +349,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     failure.request_stage = Some(RequestStage::Locate);
     failure.http_status = Some(429);
     failure.retry_after_ms = Some(120_000);
+    failure.rate_limit_until_utc = Some(trigger_at + chrono::TimeDelta::seconds(120));
     let mut report = BandwidthReport {
         events: vec![failure],
         outcome: Outcome::RateLimited,

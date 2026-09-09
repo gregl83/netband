@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use clap::Parser;
 use netband::bandwidth::{cancellation_channel, measure_bandwidth};
@@ -51,8 +51,11 @@ fn retry_after_supports_delta_http_date_and_invalid_values() {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
     assert_eq!(
-        parse_retry_after(&headers, SystemTime::UNIX_EPOCH),
-        Some(Duration::from_secs(120))
+        parse_retry_after(&headers, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+        Some(netband::provider::RetryAfter {
+            delay: Duration::from_secs(120),
+            deadline: chrono::DateTime::from_timestamp(120, 0).unwrap()
+        })
     );
 
     headers.insert(
@@ -60,14 +63,23 @@ fn retry_after_supports_delta_http_date_and_invalid_values() {
         "Thu, 01 Jan 1970 00:02:00 GMT".parse().unwrap(),
     );
     assert_eq!(
-        parse_retry_after(&headers, SystemTime::UNIX_EPOCH),
-        Some(Duration::from_secs(120))
+        parse_retry_after(&headers, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+        Some(netband::provider::RetryAfter {
+            delay: Duration::from_secs(120),
+            deadline: chrono::DateTime::from_timestamp(120, 0).unwrap()
+        })
     );
 
     headers.insert(reqwest::header::RETRY_AFTER, "later".parse().unwrap());
-    assert_eq!(parse_retry_after(&headers, SystemTime::UNIX_EPOCH), None);
+    assert_eq!(
+        parse_retry_after(&headers, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+        None
+    );
     headers.remove(reqwest::header::RETRY_AFTER);
-    assert_eq!(parse_retry_after(&headers, SystemTime::UNIX_EPOCH), None);
+    assert_eq!(
+        parse_retry_after(&headers, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+        None
+    );
 }
 
 async fn http_server(
@@ -201,7 +213,15 @@ async fn locate_statuses_are_provider_wide_and_preserve_retry_details() {
         server.await.unwrap();
         let failure = resolution.terminal.unwrap();
         assert_eq!(failure.outcome, expected);
-        assert_eq!(failure.retry_after, retry.map(Duration::from_secs));
+        assert_eq!(
+            failure.retry_after.map(|retry| retry.delay),
+            retry.map(Duration::from_secs)
+        );
+        assert_eq!(
+            failure.retry_after.map(|retry| retry.deadline),
+            retry
+                .map(|seconds| failure.finished_at_utc + chrono::Duration::seconds(seconds as i64))
+        );
     }
 }
 
@@ -296,5 +316,40 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
             .await
             .unwrap()
             .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn locate_reports_preserve_absolute_dates_and_invalid_header_absence() {
+    for header in [
+        "Thu, 01 Jan 1970 00:02:00 GMT",
+        "Tue, 01 Jan 2030 00:00:00 GMT",
+        "0",
+        "later",
+    ] {
+        let (base, _, server) = http_server(vec![response(
+            "429 Too Many Requests",
+            &format!("Retry-After: {header}\r\n"),
+            "",
+        )])
+        .await;
+        let dir = tempdir().unwrap();
+        let config = mlab_config(dir.path(), &base);
+        let (_sender, shutdown) = cancellation_channel();
+        let report = measure_bandwidth(&config, "retry-date", shutdown).await;
+        server.await.unwrap();
+        let failure = &report.events[0];
+        let received = failure.finished_at_utc.unwrap();
+        let expected = netband::provider::parse_retry_after_value(header, received);
+        assert_eq!(
+            failure.rate_limit_until_utc,
+            expected.map(|retry| retry.deadline)
+        );
+        assert_eq!(
+            failure.retry_after_ms,
+            expected.map(|retry| retry.delay.as_millis() as u64)
+        );
+        assert_eq!(failure.outcome, Outcome::RateLimited);
+        assert!(!report.reserved);
     }
 }

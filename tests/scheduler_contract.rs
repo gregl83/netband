@@ -140,6 +140,8 @@ fn rate_report(
     failure.request_stage = Some(stage);
     failure.http_status = Some(status);
     failure.retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64);
+    failure.rate_limit_until_utc =
+        retry_after.map(|delay| at(30, 1, 0, 0) + TimeDelta::from_std(delay).unwrap());
     BandwidthReport {
         events: vec![failure],
         outcome: Outcome::RateLimited,
@@ -697,5 +699,97 @@ fn deterministic_multi_day_simulation_never_exceeds_provider_caps() {
                 .windows(2)
                 .all(|pair| { pair[1] - pair[0] >= TimeDelta::minutes(70) })
         );
+    }
+}
+
+#[test]
+fn provider_deadlines_survive_delayed_handling_and_never_shorten_existing_cooldowns() {
+    use netband::provider::parse_retry_after_value;
+    let received = at(30, 23, 59, 0);
+    for stage in [RequestStage::Locate, RequestStage::WebsocketHandshake] {
+        let reserved = stage == RequestStage::WebsocketHandshake;
+        for header in [
+            "300",
+            "172800",
+            "Mon, 31 Aug 2026 00:04:00 GMT",
+            "0",
+            "Sun, 30 Aug 2026 23:58:00 GMT",
+            "18446744073709551615",
+        ] {
+            for delay in [5, 600] {
+                for existing in [false, true] {
+                    let root = TempDir::new().unwrap();
+                    let path = state_path(&root);
+                    let mut scheduler =
+                        Scheduler::open_seeded(&path, &mlab(), received, 37).unwrap();
+                    if reserved {
+                        scheduler.reserve_run(received).unwrap();
+                    }
+                    let opportunity = || BandwidthOpportunity {
+                        reason: TriggerReason::Manual,
+                        scheduled_at_utc: received,
+                        interface: None,
+                    };
+                    let make_report = |deadline, delay| {
+                        let mut report = rate_report(stage, 429, None, reserved);
+                        let event = &mut report.events[0];
+                        event.finished_at_utc = Some(received);
+                        event.rate_limit_until_utc = Some(deadline);
+                        event.retry_after_ms = delay;
+                        report
+                    };
+                    let existing_deadline = received + TimeDelta::hours(1);
+                    if existing {
+                        let mut report = make_report(existing_deadline, Some(3_600_000));
+                        scheduler
+                            .finish_attempt("prior", received, opportunity(), &mut report)
+                            .unwrap();
+                    }
+                    let retry = parse_retry_after_value(header, received).unwrap();
+                    let mut report =
+                        make_report(retry.deadline, u64::try_from(retry.delay.as_millis()).ok());
+                    let handled = received + TimeDelta::seconds(delay);
+                    let events = scheduler
+                        .finish_attempt("delayed", handled, opportunity(), &mut report)
+                        .unwrap();
+                    let expected = if existing {
+                        existing_deadline.max(retry.deadline)
+                    } else {
+                        retry.deadline
+                    };
+                    assert_eq!(report.events[0].rate_limit_until_utc, Some(retry.deadline));
+                    assert_eq!(events[0].rate_limit_until_utc, Some(expected));
+                    assert_eq!(scheduler.snapshot().cooldown_until_utc, Some(expected));
+                    assert_eq!(scheduler.snapshot().runs.len(), usize::from(reserved));
+                    if reserved {
+                        assert_eq!(scheduler.snapshot().deferred_attempts, None);
+                    }
+                    drop(scheduler);
+                    let mut scheduler =
+                        Scheduler::open_seeded(&path, &mlab(), handled, 37).unwrap();
+                    if expected > handled {
+                        assert!(matches!(
+                            scheduler.preflight_manual("blocked", handled).unwrap(),
+                            ManualDecision::Blocked(_)
+                        ));
+                        assert_eq!(scheduler.snapshot().cooldown_until_utc, Some(expected));
+                    } else {
+                        assert!(
+                            scheduler
+                                .snapshot()
+                                .cooldown_until_utc
+                                .is_none_or(|deadline| deadline <= handled)
+                        );
+                        // Only minimum spacing from a reserved start can still block this case.
+                        if !reserved {
+                            assert!(matches!(
+                                scheduler.preflight_manual("expired", handled).unwrap(),
+                                ManualDecision::Allowed
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

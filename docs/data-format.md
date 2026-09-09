@@ -51,8 +51,8 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `request_stage` | `locate`, `dns`, `connect`, `tls`, `websocket_handshake`, `download`, or `upload` |
 | `request_attempt` | One-based request/candidate attempt number |
 | `http_status` | HTTP/WebSocket handshake status when returned |
-| `retry_after_ms` | Provider `Retry-After` delay in milliseconds |
-| `rate_limit_until_utc` | Persisted provider cooldown deadline |
+| `retry_after_ms` | Parsed provider delay at response receipt; HTTP-dates report remaining time, floored at zero; empty if absent, invalid, or too large for this field |
+| `rate_limit_until_utc` | Provider retry deadline on request-failure rows; enforced cooldown deadline on scheduler rows, which may retain a later existing cooldown |
 | `daily_runs_used` | Reserved starts for this provider and UTC day |
 | `download_mbps` | NDT7 download throughput in decimal Mb/s |
 | `upload_mbps` | NDT7 upload throughput in decimal Mb/s |

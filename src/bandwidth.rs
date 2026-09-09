@@ -32,8 +32,8 @@ use crate::model::{
     TriggerReason,
 };
 use crate::provider::{
-    EndpointCandidate, FailureDisposition, RequestFailure, USER_AGENT as NETBAND_USER_AGENT,
-    parse_retry_after_value, resolve_endpoints, retry_until,
+    EndpointCandidate, FailureDisposition, RequestFailure, RetryAfter,
+    USER_AGENT as NETBAND_USER_AGENT, parse_retry_after_value, resolve_endpoints,
 };
 use crate::scheduler::{BandwidthOpportunity, ManualDecision, Scheduler, SchedulerError};
 
@@ -1005,17 +1005,18 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 });
             }
             Err(WebSocketError::Http(response)) => {
+                let received_at = Utc::now();
                 let status = response.status().as_u16();
                 let retry_header = response.headers().get("retry-after");
                 let retry_after = retry_header
                     .and_then(|value| value.to_str().ok())
-                    .and_then(|value| parse_retry_after_value(value, std::time::SystemTime::now()));
+                    .and_then(|value| parse_retry_after_value(value, received_at));
                 let retry_detail = match (retry_header.is_some(), retry_after.is_some()) {
                     (true, true) => "Retry-After parsed",
                     (true, false) => "Retry-After malformed",
                     (false, _) => "Retry-After missing",
                 };
-                progress.record_failure(handshake_failure(
+                let mut failure = handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
@@ -1023,7 +1024,9 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     request_attempt,
                     Some((status, retry_after)),
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
-                ));
+                );
+                failure.finished_at_utc = received_at;
+                progress.record_failure(failure);
                 return Err(());
             }
             Err(error) => {
@@ -1195,7 +1198,7 @@ fn handshake_failure(
     remote_ip: IpAddr,
     source_ip: IpAddr,
     attempt: u32,
-    response: Option<(u16, Option<Duration>)>,
+    response: Option<(u16, Option<RetryAfter>)>,
     message: String,
 ) -> RequestFailure {
     let (http_status, retry_after) = response.unzip();
@@ -1311,7 +1314,6 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
                 provider_id,
                 provider_kind,
                 failure,
-                now,
             )
         })
         .collect::<Vec<_>>();
@@ -1384,7 +1386,6 @@ fn failure_event(
     provider_id: &str,
     provider_kind: ProviderKind,
     failure: &RequestFailure,
-    now: DateTime<Utc>,
 ) -> MeasurementEvent {
     let mut event = MeasurementEvent::new(
         run_id,
@@ -1405,8 +1406,8 @@ fn failure_event(
     event.http_status = failure.http_status;
     event.retry_after_ms = failure
         .retry_after
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
-    event.rate_limit_until_utc = retry_until(now, failure.retry_after);
+        .and_then(|retry| u64::try_from(retry.delay.as_millis()).ok());
+    event.rate_limit_until_utc = failure.retry_after.map(|retry| retry.deadline);
     event.error_kind = Some(failure.error_kind);
     event.os_error_code = failure.os_error_code;
     event.error_message = Some(failure.message.clone());
@@ -1550,6 +1551,7 @@ mod tests {
                 );
                 failure.started_at_utc = start + chrono::Duration::seconds(1);
                 failure.finished_at_utc = start + chrono::Duration::seconds(2);
+                failure.retry_after = parse_retry_after_value("60", failure.finished_at_utc);
                 let report = report_from_result(ReportInput {
                     started_at_utc: start,
                     finished_at_utc: finish,
@@ -1566,6 +1568,11 @@ mod tests {
                 let request = &report.events[0];
                 assert_eq!(request.started_at_utc, Some(failure.started_at_utc));
                 assert_eq!(request.finished_at_utc, Some(failure.finished_at_utc));
+                assert_eq!(request.retry_after_ms, Some(60_000));
+                assert_eq!(
+                    request.rate_limit_until_utc,
+                    Some(start + chrono::Duration::seconds(62))
+                );
                 let event = &report.events[1];
                 assert_eq!(event.started_at_utc, Some(start));
                 assert_eq!(event.finished_at_utc, Some(finish));
@@ -1580,6 +1587,41 @@ mod tests {
                     )
                 );
             }
+        }
+    }
+
+    #[test]
+    fn request_retry_evidence_is_independent_of_reporting_time() {
+        use super::*;
+        let received = DateTime::from_timestamp(120, 500_000_000).unwrap();
+        for header in [
+            None,
+            Some("60"),
+            Some("0"),
+            Some("later"),
+            Some("Thu, 01 Jan 1970 00:01:00 GMT"),
+            Some("18446744073709551615"),
+        ] {
+            let mut failure = RequestFailure::simple(
+                RequestStage::WebsocketHandshake,
+                ErrorKind::HttpStatus,
+                "fixture",
+                None,
+                1,
+            );
+            failure.finished_at_utc = received;
+            failure.retry_after = header.and_then(|value| parse_retry_after_value(value, received));
+            let retry = failure.retry_after;
+            let event = failure_event("retry", 0, None, "direct", ProviderKind::Direct, &failure);
+            assert_eq!(event.finished_at_utc, Some(received));
+            assert_eq!(
+                event.rate_limit_until_utc,
+                retry.map(|value| value.deadline)
+            );
+            assert_eq!(
+                event.retry_after_ms,
+                retry.and_then(|value| u64::try_from(value.delay.as_millis()).ok())
+            );
         }
     }
 

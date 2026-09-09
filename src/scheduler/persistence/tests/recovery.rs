@@ -99,6 +99,7 @@ fn record_cooldown(scheduler: &mut Scheduler, time: DateTime<Utc>, seconds: Opti
     event.request_stage = Some(RequestStage::Locate);
     event.http_status = Some(429);
     event.retry_after_ms = seconds.map(|seconds| seconds * 1000);
+    event.rate_limit_until_utc = seconds.map(|seconds| time + TimeDelta::seconds(seconds as i64));
     let mut report = BandwidthReport {
         events: vec![event],
         outcome: Outcome::RateLimited,
