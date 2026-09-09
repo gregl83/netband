@@ -1395,3 +1395,39 @@ async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
         assert!(!header.iter().any(|column| column == field));
     }
 }
+
+#[tokio::test]
+async fn tls_rechecks_private_ca_changed_after_preflight() {
+    for removed in [false, true] {
+        let dir = tempdir().unwrap();
+        let (ca, _) = tls_material(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config =
+            tls_direct_config(dir.path(), listener.local_addr().unwrap(), &ca, "localhost");
+        netband::config::validate_environment(&config).unwrap();
+        if removed {
+            std::fs::remove_file(&ca).unwrap();
+        } else {
+            std::fs::write(&ca, "invalid replacement").unwrap();
+        }
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let (_sender, shutdown) = cancellation_channel();
+        let report = measure_bandwidth(&config, "changed-ca", shutdown).await;
+        server.abort();
+        assert_eq!(report.outcome, Outcome::Error);
+        assert!(report.events.iter().any(|event| {
+            event.request_stage == Some(RequestStage::Tls)
+                && event.error_kind == Some(ErrorKind::Tls)
+                && event
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("private CA"))
+        }));
+        assert!(report.events.last().unwrap().download_mbps.is_none());
+        assert!(report.events.last().unwrap().upload_mbps.is_none());
+    }
+}

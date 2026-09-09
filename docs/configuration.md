@@ -144,6 +144,11 @@ netband --ndt-provider direct \
   --allow-insecure-ndt config check
 ```
 
+Private CA bundles are parsed during local preflight. Missing, unreadable, empty, or
+invalid certificate bundles fail before output/state creation or network activity.
+TLS setup reads the bundle again, so changes after preflight can still cause failure.
+Local validation does not verify the remote server's identity or availability.
+
 A CDN-hosted endpoint uses the same DNS form, for example an operator-controlled
 `ndt.customer.example.invalid` name whose DNS is placed behind that operator's CDN.
 Netband does not supply, discover, endorse, or imply a public Akamai NDT7 endpoint.

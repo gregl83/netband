@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{Sink, Stream, StreamExt};
-use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
@@ -1112,7 +1112,7 @@ async fn wrap_stream(
     match url.scheme() {
         "ws" if candidate.allow_insecure => Ok(Box::new(tcp)),
         "wss" => {
-            let roots = tls_roots(candidate.ca_cert.as_deref())?;
+            let roots = crate::tls::root_store(candidate.ca_cert.as_deref())?;
             let config = ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
@@ -1135,31 +1135,6 @@ async fn wrap_stream(
         }
         scheme => Err(format!("unsupported WebSocket scheme: {scheme}")),
     }
-}
-
-fn tls_roots(ca_cert: Option<&std::path::Path>) -> Result<RootCertStore, String> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(path) = ca_cert {
-        let contents = std::fs::read(path)
-            .map_err(|error| format!("cannot read private CA {}: {error}", path.display()))?;
-        let mut found = false;
-        for certificate in CertificateDer::pem_slice_iter(&contents) {
-            let certificate = certificate
-                .map_err(|error| format!("invalid private CA {}: {error}", path.display()))?;
-            roots
-                .add(certificate)
-                .map_err(|error| format!("invalid private CA {}: {error}", path.display()))?;
-            found = true;
-        }
-        if !found {
-            return Err(format!(
-                "private CA {} contains no certificates",
-                path.display()
-            ));
-        }
-    }
-    Ok(roots)
 }
 
 fn websocket_request(

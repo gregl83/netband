@@ -852,24 +852,7 @@ pub fn validate_environment(config: &ResolvedConfig) -> Result<(), ConfigError> 
     if let ProviderConfig::Direct(direct) = &config.bandwidth.provider
         && let Some(path) = direct.ca_cert.as_deref()
     {
-        let metadata = fs::metadata(path).map_err(|source| {
-            error(format!(
-                "cannot read NDT CA certificate {}: {source}",
-                path.display()
-            ))
-        })?;
-        if !metadata.is_file() {
-            return Err(error(format!(
-                "NDT CA certificate is not a file: {}",
-                path.display()
-            )));
-        }
-        fs::File::open(path).map_err(|source| {
-            error(format!(
-                "cannot read NDT CA certificate {}: {source}",
-                path.display()
-            ))
-        })?;
+        crate::tls::root_store(Some(path)).map_err(error)?;
     }
     Ok(())
 }

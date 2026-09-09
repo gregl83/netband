@@ -524,7 +524,11 @@ fn explicit_direct_urls_support_nonstandard_paths_and_insecure_opt_in() {
 fn private_ca_is_validated_without_network_access() {
     let dir = tempdir().unwrap();
     let ca = dir.path().join("private-ca.pem");
-    std::fs::write(&ca, "test fixture").unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["ndt.example.net".to_owned()])
+        .unwrap()
+        .cert
+        .pem();
+    std::fs::write(&ca, &certificate).unwrap();
     let config = resolve(
         &parse(&[
             "netband",
@@ -544,7 +548,73 @@ fn private_ca_is_validated_without_network_access() {
     .unwrap();
     validate_environment(&config).unwrap();
 
+    std::fs::write(&ca, format!("{certificate}{certificate}")).unwrap();
+    validate_environment(&config).unwrap();
+    for contents in [
+        String::new(),
+        "test fixture".to_owned(),
+        "-----BEGIN CERTIFICATE-----\ninvalid!\n-----END CERTIFICATE-----".to_owned(),
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----".to_owned(),
+        format!("{certificate}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----"),
+    ] {
+        std::fs::write(&ca, contents).unwrap();
+        assert!(
+            validate_environment(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("private CA")
+        );
+    }
+    // Validation reads current contents on each call, including disappearance.
+    std::fs::write(&ca, certificate).unwrap();
+    validate_environment(&config).unwrap();
     std::fs::remove_file(&ca).unwrap();
-    let error = validate_environment(&config).unwrap_err();
-    assert!(error.to_string().contains("CA certificate"));
+    assert!(
+        validate_environment(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("private CA")
+    );
+    std::fs::create_dir(&ca).unwrap();
+    assert!(
+        validate_environment(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("private CA")
+    );
+}
+
+#[test]
+fn invalid_private_ca_stops_commands_before_output_state_or_network_activity() {
+    let root = tempdir().unwrap();
+    let ca = root.path().join("invalid.pem");
+    std::fs::write(&ca, "not a certificate").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for command in [["config", "check"], ["once", "bandwidth"]] {
+        let output = root.path().join("results.csv");
+        let state = root.path().join("scheduler.json");
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_netband"))
+            .args(["--ndt-provider", "direct", "--ndt-target"])
+            .arg(listener.local_addr().unwrap().to_string())
+            .arg("--ndt-ca-cert")
+            .arg(&ca)
+            .arg("--output")
+            .arg(&output)
+            .arg("--state-file")
+            .arg(&state)
+            .args(command)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("configuration=valid"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("private CA"));
+        assert!(!output.exists());
+        assert!(!state.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }

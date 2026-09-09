@@ -12,6 +12,7 @@ pub mod ping;
 pub mod provider;
 pub mod scheduler;
 pub mod shutdown;
+mod tls;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
