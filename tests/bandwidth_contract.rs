@@ -31,6 +31,88 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 const PROTOCOL: &str = "net.measurementlab.ndt.v7";
 const METRICS: &str = r#"{"TCPInfo":{"MinRTT":1200,"RTT":2500,"BytesRetrans":7}}"#;
 
+fn assert_report_timestamps(report: &netband::bandwidth::BandwidthReport) {
+    let bandwidth = report.events.last().unwrap();
+    let start = bandwidth.started_at_utc.expect("attempt start");
+    let finish = bandwidth.finished_at_utc.expect("attempt finish");
+    assert!(start <= finish);
+    let mut previous_finish = start;
+    for event in &report.events[..report.events.len() - 1] {
+        let request_start = event.started_at_utc.expect("request start");
+        let request_finish = event.finished_at_utc.expect("request finish");
+        assert!(start <= request_start && request_start <= request_finish);
+        assert!(previous_finish <= request_finish && request_finish <= finish);
+        previous_finish = request_finish;
+    }
+}
+
+struct TimedResolver {
+    address: std::net::SocketAddr,
+    fail: bool,
+    boundaries: Mutex<Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>>,
+}
+
+impl AddressResolver for TimedResolver {
+    fn resolve<'a>(&'a self, _: &'a str, _: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            let start = chrono::Utc::now();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let finish = chrono::Utc::now();
+            self.boundaries.lock().unwrap().push((start, finish));
+            if self.fail {
+                Err("timed DNS failure".to_owned())
+            } else {
+                Ok(vec![self.address])
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn attempt_and_request_timestamps_include_setup_on_success_and_failure() {
+    for fail in [false, true] {
+        let (address, server) = successful_server().await;
+        let dir = tempdir().unwrap();
+        let config = direct_config(dir.path(), address, "5s");
+        let resolver = TimedResolver {
+            address,
+            fail,
+            boundaries: Mutex::new(Vec::new()),
+        };
+        let (_sender, shutdown) = cancellation_channel();
+        let before = chrono::Utc::now();
+        let report = measure_bandwidth_with_network(
+            &config,
+            "timed",
+            shutdown,
+            &netband::bandwidth::SystemTcpConnector,
+            &resolver,
+        )
+        .await;
+        let after = chrono::Utc::now();
+        assert_report_timestamps(&report);
+        let bandwidth = report.events.last().unwrap();
+        let boundaries = resolver.boundaries.lock().unwrap().clone();
+        assert!(before <= bandwidth.started_at_utc.unwrap());
+        assert!(bandwidth.started_at_utc.unwrap() <= boundaries[0].0);
+        assert!(boundaries.last().unwrap().1 <= bandwidth.finished_at_utc.unwrap());
+        assert!(bandwidth.finished_at_utc.unwrap() <= after);
+        if fail {
+            assert_eq!(report.outcome, Outcome::Error);
+            let failure = &report.events[0];
+            assert_eq!(failure.request_stage, Some(RequestStage::Dns));
+            assert!(failure.started_at_utc.unwrap() <= boundaries[0].0);
+            assert!(failure.finished_at_utc.unwrap() >= boundaries[0].1);
+            assert!(bandwidth.download_mbps.is_none());
+            server.abort();
+        } else {
+            assert_eq!(report.outcome, Outcome::Success);
+            assert_eq!(boundaries.len(), 2);
+            server.await.unwrap();
+        }
+    }
+}
+
 fn context(root: PathBuf) -> ResolveContext {
     ResolveContext {
         stdout_is_terminal: false,
@@ -335,6 +417,7 @@ async fn direct_download_and_upload_produce_attributed_bandwidth_result() {
 
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(report.exit_code(), 0);
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert_eq!(bandwidth.event_kind, EventKind::Bandwidth);
     assert_eq!(
@@ -461,6 +544,7 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
     )
     .await
     .expect("peer Close must start bounded cleanup even behind a blocked Pong write");
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert!(bandwidth.bytes_sent.unwrap() > 0);
     assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5), "read metrics after Ping");
@@ -554,6 +638,7 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
                 .count(),
             1
         );
+        assert_report_timestamps(&report);
         let bandwidth = report.events.last().unwrap();
         assert_eq!(bandwidth.bytes_received, Some(16 * 1024));
         assert!(bandwidth.bytes_sent.unwrap() >= 8192);
@@ -583,6 +668,7 @@ async fn upload_handshake_failure_preserves_partial_download() {
             && event.request_stage == Some(RequestStage::WebsocketHandshake)
             && event.http_status == Some(500)
     }));
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert!(bandwidth.download_mbps.is_some());
     assert!(bandwidth.upload_mbps.is_none());
@@ -1086,6 +1172,7 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 tokio::time::timeout(Duration::from_secs(2), ready.notified())
                     .await
                     .unwrap();
+                let stage_observed = chrono::Utc::now();
                 if cancel {
                     shutdown_tx.send(true).unwrap();
                 }
@@ -1119,6 +1206,7 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                         .count(),
                     1
                 );
+                assert_report_timestamps(&report);
                 let bandwidth = report.events.last().unwrap();
                 assert_eq!(
                     bandwidth.bytes_received,
@@ -1136,6 +1224,9 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert_eq!(terminal.event_kind, EventKind::RequestFailure);
                 assert_eq!(terminal.request_stage, Some(stage));
                 assert_eq!(terminal.outcome, outcome);
+                assert!(terminal.started_at_utc.unwrap() <= stage_observed);
+                assert!(terminal.finished_at_utc.unwrap() >= stage_observed);
+                assert_eq!(terminal.finished_at_utc, bandwidth.finished_at_utc);
                 if after_download || stage != RequestStage::Dns {
                     assert!(report.events.iter().any(|event| {
                         event
@@ -1206,6 +1297,7 @@ async fn reservation_failure_and_prior_cancellation_never_start_connections() {
                 .iter()
                 .all(|event| event.daily_runs_used.is_none())
         );
+        assert_report_timestamps(&report);
         let bandwidth = report.events.last().unwrap();
         assert!(bandwidth.download_mbps.is_none());
         assert!(bandwidth.upload_mbps.is_none());

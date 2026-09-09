@@ -36,6 +36,8 @@ pub enum FailureDisposition {
 
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
+    pub started_at_utc: DateTime<Utc>,
+    pub finished_at_utc: DateTime<Utc>,
     pub stage: RequestStage,
     pub outcome: Outcome,
     pub error_kind: ErrorKind,
@@ -58,7 +60,10 @@ impl RequestFailure {
         server: Option<String>,
         attempt: u32,
     ) -> Self {
+        let now = Utc::now();
         Self {
+            started_at_utc: now,
+            finished_at_utc: now,
             stage,
             outcome: Outcome::Error,
             error_kind,
@@ -86,7 +91,8 @@ pub async fn resolve_endpoints(
     config: &BandwidthConfig,
     interface: Option<&str>,
 ) -> EndpointResolution {
-    match &config.provider {
+    let started_at = Utc::now();
+    let mut resolution = match &config.provider {
         ProviderConfig::Direct(direct) => resolve_direct(config, direct),
         ProviderConfig::Mlab(mlab) if mlab.policy_accepted => {
             resolve_mlab(config, mlab, interface).await
@@ -102,7 +108,15 @@ pub async fn resolve_endpoints(
                 0,
             )),
         },
+    };
+    for failure in resolution
+        .failures
+        .iter_mut()
+        .chain(resolution.terminal.iter_mut())
+    {
+        failure.started_at_utc = started_at;
     }
+    resolution
 }
 
 fn resolve_direct(config: &BandwidthConfig, direct: &DirectConfig) -> EndpointResolution {
@@ -206,7 +220,10 @@ async fn resolve_mlab(
             (true, false) => "Retry-After malformed",
             (false, _) => "Retry-After missing",
         };
+        let finished_at = Utc::now();
         return terminal_resolution(RequestFailure {
+            started_at_utc: finished_at,
+            finished_at_utc: finished_at,
             stage: RequestStage::Locate,
             outcome,
             error_kind: ErrorKind::HttpStatus,

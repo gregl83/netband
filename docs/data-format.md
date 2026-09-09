@@ -26,7 +26,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `run_id` | Identifier for a measurement stream; automatic bandwidth attempts use a nested run ID |
 | `event_id` | Unique event identifier within the run |
 | `scheduled_at_utc` | Planned opportunity or trigger creation time |
-| `started_at_utc` | Attempt start timestamp; bandwidth values are reconstructed as described below |
+| `started_at_utc` | Attempt start time; request-failure rows record the request-stage start |
 | `finished_at_utc` | Event completion time |
 | `interface` | Selected Linux interface; empty means default route |
 | `source_ip` | Source address actually bound/used when known |
@@ -67,10 +67,12 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 
 ## Bandwidth field limitations
 
-Bandwidth `started_at_utc` is reconstructed from report time minus the download
-measurement window, or the upload window when download is unavailable. It excludes
-parts of the attempt and can be empty when no direction measurement is available;
-it is not a precise setup-start timestamp.
+Bandwidth `started_at_utc` is captured before endpoint resolution, and
+`finished_at_utc` when the attempt terminates, including setup and upload cleanup.
+Both are recorded even when the attempt fails, times out, or is cancelled before
+producing measurements. Request-failure rows retain the stage start and failure time.
+UTC timestamps reflect the observed wall clock and can move backward after a clock
+adjustment. Throughput and active durations use monotonic elapsed time.
 
 `duration_ms` combines both direction windows. Separate windows are not exported, so
 both rates cannot be independently recomputed from that field and the byte counts.

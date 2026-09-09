@@ -127,7 +127,14 @@ async fn unconsented_mlab_resolution_stops_before_the_network_boundary() {
     .unwrap();
     let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
 
+    let before = chrono::Utc::now();
     let resolution = resolve_endpoints(&config.bandwidth, None).await;
+    let after = chrono::Utc::now();
+    for failure in resolution.failures.iter().chain(resolution.terminal.iter()) {
+        assert!(before <= failure.started_at_utc);
+        assert!(failure.started_at_utc <= failure.finished_at_utc);
+        assert!(failure.finished_at_utc <= after);
+    }
 
     assert!(resolution.candidates.is_empty());
     let failure = resolution.terminal.unwrap();
@@ -150,7 +157,14 @@ async fn locate_follows_redirect_identifies_client_and_parses_multiple_results()
     .await;
     let dir = tempdir().unwrap();
     let config = mlab_config(dir.path(), &format!("{base}/start"));
+    let before = chrono::Utc::now();
     let resolution = resolve_endpoints(&config.bandwidth, None).await;
+    let after = chrono::Utc::now();
+    for failure in resolution.failures.iter().chain(resolution.terminal.iter()) {
+        assert!(before <= failure.started_at_utc);
+        assert!(failure.started_at_utc <= failure.finished_at_utc);
+        assert!(failure.finished_at_utc <= after);
+    }
     server.await.unwrap();
 
     assert_eq!(resolution.candidates.len(), 1);
@@ -176,7 +190,14 @@ async fn locate_statuses_are_provider_wide_and_preserve_retry_details() {
         let (base, _, server) = http_server(vec![response(status, &retry_header, "")]).await;
         let dir = tempdir().unwrap();
         let config = mlab_config(dir.path(), &base);
+        let before = chrono::Utc::now();
         let resolution = resolve_endpoints(&config.bandwidth, None).await;
+        let after = chrono::Utc::now();
+        for failure in resolution.failures.iter().chain(resolution.terminal.iter()) {
+            assert!(before <= failure.started_at_utc);
+            assert!(failure.started_at_utc <= failure.finished_at_utc);
+            assert!(failure.finished_at_utc <= after);
+        }
         server.await.unwrap();
         let failure = resolution.terminal.unwrap();
         assert_eq!(failure.outcome, expected);
@@ -198,7 +219,14 @@ async fn direct_provider_never_contacts_locate() {
     ])
     .unwrap();
     let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
+    let before = chrono::Utc::now();
     let resolution = resolve_endpoints(&config.bandwidth, None).await;
+    let after = chrono::Utc::now();
+    for failure in resolution.failures.iter().chain(resolution.terminal.iter()) {
+        assert!(before <= failure.started_at_utc);
+        assert!(failure.started_at_utc <= failure.finished_at_utc);
+        assert!(failure.finished_at_utc <= after);
+    }
     assert_eq!(resolution.candidates.len(), 1);
     assert!(resolution.failures.is_empty());
 }
@@ -228,6 +256,7 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
             .await
             .unwrap()
             .unwrap();
+        let observed = chrono::Utc::now();
         if cancel {
             shutdown_tx.send(true).unwrap();
         }
@@ -248,6 +277,10 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
         assert_eq!(failure.outcome, outcome);
         assert!(failure.server.is_some());
         let bandwidth = report.events.last().unwrap();
+        assert!(failure.started_at_utc.unwrap() <= observed);
+        assert!(failure.finished_at_utc.unwrap() >= observed);
+        assert_eq!(failure.started_at_utc, bandwidth.started_at_utc);
+        assert_eq!(failure.finished_at_utc, bandwidth.finished_at_utc);
         assert_eq!(bandwidth.outcome, outcome);
         assert!(bandwidth.download_mbps.is_none());
         assert!(bandwidth.upload_mbps.is_none());

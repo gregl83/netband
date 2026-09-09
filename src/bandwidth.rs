@@ -101,6 +101,7 @@ pub struct DirectionMeasurement {
 
 #[derive(Debug)]
 struct AttemptProgress {
+    started_at_utc: DateTime<Utc>,
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
     failures: Vec<RequestFailure>,
@@ -110,17 +111,30 @@ struct AttemptProgress {
 
 impl AttemptProgress {
     fn new(stage: RequestStage) -> Self {
+        let active = RequestFailure::simple(stage, ErrorKind::Internal, "", None, 1);
         Self {
+            started_at_utc: active.started_at_utc,
             download: None,
             upload: None,
             failures: Vec::new(),
             server: None,
-            active: RequestFailure::simple(stage, ErrorKind::Internal, "", None, 1),
+            active,
         }
     }
 
-    fn interrupt(&mut self, outcome: Outcome, timeout: Duration) {
+    fn begin_stage(&mut self, stage: RequestStage) {
+        self.active.stage = stage;
+        self.active.started_at_utc = Utc::now();
+    }
+
+    fn record_failure(&mut self, mut failure: RequestFailure) {
+        failure.started_at_utc = self.active.started_at_utc;
+        self.failures.push(failure);
+    }
+
+    fn interrupt(&mut self, outcome: Outcome, timeout: Duration, finished_at: DateTime<Utc>) {
         let mut failure = self.active.clone();
+        failure.finished_at_utc = finished_at;
         failure.outcome = outcome;
         (failure.error_kind, failure.message) = match outcome {
             Outcome::Timeout => (
@@ -410,6 +424,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
                 progress.failures.push(terminal);
                 return outcome;
             }
+            progress.begin_stage(RequestStage::Connect);
             admission = match reservation.reserve(Utc::now()) {
                 Ok(admission) => admission,
                 Err(message) => {
@@ -421,7 +436,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
                         1,
                     );
                     failure.outcome = Outcome::Error;
-                    progress.failures.push(failure);
+                    progress.record_failure(failure);
                     reservation_error = Some(message);
                     return Outcome::Error;
                 }
@@ -444,11 +459,14 @@ async fn measure_bandwidth_with_network_and_gate_observed<
         }
     };
     // The attempt and its sockets are dropped before finalizing retained results.
+    let finished_at = Utc::now();
     let outcome = result.unwrap_or_else(|outcome| {
-        progress.interrupt(outcome, config.bandwidth.whole_test_timeout);
+        progress.interrupt(outcome, config.bandwidth.whole_test_timeout, finished_at);
         outcome
     });
     let mut report = report_from_result(ReportInput {
+        started_at_utc: progress.started_at_utc,
+        finished_at_utc: finished_at,
         run_id,
         interface,
         provider_id: &config.bandwidth.provider_id,
@@ -550,7 +568,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         remote_ip,
         source_ip,
     } = connected;
-    progress.active.stage = RequestStage::Download;
+    progress.begin_stage(RequestStage::Download);
     report_phase(phase, LoadPhase::Download);
     let started = Instant::now();
     let mut bytes = 0_u64;
@@ -569,7 +587,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
             }
             Ok(_) => {}
             Err(error) => {
-                progress.failures.push(stream_failure(
+                progress.record_failure(stream_failure(
                     candidate,
                     RequestStage::Download,
                     remote_ip,
@@ -585,7 +603,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     report_phase(phase, LoadPhase::Setup);
     if bytes == 0 {
         if progress.failures.len() == failures_before {
-            progress.failures.push(stream_failure(
+            progress.record_failure(stream_failure(
                 candidate,
                 RequestStage::Download,
                 remote_ip,
@@ -597,7 +615,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         return None;
     }
     if !completed && progress.failures.len() == failures_before {
-        progress.failures.push(stream_failure(
+        progress.record_failure(stream_failure(
             candidate,
             RequestStage::Download,
             remote_ip,
@@ -642,7 +660,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         remote_ip,
         source_ip,
     } = connected;
-    progress.active.stage = RequestStage::Upload;
+    progress.begin_stage(RequestStage::Upload);
     report_phase(phase, LoadPhase::Upload);
     let UploadTransfer {
         bytes,
@@ -665,7 +683,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
             UploadError::Transport(error) => websocket_os_error(error),
             _ => None,
         };
-        progress.failures.push(stream_failure(
+        progress.record_failure(stream_failure(
             candidate,
             RequestStage::Upload,
             remote_ip,
@@ -676,7 +694,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     }
     if bytes == 0 {
         if progress.failures.len() == failures_before {
-            progress.failures.push(stream_failure(
+            progress.record_failure(stream_failure(
                 candidate,
                 RequestStage::Upload,
                 remote_ip,
@@ -871,7 +889,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     let host = match url.host_str() {
         Some(host) => host,
         None => {
-            progress.failures.push(RequestFailure::simple(
+            progress.record_failure(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 "NDT7 URL has no host",
@@ -885,7 +903,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     let addresses = match resolver.resolve(host, port).await {
         Ok(addresses) => addresses,
         Err(message) => {
-            progress.failures.push(RequestFailure::simple(
+            progress.record_failure(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 message,
@@ -897,7 +915,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     };
     for (address_index, remote) in addresses.into_iter().enumerate() {
         let request_attempt = attempt + address_index as u32;
-        progress.active.stage = RequestStage::Connect;
+        progress.begin_stage(RequestStage::Connect);
         progress.active.attempt = request_attempt;
         progress.active.remote_ip = Some(remote.ip());
         progress.active.source_ip = None;
@@ -913,7 +931,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 );
                 failure.remote_ip = Some(remote.ip());
                 failure.os_error_code = error.raw_os_error();
-                progress.failures.push(failure);
+                progress.record_failure(failure);
                 continue;
             }
         };
@@ -928,7 +946,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 }
             });
         progress.active.source_ip = Some(source_ip);
-        progress.active.stage = RequestStage::Tls;
+        progress.begin_stage(RequestStage::Tls);
         let stream = match wrap_stream(tcp, url, candidate).await {
             Ok(stream) => stream,
             Err(message) => {
@@ -941,15 +959,15 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 );
                 failure.source_ip = Some(source_ip);
                 failure.remote_ip = Some(remote.ip());
-                progress.failures.push(failure);
+                progress.record_failure(failure);
                 continue;
             }
         };
-        progress.active.stage = RequestStage::WebsocketHandshake;
+        progress.begin_stage(RequestStage::WebsocketHandshake);
         let request = match websocket_request(url, candidate) {
             Ok(request) => request,
             Err(message) => {
-                progress.failures.push(RequestFailure::simple(
+                progress.record_failure(RequestFailure::simple(
                     RequestStage::WebsocketHandshake,
                     ErrorKind::WebsocketHandshake,
                     message,
@@ -969,7 +987,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     .get(SEC_WEBSOCKET_PROTOCOL)
                     .and_then(|value| value.to_str().ok());
                 if selected != Some(NDT7_SUBPROTOCOL) {
-                    progress.failures.push(handshake_failure(
+                    progress.record_failure(handshake_failure(
                         candidate,
                         url,
                         remote.ip(),
@@ -997,7 +1015,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     (true, false) => "Retry-After malformed",
                     (false, _) => "Retry-After missing",
                 };
-                progress.failures.push(handshake_failure(
+                progress.record_failure(handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
@@ -1009,7 +1027,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 return Err(());
             }
             Err(error) => {
-                progress.failures.push(handshake_failure(
+                progress.record_failure(handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
@@ -1182,7 +1200,10 @@ fn handshake_failure(
 ) -> RequestFailure {
     let (http_status, retry_after) = response.unzip();
     let (outcome, disposition) = classify_handshake_status(candidate.provider_kind, http_status);
+    let now = Utc::now();
     RequestFailure {
+        started_at_utc: now,
+        finished_at_utc: now,
         stage: RequestStage::WebsocketHandshake,
         outcome,
         error_kind: ErrorKind::WebsocketHandshake,
@@ -1220,7 +1241,10 @@ fn stream_failure(
     message: String,
     os_error_code: Option<i32>,
 ) -> RequestFailure {
+    let now = Utc::now();
     RequestFailure {
+        started_at_utc: now,
+        finished_at_utc: now,
         stage,
         outcome: Outcome::Error,
         error_kind: match stage {
@@ -1248,6 +1272,8 @@ fn websocket_os_error(error: &WebSocketError) -> Option<i32> {
 }
 
 struct ReportInput<'a> {
+    started_at_utc: DateTime<Utc>,
+    finished_at_utc: DateTime<Utc>,
     run_id: &'a str,
     interface: Option<&'a str>,
     provider_id: &'a str,
@@ -1261,6 +1287,8 @@ struct ReportInput<'a> {
 
 fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     let ReportInput {
+        started_at_utc,
+        finished_at_utc,
         run_id,
         interface,
         provider_id,
@@ -1271,7 +1299,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         upload,
         outcome,
     } = input;
-    let now = Utc::now();
+    let now = finished_at_utc;
     let mut events = failures
         .iter()
         .enumerate()
@@ -1294,10 +1322,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         outcome,
         now,
     );
-    bandwidth.started_at_utc = download
-        .as_ref()
-        .or(upload.as_ref())
-        .map(|measurement| now - chrono_duration(measurement.elapsed));
+    bandwidth.started_at_utc = Some(started_at_utc);
     bandwidth.interface = interface.map(str::to_owned);
     bandwidth.source_ip = upload
         .as_ref()
@@ -1366,8 +1391,9 @@ fn failure_event(
         format!("{run_id}:request-failure:{index}"),
         EventKind::RequestFailure,
         failure.outcome,
-        now,
+        failure.finished_at_utc,
     );
+    event.started_at_utc = Some(failure.started_at_utc);
     event.interface = interface.map(str::to_owned);
     event.provider_id = Some(provider_id.to_owned());
     event.provider_kind = Some(provider_kind);
@@ -1433,10 +1459,6 @@ fn upload_payload_with_size(size: usize) -> Vec<u8> {
     payload
 }
 
-fn chrono_duration(duration: Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
-}
-
 fn provider_kind(config: &ResolvedConfig) -> ProviderKind {
     match config.bandwidth.provider {
         crate::config::ProviderConfig::Mlab(_) => ProviderKind::Mlab,
@@ -1458,6 +1480,108 @@ mod tests {
         INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, TcpMetrics, UploadError,
         next_upload_message_size, transfer_upload, upload_payload,
     };
+
+    #[test]
+    fn stage_transitions_and_interruptions_preserve_their_own_boundaries() {
+        use super::*;
+        let mut progress = AttemptProgress::new(RequestStage::Locate);
+        let attempt_start = progress.started_at_utc;
+        for stage in [
+            RequestStage::Locate,
+            RequestStage::Dns,
+            RequestStage::Connect,
+            RequestStage::Tls,
+            RequestStage::WebsocketHandshake,
+            RequestStage::Download,
+            RequestStage::Upload,
+        ] {
+            let before = Utc::now();
+            progress.begin_stage(stage);
+            let stage_start = progress.active.started_at_utc;
+            assert!(before <= stage_start && stage_start <= Utc::now());
+            assert_eq!(progress.started_at_utc, attempt_start);
+            let failure = RequestFailure::simple(stage, ErrorKind::Io, "fixture", None, 1);
+            let failure_finish = failure.finished_at_utc;
+            progress.record_failure(failure);
+            let recorded = progress.failures.last().unwrap();
+            assert_eq!(recorded.started_at_utc, stage_start);
+            assert_eq!(recorded.finished_at_utc, failure_finish);
+            for outcome in [Outcome::Timeout, Outcome::Cancelled] {
+                // A clock adjustment must not clamp or reconstruct observed termination.
+                let finish = stage_start - chrono::Duration::seconds(1);
+                progress.interrupt(outcome, Duration::from_secs(5), finish);
+                let failure = progress.failures.last().unwrap();
+                assert_eq!(failure.stage, stage);
+                assert_eq!(failure.outcome, outcome);
+                assert_eq!(failure.started_at_utc, stage_start);
+                assert_eq!(failure.finished_at_utc, finish);
+            }
+        }
+    }
+
+    #[test]
+    fn report_preserves_observed_times_without_changing_measurement_calculations() {
+        use super::*;
+        let start = DateTime::from_timestamp(1_000, 0).unwrap();
+        let direction = |bytes, seconds| DirectionMeasurement {
+            bytes,
+            elapsed: Duration::from_secs(seconds),
+            remote_ip: "192.0.2.1".parse().unwrap(),
+            source_ip: "192.0.2.2".parse().unwrap(),
+            metrics: TcpMetrics::default(),
+        };
+        // Includes delayed setup/cleanup and a wall-clock rollback. Neither changes rates.
+        for finish_offset in [22, 120, -10] {
+            for (download, upload, outcome) in [
+                (true, true, Outcome::Success),
+                (true, false, Outcome::Partial),
+                (false, true, Outcome::Partial),
+                (false, false, Outcome::Error),
+                (true, false, Outcome::Timeout),
+                (false, false, Outcome::Cancelled),
+            ] {
+                let finish = start + chrono::Duration::seconds(finish_offset);
+                let mut failure = RequestFailure::simple(
+                    RequestStage::Connect,
+                    ErrorKind::Connect,
+                    "fixture",
+                    None,
+                    1,
+                );
+                failure.started_at_utc = start + chrono::Duration::seconds(1);
+                failure.finished_at_utc = start + chrono::Duration::seconds(2);
+                let report = report_from_result(ReportInput {
+                    started_at_utc: start,
+                    finished_at_utc: finish,
+                    run_id: "timing",
+                    interface: None,
+                    provider_id: "direct",
+                    provider_kind: ProviderKind::Direct,
+                    server: None,
+                    failures: vec![failure.clone()],
+                    download: download.then(|| direction(1_000_000, 10)),
+                    upload: upload.then(|| direction(2_000_000, 5)),
+                    outcome,
+                });
+                let request = &report.events[0];
+                assert_eq!(request.started_at_utc, Some(failure.started_at_utc));
+                assert_eq!(request.finished_at_utc, Some(failure.finished_at_utc));
+                let event = &report.events[1];
+                assert_eq!(event.started_at_utc, Some(start));
+                assert_eq!(event.finished_at_utc, Some(finish));
+                assert_eq!(event.download_mbps, download.then_some(0.8));
+                assert_eq!(event.upload_mbps, upload.then_some(3.2));
+                assert_eq!(event.bytes_received, download.then_some(1_000_000));
+                assert_eq!(event.bytes_sent, upload.then_some(2_000_000));
+                assert_eq!(
+                    event.duration_ms,
+                    Some(
+                        if download { 10_000.0 } else { 0.0 } + if upload { 5_000.0 } else { 0.0 }
+                    )
+                );
+            }
+        }
+    }
 
     async fn upload_pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
         let (client, server) = duplex(64);
