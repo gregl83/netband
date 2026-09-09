@@ -13,7 +13,7 @@ including after a crash; there is no separate CSV lock file to remove. On Linux 
 lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message
+schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -58,9 +58,12 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
 | `bytes_sent` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
 | `bytes_received` | Application payload bytes received |
-| `tcp_min_rtt_ms` | NDT7 TCPInfo minimum RTT in milliseconds |
-| `tcp_rtt_ms` | NDT7 TCPInfo current/smoothed RTT in milliseconds |
-| `tcp_retransmissions` | NDT7 server TCPInfo `BytesRetrans` in bytes, despite the field name |
+| `download_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the download connection |
+| `download_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the download connection |
+| `download_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the download connection |
+| `upload_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the upload connection |
+| `upload_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the upload connection |
+| `upload_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the upload connection |
 | `os_error_code` | Operating-system error number when available |
 | `error_kind` | Stable machine-readable failure classification |
 | `error_message` | Sanitized human diagnostic; wording may change in future releases |
@@ -76,9 +79,11 @@ adjustment. Throughput and active durations use monotonic elapsed time.
 
 `duration_ms` combines both direction windows. Separate windows are not exported, so
 both rates cannot be independently recomputed from that field and the byte counts.
-Source and remote addresses prefer upload when available. Each TCP metric independently
-prefers upload and falls back to download; the row does not identify the contributing
-connection for each metric. Treat `tcp_retransmissions` as bytes, not a packet count.
+Source and remote addresses prefer upload when available. TCP fields identify their
+download or upload connection and remain empty when unavailable for that direction.
+Values come from that direction's last parsed TCPInfo snapshot, rather than a time series
+or a difference calculated by Netband. Both sets are server-reported: upload retransmitted bytes describe the server's TCP
+connection counters, not client-side upload retransmissions or a packet-loss ratio.
 
 ## Outcomes
 

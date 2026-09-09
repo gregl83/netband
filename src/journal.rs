@@ -10,9 +10,9 @@ use crate::config::OutputTarget;
 use crate::console::ConsoleSink;
 use crate::model::MeasurementEvent;
 
-pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message";
+pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message";
 
-const CSV_FIELDS: [&str; 42] = [
+const CSV_FIELDS: [&str; 45] = [
     "schema_version",
     "run_id",
     "event_id",
@@ -49,9 +49,12 @@ const CSV_FIELDS: [&str; 42] = [
     "upload_mbps",
     "bytes_sent",
     "bytes_received",
-    "tcp_min_rtt_ms",
-    "tcp_rtt_ms",
-    "tcp_retransmissions",
+    "download_tcp_min_rtt_ms",
+    "download_tcp_rtt_ms",
+    "download_tcp_retransmitted_bytes",
+    "upload_tcp_min_rtt_ms",
+    "upload_tcp_rtt_ms",
+    "upload_tcp_retransmitted_bytes",
     "os_error_code",
     "error_kind",
     "error_message",

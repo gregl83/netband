@@ -429,9 +429,9 @@ async fn direct_download_and_upload_produce_attributed_bandwidth_result() {
     assert!(bandwidth.bytes_sent.unwrap() >= 16 * 1024);
     assert!(bandwidth.download_mbps.unwrap() > 0.0);
     assert!(bandwidth.upload_mbps.unwrap() > 0.0);
-    assert_eq!(bandwidth.tcp_min_rtt_ms, Some(1.2));
-    assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5));
-    assert_eq!(bandwidth.tcp_retransmissions, Some(7));
+    assert_eq!(bandwidth.upload_tcp_min_rtt_ms, Some(1.2));
+    assert_eq!(bandwidth.upload_tcp_rtt_ms, Some(2.5));
+    assert_eq!(bandwidth.upload_tcp_retransmitted_bytes, Some(7));
     assert!(!format!("{bandwidth:?}").contains("download-secret"));
 }
 
@@ -547,7 +547,11 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
     assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert!(bandwidth.bytes_sent.unwrap() > 0);
-    assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5), "read metrics after Ping");
+    assert_eq!(
+        bandwidth.upload_tcp_rtt_ms,
+        Some(2.5),
+        "read metrics after Ping"
+    );
     assert!(
         report.events.iter().any(|event| {
             event.request_stage == Some(RequestStage::Upload)
@@ -1223,7 +1227,8 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 if after_download {
                     assert!(bandwidth.download_mbps.unwrap() > 0.0);
                     assert!(bandwidth.duration_ms.unwrap() > 0.0);
-                    assert!(bandwidth.tcp_rtt_ms.is_some());
+                    assert!(bandwidth.download_tcp_rtt_ms.is_some());
+                    assert!(bandwidth.upload_tcp_rtt_ms.is_none());
                 }
                 let terminal = &report.events[report.events.len() - 2];
                 assert_eq!(terminal.event_kind, EventKind::RequestFailure);
@@ -1306,5 +1311,87 @@ async fn reservation_failure_and_prior_cancellation_never_start_connections() {
         let bandwidth = report.events.last().unwrap();
         assert!(bandwidth.download_mbps.is_none());
         assert!(bandwidth.upload_mbps.is_none());
+    }
+}
+
+#[tokio::test]
+async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
+    use netband::journal::Journal;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        download
+            .send(Message::Binary(vec![3; 1024].into()))
+            .await
+            .unwrap();
+        download
+            .send(Message::Text(
+                r#"{"TCPInfo":{"MinRTT":1200,"BytesRetrans":7}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        download.close(None).await.unwrap();
+
+        let mut upload = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        assert!(matches!(
+            upload.next().await.unwrap().unwrap(),
+            Message::Binary(_)
+        ));
+        upload
+            .send(Message::Text(
+                r#"{"TCPInfo":{"RTT":9000,"BytesRetrans":29}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        upload.close(None).await.unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "tcp-directions", shutdown).await;
+    server.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    let event = report.events.last().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&netband::console::render_jsonl(event).unwrap()).unwrap();
+    let mut journal = Journal::from_writer(Vec::new()).unwrap();
+    journal.append_batch(&report.events).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut csv = csv::Reader::from_reader(bytes.as_slice());
+    let header = csv.headers().unwrap().clone();
+    let row = csv.records().last().unwrap().unwrap();
+    for (field, expected) in [
+        ("download_tcp_min_rtt_ms", Some(serde_json::json!(1.2))),
+        ("download_tcp_rtt_ms", None),
+        (
+            "download_tcp_retransmitted_bytes",
+            Some(serde_json::json!(7)),
+        ),
+        ("upload_tcp_min_rtt_ms", None),
+        ("upload_tcp_rtt_ms", Some(serde_json::json!(9.0))),
+        (
+            "upload_tcp_retransmitted_bytes",
+            Some(serde_json::json!(29)),
+        ),
+    ] {
+        assert_eq!(
+            json[field],
+            expected.clone().unwrap_or(serde_json::Value::Null)
+        );
+        let index = header.iter().position(|column| column == field).unwrap();
+        assert_eq!(
+            &row[index],
+            expected.map(|value| value.to_string()).unwrap_or_default()
+        );
+    }
+    for field in ["tcp_min_rtt_ms", "tcp_rtt_ms", "tcp_retransmissions"] {
+        assert!(json.get(field).is_none());
+        assert!(!header.iter().any(|column| column == field));
     }
 }

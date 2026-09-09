@@ -87,7 +87,7 @@ impl AddressResolver for SystemAddressResolver {
 pub struct TcpMetrics {
     pub min_rtt_ms: Option<f64>,
     pub rtt_ms: Option<f64>,
-    pub retransmissions: Option<u64>,
+    pub retransmitted_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1361,11 +1361,12 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         .as_ref()
         .map(|measurement| measurement.metrics)
         .unwrap_or_default();
-    bandwidth.tcp_min_rtt_ms = upload_metrics.min_rtt_ms.or(download_metrics.min_rtt_ms);
-    bandwidth.tcp_rtt_ms = upload_metrics.rtt_ms.or(download_metrics.rtt_ms);
-    bandwidth.tcp_retransmissions = upload_metrics
-        .retransmissions
-        .or(download_metrics.retransmissions);
+    bandwidth.download_tcp_min_rtt_ms = download_metrics.min_rtt_ms;
+    bandwidth.download_tcp_rtt_ms = download_metrics.rtt_ms;
+    bandwidth.download_tcp_retransmitted_bytes = download_metrics.retransmitted_bytes;
+    bandwidth.upload_tcp_min_rtt_ms = upload_metrics.min_rtt_ms;
+    bandwidth.upload_tcp_rtt_ms = upload_metrics.rtt_ms;
+    bandwidth.upload_tcp_retransmitted_bytes = upload_metrics.retransmitted_bytes;
     if outcome != Outcome::Success {
         bandwidth.error_kind = failures.last().map(|failure| failure.error_kind);
         bandwidth.error_message = failures.last().map(|failure| failure.message.clone());
@@ -1429,7 +1430,7 @@ fn update_metrics(metrics: &mut TcpMetrics, text: &str) {
     {
         metrics.min_rtt_ms = tcp.min_rtt.map(|value| value as f64 / 1_000.0);
         metrics.rtt_ms = tcp.rtt.map(|value| value as f64 / 1_000.0);
-        metrics.retransmissions = tcp.bytes_retrans;
+        metrics.retransmitted_bytes = tcp.bytes_retrans;
     }
 }
 
@@ -1622,6 +1623,63 @@ mod tests {
                 event.retry_after_ms,
                 retry.and_then(|value| u64::try_from(value.delay.as_millis()).ok())
             );
+        }
+    }
+
+    #[test]
+    fn tcp_fields_never_borrow_from_the_other_direction() {
+        use super::*;
+        let now = Utc::now();
+        let measurement = |mask: u8, upload| DirectionMeasurement {
+            bytes: 1_000_000,
+            elapsed: Duration::from_secs(1),
+            remote_ip: "192.0.2.1".parse().unwrap(),
+            source_ip: "192.0.2.2".parse().unwrap(),
+            metrics: TcpMetrics {
+                min_rtt_ms: (mask & 1 != 0).then_some(if upload { 9.0 } else { 1.0 }),
+                rtt_ms: (mask & 2 != 0).then_some(if upload { 12.0 } else { 2.0 }),
+                retransmitted_bytes: (mask & 4 != 0).then_some(if upload { u64::MAX } else { 0 }),
+            },
+        };
+        // Eight field combinations plus an entirely unavailable direction.
+        for download_mask in 0..=8 {
+            for upload_mask in 0..=8 {
+                let download = (download_mask < 8).then(|| measurement(download_mask, false));
+                let upload = (upload_mask < 8).then(|| measurement(upload_mask, true));
+                let expected = |value: &Option<DirectionMeasurement>| {
+                    value
+                        .as_ref()
+                        .map(|direction| direction.metrics)
+                        .unwrap_or_default()
+                };
+                let down = expected(&download);
+                let up = expected(&upload);
+                let report = report_from_result(ReportInput {
+                    started_at_utc: now,
+                    finished_at_utc: now,
+                    run_id: "tcp",
+                    interface: None,
+                    provider_id: "direct",
+                    provider_kind: ProviderKind::Direct,
+                    server: None,
+                    failures: Vec::new(),
+                    download,
+                    upload,
+                    outcome: Outcome::Partial,
+                });
+                let event = report.events.last().unwrap();
+                assert_eq!(event.download_tcp_min_rtt_ms, down.min_rtt_ms);
+                assert_eq!(event.download_tcp_rtt_ms, down.rtt_ms);
+                assert_eq!(
+                    event.download_tcp_retransmitted_bytes,
+                    down.retransmitted_bytes
+                );
+                assert_eq!(event.upload_tcp_min_rtt_ms, up.min_rtt_ms);
+                assert_eq!(event.upload_tcp_rtt_ms, up.rtt_ms);
+                assert_eq!(event.upload_tcp_retransmitted_bytes, up.retransmitted_bytes);
+                assert_eq!(event.download_mbps, (download_mask < 8).then_some(8.0));
+                assert_eq!(event.upload_mbps, (upload_mask < 8).then_some(8.0));
+            }
         }
     }
 

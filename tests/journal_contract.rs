@@ -58,6 +58,9 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     bandwidth.duration_ms = Some(10_500.0);
     bandwidth.download_mbps = Some(123.456789);
     bandwidth.bytes_received = Some(123_456_789);
+    bandwidth.download_tcp_min_rtt_ms = Some(1.2);
+    bandwidth.download_tcp_rtt_ms = Some(2.5);
+    bandwidth.download_tcp_retransmitted_bytes = Some(7);
     bandwidth.error_kind = Some(ErrorKind::UploadFailed);
     bandwidth.error_message = Some("upload stream closed".into());
 
@@ -196,7 +199,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 42);
+    assert_eq!(partial_record.len(), 45);
     OpenOptions::new()
         .append(true)
         .open(&path)
