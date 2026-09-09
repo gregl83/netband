@@ -148,6 +148,8 @@ Private CA bundles are parsed during local preflight. Missing, unreadable, empty
 invalid certificate bundles fail before output/state creation or network activity.
 TLS setup reads the bundle again, so changes after preflight can still cause failure.
 Local validation does not verify the remote server's identity or availability.
+CA and server-name options apply to each `wss` direction and require at least one
+secure endpoint. Any `ws` direction still requires `--allow-insecure-ndt`.
 
 A CDN-hosted endpoint uses the same DNS form, for example an operator-controlled
 `ndt.customer.example.invalid` name whose DNS is placed behind that operator's CDN.

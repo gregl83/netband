@@ -1431,3 +1431,68 @@ async fn tls_rechecks_private_ca_changed_after_preflight() {
         assert!(report.events.last().unwrap().upload_mbps.is_none());
     }
 }
+
+#[tokio::test]
+async fn mixed_scheme_directions_apply_ca_and_server_name_only_to_tls() {
+    for secure_download in [false, true] {
+        let root = tempdir().unwrap();
+        let (ca, tls) = tls_material(root.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let acceptor = TlsAcceptor::from(tls);
+            let (download, _) = listener.accept().await.unwrap();
+            if secure_download {
+                let stream = acceptor.accept(download).await.unwrap();
+                assert_eq!(stream.get_ref().1.server_name(), Some("localhost"));
+                serve_download(stream).await;
+            } else {
+                serve_download(download).await;
+            }
+            let (upload, _) = listener.accept().await.unwrap();
+            if secure_download {
+                serve_upload(upload).await;
+            } else {
+                let stream = acceptor.accept(upload).await.unwrap();
+                assert_eq!(stream.get_ref().1.server_name(), Some("localhost"));
+                serve_upload(stream).await;
+            }
+        });
+        let download = format!(
+            "{}://{address}/ndt/v7/download",
+            if secure_download { "wss" } else { "ws" }
+        );
+        let upload = format!(
+            "{}://{address}/ndt/v7/upload",
+            if secure_download { "ws" } else { "wss" }
+        );
+        let cli = Cli::try_parse_from([
+            "netband",
+            "--ndt-provider",
+            "direct",
+            "--ndt-download-url",
+            &download,
+            "--ndt-upload-url",
+            &upload,
+            "--allow-insecure-ndt",
+            "--ndt-ca-cert",
+            ca.to_str().unwrap(),
+            "--ndt-tls-server-name",
+            "localhost",
+            "--bandwidth-timeout",
+            "5s",
+            "once",
+            "bandwidth",
+        ])
+        .unwrap();
+        let config = resolve(&cli, &context(root.path().to_path_buf())).unwrap();
+        netband::config::validate_environment(&config).unwrap();
+        let (_sender, shutdown) = cancellation_channel();
+        let report = measure_bandwidth(&config, "mixed-tls", shutdown).await;
+        server.await.unwrap();
+        assert_eq!(report.outcome, Outcome::Success);
+        let event = report.events.last().unwrap();
+        assert!(event.download_mbps.unwrap() > 0.0);
+        assert!(event.upload_mbps.unwrap() > 0.0);
+    }
+}

@@ -626,7 +626,8 @@ fn resolve_direct(
     {
         return Err(error(format!("invalid TLS server name: {name}")));
     }
-    if tls_server_name.is_some() && download_url.scheme() != "wss" {
+    let uses_tls = download_url.scheme() == "wss" || upload_url.scheme() == "wss";
+    if tls_server_name.is_some() && !uses_tls {
         return Err(error("TLS server name requires wss:// direct endpoints"));
     }
 
@@ -636,7 +637,7 @@ fn resolve_direct(
         .clone()
         .or(file.ca_cert)
         .map(|path| make_absolute(path, &context.current_dir));
-    if ca_cert.is_some() && download_url.scheme() != "wss" {
+    if ca_cert.is_some() && !uses_tls {
         return Err(error(
             "a private CA certificate requires wss:// direct endpoints",
         ));

@@ -618,3 +618,67 @@ fn invalid_private_ca_stops_commands_before_output_state_or_network_activity() {
         );
     }
 }
+
+#[test]
+fn direct_tls_options_apply_when_either_endpoint_is_secure() {
+    let root = tempdir().unwrap();
+    let ca = root.path().join("ca.pem");
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    std::fs::write(&ca, certificate.cert.pem()).unwrap();
+    for download in ["ws", "wss"] {
+        for upload in ["ws", "wss"] {
+            for options in 0..4 {
+                for allow_insecure in [false, true] {
+                    let down = format!("{download}://127.0.0.1/ndt/v7/download");
+                    let up = format!("{upload}://127.0.0.1/ndt/v7/upload");
+                    let mut args = vec![
+                        "netband",
+                        "--ndt-provider",
+                        "direct",
+                        "--ndt-download-url",
+                        &down,
+                        "--ndt-upload-url",
+                        &up,
+                    ];
+                    if options & 1 != 0 {
+                        args.extend(["--ndt-tls-server-name", "localhost"]);
+                    }
+                    if options & 2 != 0 {
+                        args.extend(["--ndt-ca-cert", ca.to_str().unwrap()]);
+                    }
+                    if allow_insecure {
+                        args.push("--allow-insecure-ndt");
+                    }
+                    args.extend(["config", "check"]);
+                    let result = resolve(&parse(&args), &context(root.path().to_path_buf(), false));
+                    let plaintext_allowed =
+                        allow_insecure || (download == "wss" && upload == "wss");
+                    let options_allowed = options == 0 || download == "wss" || upload == "wss";
+                    assert_eq!(
+                        result.is_ok(),
+                        plaintext_allowed && options_allowed,
+                        "{download}/{upload}, options={options}, insecure={allow_insecure}"
+                    );
+                    if let Ok(config) = result {
+                        validate_environment(&config).unwrap();
+                        let ProviderConfig::Direct(direct) = config.bandwidth.provider else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            direct.tls_server_name.as_deref(),
+                            (options & 1 != 0).then_some("localhost")
+                        );
+                        assert_eq!(direct.ca_cert.as_ref(), (options & 2 != 0).then_some(&ca));
+                    } else {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains(if plaintext_allowed {
+                            "requires wss://"
+                        } else {
+                            "allow-insecure-ndt"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
