@@ -159,7 +159,7 @@ impl Drop for NetworkFixture {
 #[derive(Debug)]
 struct ProbeRow {
     interface: String,
-    source_ip: String,
+    local_ip: String,
     target: String,
     outcome: String,
     started_at: String,
@@ -213,7 +213,7 @@ fn two_real_interfaces_are_bound_attributed_fair_and_serialized() {
         assert!(
             rows.iter().any(|row| {
                 row.interface == fixture.interfaces[index]
-                    && row.source_ip == fixture.source_ips[index]
+                    && row.local_ip == fixture.source_ips[index]
                     && row.target == fixture.target_ips[index]
                     && row.outcome == "success"
             }),
@@ -231,7 +231,7 @@ fn two_real_interfaces_are_bound_attributed_fair_and_serialized() {
             .position(|interface| interface == &row.interface)
             .unwrap_or_else(|| panic!("unexpected interface attribution: {row:#?}"));
         assert_eq!(
-            row.source_ip, fixture.source_ips[index],
+            row.local_ip, fixture.source_ips[index],
             "probe used or reported the wrong source address: {row:#?}"
         );
     }
@@ -291,10 +291,7 @@ fn read_probe_rows(path: &Path) -> Result<Vec<ProbeRow>, String> {
                 .get(field("interface"))
                 .unwrap_or_default()
                 .to_owned(),
-            source_ip: record
-                .get(field("source_ip"))
-                .unwrap_or_default()
-                .to_owned(),
+            local_ip: record.get(field("local_ip")).unwrap_or_default().to_owned(),
             target: record.get(field("target")).unwrap_or_default().to_owned(),
             outcome: record.get(field("outcome")).unwrap_or_default().to_owned(),
             started_at: record

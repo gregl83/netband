@@ -233,7 +233,7 @@ async fn download_replies_to_ping_with_the_same_payload() {
     let (_shutdown_tx, shutdown) = cancellation_channel();
     let report = measure_bandwidth(&config, "download-pong", shutdown).await;
     assert_eq!(report.outcome, Outcome::Success);
-    assert_eq!(report.events.last().unwrap().bytes_received, Some(1024));
+    assert_eq!(report.events.last().unwrap().download_bytes, Some(1024));
     server.await.unwrap();
 }
 
@@ -297,7 +297,7 @@ async fn download_continues_while_pong_writes_are_backpressured() {
     .await;
     assert_eq!(report.outcome, Outcome::Success, "{:?}", report.events);
     assert_eq!(
-        report.events.last().unwrap().bytes_received,
+        report.events.last().unwrap().download_bytes,
         Some(MESSAGES * PAYLOAD_SIZE)
     );
     server.await.unwrap();
@@ -424,9 +424,11 @@ async fn direct_download_and_upload_produce_attributed_bandwidth_result() {
         bandwidth.provider_id.as_deref(),
         Some(config.bandwidth.provider_id.as_str())
     );
-    assert!(bandwidth.remote_ip.is_some());
-    assert_eq!(bandwidth.bytes_received, Some(16 * 1024));
-    assert!(bandwidth.bytes_sent.unwrap() >= 16 * 1024);
+    assert!(bandwidth.download_remote_ip.is_some());
+    assert!(bandwidth.upload_remote_ip.is_some());
+    assert!(bandwidth.remote_ip.is_none());
+    assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
+    assert!(bandwidth.upload_bytes.unwrap() >= 16 * 1024);
     assert!(bandwidth.download_mbps.unwrap() > 0.0);
     assert!(bandwidth.upload_mbps.unwrap() > 0.0);
     assert_eq!(bandwidth.upload_tcp_min_rtt_ms, Some(1.2));
@@ -546,7 +548,7 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
     .expect("peer Close must start bounded cleanup even behind a blocked Pong write");
     assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
-    assert!(bandwidth.bytes_sent.unwrap() > 0);
+    assert!(bandwidth.upload_bytes.unwrap() > 0);
     assert_eq!(
         bandwidth.upload_tcp_rtt_ms,
         Some(2.5),
@@ -632,7 +634,7 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
             report
                 .events
                 .iter()
-                .all(|event| event.daily_runs_used == Some(1))
+                .all(|event| event.daily_bandwidth_starts == Some(1))
         );
         assert_eq!(
             report
@@ -644,8 +646,8 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
         );
         assert_report_timestamps(&report);
         let bandwidth = report.events.last().unwrap();
-        assert_eq!(bandwidth.bytes_received, Some(16 * 1024));
-        assert!(bandwidth.bytes_sent.unwrap() >= 8192);
+        assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
+        assert!(bandwidth.upload_bytes.unwrap() >= 8192);
         assert!(bandwidth.download_mbps.unwrap() > 0.0);
         assert!(bandwidth.upload_mbps.unwrap() > 0.0);
         let terminal = &report.events[report.events.len() - 2];
@@ -798,7 +800,9 @@ impl ReservationGate for RecordingGate {
     ) -> Result<AdmissionReservation, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.reserved.store(true, Ordering::SeqCst);
-        Ok(AdmissionReservation::Reserved { daily_runs_used: 1 })
+        Ok(AdmissionReservation::Reserved {
+            daily_bandwidth_starts: 1,
+        })
     }
 }
 
@@ -856,7 +860,7 @@ async fn daily_allowance_is_reserved_once_before_the_first_ndt_connection() {
         report
             .events
             .iter()
-            .all(|event| event.daily_runs_used == Some(1))
+            .all(|event| event.daily_bandwidth_starts == Some(1))
     );
 }
 
@@ -946,7 +950,7 @@ async fn tls_download_preserves_large_messages_and_replies_to_ping() {
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(
-        report.events.last().unwrap().bytes_received,
+        report.events.last().unwrap().download_bytes,
         Some(1024 * 1024 + 8192)
     );
 }
@@ -970,7 +974,13 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(
-        report.events.last().unwrap().remote_ip.unwrap().to_string(),
+        report
+            .events
+            .last()
+            .unwrap()
+            .upload_remote_ip
+            .unwrap()
+            .to_string(),
         "127.0.0.1"
     );
 
@@ -1025,7 +1035,15 @@ async fn one_shot_pipeline_keeps_csv_authoritative_across_console_modes() {
     assert_eq!(human.lines().count(), 1);
     assert!(human.contains("bandwidth"));
     assert!(human.contains("outcome=success"));
-    assert_eq!(human_csv.last().unwrap().get(8), Some("bandwidth"));
+    assert_eq!(
+        human_csv.last().unwrap().get(
+            netband::journal::CSV_HEADER
+                .split(',')
+                .position(|field| field == "event_kind")
+                .unwrap()
+        ),
+        Some("bandwidth")
+    );
 
     let (jsonl, jsonl_csv) = execute_mode(ConsoleMode::Jsonl).await;
     assert_eq!(jsonl.lines().count(), jsonl_csv.len());
@@ -1038,7 +1056,15 @@ async fn one_shot_pipeline_keeps_csv_authoritative_across_console_modes() {
 
     let (off, off_csv) = execute_mode(ConsoleMode::Off).await;
     assert!(off.is_empty());
-    assert_eq!(off_csv.last().unwrap().get(8), Some("bandwidth"));
+    assert_eq!(
+        off_csv.last().unwrap().get(
+            netband::journal::CSV_HEADER
+                .split(',')
+                .position(|field| field == "event_kind")
+                .unwrap()
+        ),
+        Some("bandwidth")
+    );
 }
 
 struct InterruptNetwork {
@@ -1205,7 +1231,7 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                     report
                         .events
                         .iter()
-                        .all(|event| event.daily_runs_used == Some(1))
+                        .all(|event| event.daily_bandwidth_starts == Some(1))
                 );
                 assert_eq!(
                     report
@@ -1218,12 +1244,12 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert_report_timestamps(&report);
                 let bandwidth = report.events.last().unwrap();
                 assert_eq!(
-                    bandwidth.bytes_received,
+                    bandwidth.download_bytes,
                     after_download.then_some(16 * 1024)
                 );
                 assert_eq!(bandwidth.download_mbps.is_some(), after_download);
                 assert!(bandwidth.upload_mbps.is_none());
-                assert!(bandwidth.bytes_sent.is_none());
+                assert!(bandwidth.upload_bytes.is_none());
                 if after_download {
                     assert!(bandwidth.download_mbps.unwrap() > 0.0);
                     assert!(bandwidth.duration_ms.unwrap() > 0.0);
@@ -1305,7 +1331,7 @@ async fn reservation_failure_and_prior_cancellation_never_start_connections() {
             report
                 .events
                 .iter()
-                .all(|event| event.daily_runs_used.is_none())
+                .all(|event| event.daily_bandwidth_starts.is_none())
         );
         assert_report_timestamps(&report);
         let bandwidth = report.events.last().unwrap();
@@ -1494,5 +1520,81 @@ async fn mixed_scheme_directions_apply_ca_and_server_name_only_to_tls() {
         let event = report.events.last().unwrap();
         assert!(event.download_mbps.unwrap() > 0.0);
         assert!(event.upload_mbps.unwrap() > 0.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn separate_endpoints_export_each_connections_window_and_addresses() {
+    let download_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upload_listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let download_addr = download_listener.local_addr().unwrap();
+    let upload_addr = upload_listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download =
+            accept_hdr_async(download_listener.accept().await.unwrap().0, accept_protocol)
+                .await
+                .unwrap();
+        download
+            .send(Message::Binary(vec![3; 1024].into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        download.close(None).await.unwrap();
+        serve_upload(upload_listener.accept().await.unwrap().0).await;
+    });
+    let dir = tempdir().unwrap();
+    let download = format!("ws://{download_addr}/download");
+    let upload = format!("ws://{upload_addr}/upload");
+    let cli = Cli::try_parse_from([
+        "netband",
+        "--ndt-provider",
+        "direct",
+        "--ndt-download-url",
+        &download,
+        "--ndt-upload-url",
+        &upload,
+        "--allow-insecure-ndt",
+        "once",
+        "bandwidth",
+    ])
+    .unwrap();
+    let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, "separate-directions", shutdown).await;
+    server.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    let event = report.events.last().unwrap();
+    assert_eq!(event.download_remote_ip, Some(download_addr.ip()));
+    assert_eq!(event.upload_remote_ip, Some(upload_addr.ip()));
+    assert!(event.download_local_ip.unwrap().is_loopback());
+    assert!(event.upload_local_ip.unwrap().is_loopback());
+    assert!(event.download_duration_ms.unwrap() >= 40.0);
+    let mut journal = netband::journal::JournalWriter::from_writer(Vec::new()).unwrap();
+    journal.append_batch(std::slice::from_ref(event)).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    let headers = reader.headers().unwrap().clone();
+    let row = reader.records().next().unwrap().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&netband::console::render_jsonl(event).unwrap()).unwrap();
+    for (prefix, address, byte_field) in [
+        ("download", download_addr.ip(), "download_bytes"),
+        ("upload", upload_addr.ip(), "upload_bytes"),
+    ] {
+        let cell = |name: &str| &row[headers.iter().position(|field| field == name).unwrap()];
+        assert_eq!(cell(&format!("{prefix}_remote_ip")), address.to_string());
+        assert_eq!(json[format!("{prefix}_remote_ip")], address.to_string());
+        let rate = cell(&format!("{prefix}_mbps")).parse::<f64>().unwrap();
+        let duration = cell(&format!("{prefix}_duration_ms"))
+            .parse::<f64>()
+            .unwrap();
+        let bytes = cell(byte_field).parse::<u64>().unwrap();
+        let expected = 8.0 * bytes as f64 / (1000.0 * duration);
+        assert!((rate - expected).abs() <= rate.abs() * 1e-12);
+        assert!(
+            (json[format!("{prefix}_mbps")].as_f64().unwrap() - expected).abs()
+                <= rate.abs() * 1e-12
+        );
     }
 }

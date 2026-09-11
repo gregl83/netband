@@ -304,13 +304,13 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
         assert_eq!(bandwidth.outcome, outcome);
         assert!(bandwidth.download_mbps.is_none());
         assert!(bandwidth.upload_mbps.is_none());
-        assert!(bandwidth.bytes_received.is_none());
-        assert!(bandwidth.bytes_sent.is_none());
+        assert!(bandwidth.download_bytes.is_none());
+        assert!(bandwidth.upload_bytes.is_none());
         assert!(
             report
                 .events
                 .iter()
-                .all(|event| event.daily_runs_used.is_none())
+                .all(|event| event.daily_bandwidth_starts.is_none())
         );
         tokio::time::timeout(Duration::from_secs(1), server)
             .await

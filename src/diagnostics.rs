@@ -37,7 +37,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
             EventKind::PingProbe if event.outcome != Outcome::Success => tracing::warn!(
                 outcome = ?event.outcome,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
-                source_ip = ?event.source_ip,
+                local_ip = ?event.local_ip,
                 target = event.target.as_deref().unwrap_or("-"),
                 error_kind = ?event.error_kind,
                 error = event.error_message.as_deref().unwrap_or("-"),
@@ -49,7 +49,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 provider_kind = ?event.provider_kind,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
                 trigger = ?event.trigger_reason,
-                daily_runs_used = ?event.daily_runs_used,
+                daily_bandwidth_starts = ?event.daily_bandwidth_starts,
                 cooldown_until = ?event.rate_limit_until_utc,
                 decision = event.error_message.as_deref().unwrap_or("-"),
                 "scheduler decision"
@@ -60,7 +60,8 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 provider_kind = ?event.provider_kind,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
                 server = event.server.as_deref().unwrap_or("-"),
-                remote_ip = ?event.remote_ip,
+                download_remote_ip = ?event.download_remote_ip,
+                upload_remote_ip = ?event.upload_remote_ip,
                 "bandwidth measurement finished"
             ),
             EventKind::PingProbe | EventKind::PingSummary => {}

@@ -19,7 +19,10 @@ fn new_state_has_a_checkpoint_and_empty_accounting_before_first_start() {
     scheduler.flush().unwrap();
     drop(scheduler);
     let mut scheduler = open(&root).unwrap();
-    assert_eq!(scheduler.reserve_run(now()).unwrap().daily_runs_used, 1);
+    assert_eq!(
+        scheduler.reserve_run(now()).unwrap().daily_bandwidth_starts,
+        1
+    );
     drop(scheduler);
     assert_eq!(open(&root).unwrap().snapshot().runs, vec![now()]);
 }
@@ -43,7 +46,10 @@ fn interrupted_initialization_resumes_or_rejects_an_incomplete_log() {
                 } else {
                     let mut scheduler =
                         open(&root).unwrap_or_else(|e| panic!("{kind:?}/{step:?}/{skip}: {e}"));
-                    assert_eq!(scheduler.reserve_run(now()).unwrap().daily_runs_used, 1);
+                    assert_eq!(
+                        scheduler.reserve_run(now()).unwrap().daily_bandwidth_starts,
+                        1
+                    );
                 }
             }
         }

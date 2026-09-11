@@ -67,7 +67,7 @@ fn ip(value: &str) -> IpAddr {
 fn binding(address: &str) -> ProbeBinding {
     ProbeBinding {
         interface: Some("eth-test".into()),
-        source_ip: Some(ip(address)),
+        local_ip: Some(ip(address)),
     }
 }
 
@@ -136,7 +136,7 @@ async fn targets_overlap_but_events_remain_in_configuration_order() {
         );
         assert_eq!(pair[0].sequence, Some(index as u16));
         assert_eq!(pair[0].outcome, Outcome::Success);
-        assert_eq!(pair[0].source_ip, Some(ip("192.0.2.10")));
+        assert_eq!(pair[0].local_ip, Some(ip("192.0.2.10")));
         assert_eq!(pair[0].interface.as_deref(), Some("eth-test"));
         assert_eq!(pair[1].packets_sent, Some(1));
         assert_eq!(pair[1].packets_received, Some(1));

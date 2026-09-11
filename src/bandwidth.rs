@@ -95,7 +95,7 @@ pub struct DirectionMeasurement {
     pub bytes: u64,
     pub elapsed: Duration,
     pub remote_ip: IpAddr,
-    pub source_ip: IpAddr,
+    pub local_ip: IpAddr,
     pub metrics: TcpMetrics,
 }
 
@@ -186,7 +186,7 @@ pub enum BandwidthCommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionReservation {
     Untracked,
-    Reserved { daily_runs_used: u32 },
+    Reserved { daily_bandwidth_starts: u32 },
 }
 
 pub trait ReservationGate {
@@ -486,10 +486,13 @@ fn apply_admission(
     mut report: BandwidthReport,
     reservation: AdmissionReservation,
 ) -> BandwidthReport {
-    if let AdmissionReservation::Reserved { daily_runs_used } = reservation {
+    if let AdmissionReservation::Reserved {
+        daily_bandwidth_starts,
+    } = reservation
+    {
         report.reserved = true;
         for event in &mut report.events {
-            event.daily_runs_used = Some(daily_runs_used);
+            event.daily_bandwidth_starts = Some(daily_bandwidth_starts);
         }
     }
     report
@@ -567,7 +570,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     let ConnectedSocket {
         mut socket,
         remote_ip,
-        source_ip,
+        local_ip,
     } = connected;
     progress.begin_stage(RequestStage::Download);
     report_phase(phase, LoadPhase::Download);
@@ -592,7 +595,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
                     candidate,
                     RequestStage::Download,
                     remote_ip,
-                    source_ip,
+                    local_ip,
                     error.to_string(),
                     websocket_os_error(&error),
                 ));
@@ -608,7 +611,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
                 candidate,
                 RequestStage::Download,
                 remote_ip,
-                source_ip,
+                local_ip,
                 "download ended without measurement bytes".to_owned(),
                 None,
             ));
@@ -620,7 +623,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
             candidate,
             RequestStage::Download,
             remote_ip,
-            source_ip,
+            local_ip,
             "download connection ended without a close frame".to_owned(),
             None,
         ));
@@ -629,7 +632,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         bytes,
         elapsed,
         remote_ip,
-        source_ip,
+        local_ip,
         metrics,
     })
 }
@@ -659,7 +662,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     let ConnectedSocket {
         socket,
         remote_ip,
-        source_ip,
+        local_ip,
     } = connected;
     progress.begin_stage(RequestStage::Upload);
     report_phase(phase, LoadPhase::Upload);
@@ -673,7 +676,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
             bytes,
             elapsed,
             metrics,
-            source_ip,
+            local_ip,
             remote_ip,
         });
     })
@@ -688,7 +691,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
             candidate,
             RequestStage::Upload,
             remote_ip,
-            source_ip,
+            local_ip,
             error.to_string(),
             os_error,
         ));
@@ -699,7 +702,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
                 candidate,
                 RequestStage::Upload,
                 remote_ip,
-                source_ip,
+                local_ip,
                 "upload ended without measurement bytes".to_owned(),
                 None,
             ));
@@ -710,7 +713,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         bytes,
         elapsed,
         remote_ip,
-        source_ip,
+        local_ip,
         metrics,
     })
 }
@@ -868,7 +871,7 @@ where
 struct ConnectedSocket {
     socket: NdtSocket,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
+    local_ip: IpAddr,
 }
 
 async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
@@ -919,7 +922,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
         progress.begin_stage(RequestStage::Connect);
         progress.active.attempt = request_attempt;
         progress.active.remote_ip = Some(remote.ip());
-        progress.active.source_ip = None;
+        progress.active.local_ip = None;
         let tcp = match connector.connect(remote, interface).await {
             Ok(tcp) => tcp,
             Err(error) => {
@@ -936,7 +939,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 continue;
             }
         };
-        let source_ip = tcp
+        let local_ip = tcp
             .local_addr()
             .map(|address| address.ip())
             .unwrap_or_else(|_| {
@@ -946,7 +949,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
                 }
             });
-        progress.active.source_ip = Some(source_ip);
+        progress.active.local_ip = Some(local_ip);
         progress.begin_stage(RequestStage::Tls);
         let stream = match wrap_stream(tcp, url, candidate).await {
             Ok(stream) => stream,
@@ -958,7 +961,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     Some(url.to_string()),
                     request_attempt,
                 );
-                failure.source_ip = Some(source_ip);
+                failure.local_ip = Some(local_ip);
                 failure.remote_ip = Some(remote.ip());
                 progress.record_failure(failure);
                 continue;
@@ -992,7 +995,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                         candidate,
                         url,
                         remote.ip(),
-                        source_ip,
+                        local_ip,
                         request_attempt,
                         None,
                         "server did not select the NDT7 WebSocket subprotocol".to_owned(),
@@ -1002,7 +1005,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 return Ok(ConnectedSocket {
                     socket,
                     remote_ip: remote.ip(),
-                    source_ip,
+                    local_ip,
                 });
             }
             Err(WebSocketError::Http(response)) => {
@@ -1021,7 +1024,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     candidate,
                     url,
                     remote.ip(),
-                    source_ip,
+                    local_ip,
                     request_attempt,
                     Some((status, retry_after)),
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
@@ -1035,7 +1038,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     candidate,
                     url,
                     remote.ip(),
-                    source_ip,
+                    local_ip,
                     request_attempt,
                     None,
                     format!("WebSocket handshake failed: {error}"),
@@ -1172,7 +1175,7 @@ fn handshake_failure(
     candidate: &EndpointCandidate,
     url: &Url,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
+    local_ip: IpAddr,
     attempt: u32,
     response: Option<(u16, Option<RetryAfter>)>,
     message: String,
@@ -1188,7 +1191,7 @@ fn handshake_failure(
         error_kind: ErrorKind::WebsocketHandshake,
         message,
         server: Some(url.to_string()),
-        source_ip: Some(source_ip),
+        local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code: None,
         attempt,
@@ -1216,7 +1219,7 @@ fn stream_failure(
     candidate: &EndpointCandidate,
     stage: RequestStage,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
+    local_ip: IpAddr,
     message: String,
     os_error_code: Option<i32>,
 ) -> RequestFailure {
@@ -1233,7 +1236,7 @@ fn stream_failure(
         },
         message,
         server: Some(candidate.logical_server.clone()),
-        source_ip: Some(source_ip),
+        local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code,
         attempt: 1,
@@ -1302,33 +1305,32 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     );
     bandwidth.started_at_utc = Some(started_at_utc);
     bandwidth.interface = interface.map(str::to_owned);
-    bandwidth.source_ip = upload
-        .as_ref()
-        .or(download.as_ref())
-        .map(|measurement| measurement.source_ip);
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
     bandwidth.provider_id = Some(provider_id.to_owned());
     bandwidth.provider_kind = Some(provider_kind);
     bandwidth.server = server;
-    bandwidth.remote_ip = upload
-        .as_ref()
-        .or(download.as_ref())
-        .map(|measurement| measurement.remote_ip);
     bandwidth.download_mbps = download
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
     bandwidth.upload_mbps = upload
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
-    bandwidth.bytes_received = download.as_ref().map(|measurement| measurement.bytes);
-    bandwidth.bytes_sent = upload.as_ref().map(|measurement| measurement.bytes);
-    bandwidth.duration_ms = Some(
-        download.as_ref().map_or(0.0, |measurement| {
-            measurement.elapsed.as_secs_f64() * 1_000.0
-        }) + upload.as_ref().map_or(0.0, |measurement| {
-            measurement.elapsed.as_secs_f64() * 1_000.0
-        }),
-    );
+    bandwidth.download_bytes = download.as_ref().map(|measurement| measurement.bytes);
+    bandwidth.upload_bytes = upload.as_ref().map(|measurement| measurement.bytes);
+    bandwidth.download_duration_ms = download
+        .as_ref()
+        .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
+    bandwidth.download_local_ip = download.as_ref().map(|measurement| measurement.local_ip);
+    bandwidth.download_remote_ip = download.as_ref().map(|measurement| measurement.remote_ip);
+    bandwidth.upload_duration_ms = upload
+        .as_ref()
+        .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
+    bandwidth.upload_local_ip = upload.as_ref().map(|measurement| measurement.local_ip);
+    bandwidth.upload_remote_ip = upload.as_ref().map(|measurement| measurement.remote_ip);
+    bandwidth.duration_ms = match (bandwidth.download_duration_ms, bandwidth.upload_duration_ms) {
+        (None, None) => None,
+        (download, upload) => Some(download.unwrap_or(0.0) + upload.unwrap_or(0.0)),
+    };
     let download_metrics = download
         .as_ref()
         .map(|measurement| measurement.metrics)
@@ -1376,7 +1378,7 @@ fn failure_event(
     event.provider_id = Some(provider_id.to_owned());
     event.provider_kind = Some(provider_kind);
     event.server.clone_from(&failure.server);
-    event.source_ip = failure.source_ip;
+    event.local_ip = failure.local_ip;
     event.remote_ip = failure.remote_ip;
     event.request_stage = Some(failure.stage);
     event.request_attempt = Some(failure.attempt);
@@ -1504,8 +1506,20 @@ mod tests {
         let direction = |bytes, seconds| DirectionMeasurement {
             bytes,
             elapsed: Duration::from_secs(seconds),
-            remote_ip: "192.0.2.1".parse().unwrap(),
-            source_ip: "192.0.2.2".parse().unwrap(),
+            remote_ip: if seconds == 10 {
+                "192.0.2.1"
+            } else {
+                "198.51.100.1"
+            }
+            .parse()
+            .unwrap(),
+            local_ip: if seconds == 10 {
+                "192.0.2.2"
+            } else {
+                "198.51.100.2"
+            }
+            .parse()
+            .unwrap(),
             metrics: TcpMetrics::default(),
         };
         // Includes delayed setup/cleanup and a wall-clock rollback. Neither changes rates.
@@ -1555,11 +1569,64 @@ mod tests {
                 assert_eq!(event.finished_at_utc, Some(finish));
                 assert_eq!(event.download_mbps, download.then_some(0.8));
                 assert_eq!(event.upload_mbps, upload.then_some(3.2));
-                assert_eq!(event.bytes_received, download.then_some(1_000_000));
-                assert_eq!(event.bytes_sent, upload.then_some(2_000_000));
+                assert_eq!(event.download_bytes, download.then_some(1_000_000));
+                assert_eq!(event.upload_bytes, upload.then_some(2_000_000));
+                assert_eq!(event.download_duration_ms, download.then_some(10_000.0));
+                assert_eq!(event.upload_duration_ms, upload.then_some(5_000.0));
+                assert_eq!(
+                    event.download_local_ip,
+                    download.then(|| "192.0.2.2".parse().unwrap())
+                );
+                assert_eq!(
+                    event.upload_local_ip,
+                    upload.then(|| "198.51.100.2".parse().unwrap())
+                );
+                assert_eq!(
+                    event.download_remote_ip,
+                    download.then(|| "192.0.2.1".parse().unwrap())
+                );
+                assert_eq!(
+                    event.upload_remote_ip,
+                    upload.then(|| "198.51.100.1".parse().unwrap())
+                );
+                assert_eq!(event.local_ip, None);
+                assert_eq!(event.remote_ip, None);
+                let mut writer = crate::journal::JournalWriter::from_writer(Vec::new()).unwrap();
+                writer.append_batch(std::slice::from_ref(event)).unwrap();
+                let encoded = writer.into_inner().unwrap();
+                let mut reader = csv::Reader::from_reader(encoded.as_slice());
+                let headers = reader.headers().unwrap().clone();
+                let row = reader.records().next().unwrap().unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_str(&crate::console::render_jsonl(event).unwrap()).unwrap();
+                for (field, cell) in headers.iter().zip(row.iter()) {
+                    let value = &json[field];
+                    if value.is_null() {
+                        assert!(cell.is_empty(), "{field}");
+                    } else if let Some(text) = value.as_str() {
+                        assert_eq!(cell, text, "{field}");
+                    } else {
+                        assert_eq!(
+                            cell.parse::<f64>().unwrap(),
+                            value.as_f64().unwrap(),
+                            "{field}"
+                        );
+                    }
+                }
+                for (rate, bytes, duration) in [
+                    ("download_mbps", "download_bytes", "download_duration_ms"),
+                    ("upload_mbps", "upload_bytes", "upload_duration_ms"),
+                ] {
+                    if let Some(value) = json[rate].as_f64() {
+                        let calculated = 8.0 * json[bytes].as_f64().unwrap()
+                            / (1000.0 * json[duration].as_f64().unwrap());
+                        assert!((value - calculated).abs() <= value.abs() * 1e-12);
+                    }
+                }
+
                 assert_eq!(
                     event.duration_ms,
-                    Some(
+                    (download || upload).then_some(
                         if download { 10_000.0 } else { 0.0 } + if upload { 5_000.0 } else { 0.0 }
                     )
                 );
@@ -1610,7 +1677,7 @@ mod tests {
             bytes: 1_000_000,
             elapsed: Duration::from_secs(1),
             remote_ip: "192.0.2.1".parse().unwrap(),
-            source_ip: "192.0.2.2".parse().unwrap(),
+            local_ip: "192.0.2.2".parse().unwrap(),
             metrics: TcpMetrics {
                 min_rtt_ms: (mask & 1 != 0).then_some(if upload { 9.0 } else { 1.0 }),
                 rtt_ms: (mask & 2 != 0).then_some(if upload { 12.0 } else { 2.0 }),

@@ -156,7 +156,7 @@ async fn provider_failure_is_journaled_and_suppression_does_not_reconnect() {
     );
     assert!(rows.iter().any(|row| row["event_kind"] == "bandwidth"
         && row["outcome"] == "rate_limited"
-        && row["daily_runs_used"] == "1"));
+        && row["daily_bandwidth_starts"] == "1"));
     let before = rows.len();
     let mut second = fixture.spawn();
     assert_eq!(second.wait().await.code(), Some(1));
@@ -269,7 +269,7 @@ async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership()
         );
         assert!(rows.iter().any(|row| row["event_kind"] == "bandwidth"
             && row["outcome"] == "cancelled"
-            && row["daily_runs_used"] == "1"));
+            && row["daily_bandwidth_starts"] == "1"));
         let output = fixture.root.path().join("results.csv");
         let (_journal, _) =
             JournalWriter::open_at(&OutputTarget::File(output), chrono::Utc::now()).unwrap();

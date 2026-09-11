@@ -52,7 +52,7 @@ impl PingTransport for DegradedTransport {
             ProbeAttemptResult {
                 binding: ProbeBinding {
                     interface: None,
-                    source_ip: Some("192.0.2.10".parse().unwrap()),
+                    local_ip: Some("192.0.2.10".parse().unwrap()),
                 },
                 sent: true,
                 result: if call.is_multiple_of(2) || (self.recover_after_first_round && call >= 2) {
@@ -264,7 +264,7 @@ async fn degraded_round_drains_before_one_triggered_bandwidth_attempt() {
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::Bandwidth
             && event.trigger_reason == Some(TriggerReason::PingLoss)
-            && event.daily_runs_used == Some(1)
+            && event.daily_bandwidth_starts == Some(1)
             && event.outcome == Outcome::Success
     }));
     let loaded = events

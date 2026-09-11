@@ -58,7 +58,7 @@ impl PingTransport for FakeTransport {
             ProbeAttemptResult {
                 binding: ProbeBinding {
                     interface: Some("eth-test".into()),
-                    source_ip: Some("192.0.2.10".parse().unwrap()),
+                    local_ip: Some("192.0.2.10".parse().unwrap()),
                 },
                 sent: true,
                 result: if failed {

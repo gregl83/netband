@@ -34,6 +34,8 @@ trap 'rm -rf "$work"' EXIT
 
 python3 - "$binary" "$root/tests/fixtures/v1-events.csv" <<'PY'
 import csv
+import json
+import math
 import pathlib
 import subprocess
 import sys
@@ -50,7 +52,21 @@ with pathlib.Path(sys.argv[2]).open(newline="", encoding="utf-8") as stream:
 assert rows
 kinds = {row["event_kind"] for row in rows}
 assert {"ping_probe", "bandwidth", "request_failure", "scheduler"} <= kinds
-assert len(rows[0]) == 45
+assert len(rows[0]) == 52
+for row in rows:
+    assert row["schema_version"] == "1"
+    if row["connection_details"]:
+        assert isinstance(json.loads(row["connection_details"]), dict)
+    if row["event_kind"] != "bandwidth":
+        continue
+    assert row["local_ip"] == row["remote_ip"] == ""
+    for direction, byte_field in [("download", "download_bytes"), ("upload", "upload_bytes")]:
+        rate = row[f"{direction}_mbps"]
+        if not rate:
+            continue
+        duration = float(row[f"{direction}_duration_ms"])
+        expected = 8 * int(row[byte_field]) / (1000 * duration)
+        assert math.isclose(float(rate), expected, rel_tol=1e-12)
 PY
 
 size="$(stat -c '%s' "$binary")"

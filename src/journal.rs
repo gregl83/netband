@@ -13,55 +13,82 @@ use crate::config::OutputTarget;
 use crate::console::ConsoleSink;
 use crate::model::MeasurementEvent;
 
-pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message";
+// Keep CSV column order and its serializer in one declaration. JSONL serializes
+// MeasurementEvent directly so connection_details remains an object there.
+macro_rules! csv_event {
+    ($event:ident; $first:ident => $first_value:expr $(, $field:ident => $value:expr)* $(,)?) => {
+        pub const CSV_HEADER: &str = concat!(stringify!($first) $(, ",", stringify!($field))*);
+        const CSV_FIELDS: &[&str] = &[stringify!($first) $(, stringify!($field))*];
 
-const CSV_FIELDS: [&str; 45] = [
-    "schema_version",
-    "run_id",
-    "event_id",
-    "scheduled_at_utc",
-    "started_at_utc",
-    "finished_at_utc",
-    "interface",
-    "source_ip",
-    "event_kind",
-    "trigger_reason",
-    "load_phase",
-    "load_run_id",
-    "target",
-    "sequence",
-    "outcome",
-    "duration_ms",
-    "rtt_ms",
-    "packets_sent",
-    "packets_received",
-    "packet_loss_pct",
-    "icmp_type",
-    "icmp_code",
-    "provider_id",
-    "provider_kind",
-    "server",
-    "remote_ip",
-    "request_stage",
-    "request_attempt",
-    "http_status",
-    "retry_after_ms",
-    "rate_limit_until_utc",
-    "daily_runs_used",
-    "download_mbps",
-    "upload_mbps",
-    "bytes_sent",
-    "bytes_received",
-    "download_tcp_min_rtt_ms",
-    "download_tcp_rtt_ms",
-    "download_tcp_retransmitted_bytes",
-    "upload_tcp_min_rtt_ms",
-    "upload_tcp_rtt_ms",
-    "upload_tcp_retransmitted_bytes",
-    "os_error_code",
-    "error_kind",
-    "error_message",
-];
+        struct CsvEvent<'a>(&'a MeasurementEvent);
+
+        impl serde::Serialize for CsvEvent<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let $event = self.0;
+                let mut record = serializer.serialize_struct("MeasurementEvent", CSV_FIELDS.len())?;
+                record.serialize_field(stringify!($first), &$first_value)?;
+                $(record.serialize_field(stringify!($field), &$value)?;)*
+                record.end()
+            }
+        }
+    };
+}
+
+csv_event! { event;
+    schema_version => event.schema_version,
+    run_id => event.run_id,
+    event_id => event.event_id,
+    scheduled_at_utc => event.scheduled_at_utc.map(crate::model::timestamp_text),
+    started_at_utc => event.started_at_utc.map(crate::model::timestamp_text),
+    finished_at_utc => event.finished_at_utc.map(crate::model::timestamp_text),
+    interface => event.interface,
+    local_ip => event.local_ip,
+    connection_details => event.connection_details.as_ref().map(serde_json::to_string).transpose().map_err(serde::ser::Error::custom)?,
+    event_kind => event.event_kind,
+    trigger_reason => event.trigger_reason,
+    load_phase => event.load_phase,
+    load_run_id => event.load_run_id,
+    target => event.target,
+    sequence => event.sequence,
+    outcome => event.outcome,
+    duration_ms => event.duration_ms,
+    rtt_ms => event.rtt_ms,
+    packets_sent => event.packets_sent,
+    packets_received => event.packets_received,
+    packet_loss_pct => event.packet_loss_pct,
+    icmp_type => event.icmp_type,
+    icmp_code => event.icmp_code,
+    provider_id => event.provider_id,
+    provider_kind => event.provider_kind,
+    server => event.server,
+    remote_ip => event.remote_ip,
+    request_stage => event.request_stage,
+    request_attempt => event.request_attempt,
+    http_status => event.http_status,
+    retry_after_ms => event.retry_after_ms,
+    rate_limit_until_utc => event.rate_limit_until_utc.map(crate::model::timestamp_text),
+    daily_bandwidth_starts => event.daily_bandwidth_starts,
+    download_mbps => event.download_mbps,
+    upload_mbps => event.upload_mbps,
+    upload_bytes => event.upload_bytes,
+    download_bytes => event.download_bytes,
+    download_duration_ms => event.download_duration_ms,
+    upload_duration_ms => event.upload_duration_ms,
+    download_local_ip => event.download_local_ip,
+    upload_local_ip => event.upload_local_ip,
+    download_remote_ip => event.download_remote_ip,
+    upload_remote_ip => event.upload_remote_ip,
+    download_tcp_min_rtt_ms => event.download_tcp_min_rtt_ms,
+    download_tcp_rtt_ms => event.download_tcp_rtt_ms,
+    download_tcp_retransmitted_bytes => event.download_tcp_retransmitted_bytes,
+    upload_tcp_min_rtt_ms => event.upload_tcp_min_rtt_ms,
+    upload_tcp_rtt_ms => event.upload_tcp_rtt_ms,
+    upload_tcp_retransmitted_bytes => event.upload_tcp_retransmitted_bytes,
+    os_error_code => event.os_error_code,
+    error_kind => event.error_kind,
+    error_message => event.error_message,
+}
 
 #[derive(Debug, Error)]
 pub enum JournalError {
@@ -121,7 +148,7 @@ impl<W: Write> JournalWriter<W> {
 
     pub fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
         for event in events {
-            self.writer.serialize(event.sanitized())?;
+            self.writer.serialize(CsvEvent(&event.sanitized()))?;
         }
         self.flush()?;
         Ok(())

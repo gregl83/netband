@@ -23,7 +23,7 @@ async fn real_echo_replies_preserve_binding_family_and_sequence() {
             let reply = attempt.result.expect("local echo reply");
             assert!(attempt.sent);
             assert_eq!(attempt.binding.interface, None);
-            assert_eq!(attempt.binding.source_ip, Some(target));
+            assert_eq!(attempt.binding.local_ip, Some(target));
             assert_eq!(reply.target, target);
             assert!(reply.identifier.is_none_or(|identifier| identifier == 321));
             assert_eq!(reply.sequence, sequence);

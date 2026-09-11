@@ -258,7 +258,30 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 45);
+    assert_eq!(CSV_HEADER.split(',').count(), 52);
+    for field in CSV_HEADER.split(',') {
+        assert!(
+            data.contains(&format!("| `{field}` |")),
+            "missing field documentation: {field}"
+        );
+    }
+    let examples = fs::read_to_string(root().join("docs/examples/console.jsonl")).unwrap();
+    for line in examples.lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(row.as_object().unwrap().len(), 52);
+        assert_eq!(row["schema_version"], 1);
+        for field in CSV_HEADER.split(',') {
+            assert!(row.get(field).is_some(), "missing example field: {field}");
+        }
+        for (direction, bytes) in [("download", "download_bytes"), ("upload", "upload_bytes")] {
+            if let Some(rate) = row[format!("{direction}_mbps")].as_f64() {
+                let expected = 8.0 * row[bytes].as_f64().unwrap()
+                    / (1000.0 * row[format!("{direction}_duration_ms")].as_f64().unwrap());
+                assert!((rate - expected).abs() <= rate.abs() * 1e-12);
+            }
+        }
+    }
+
     for mode in ["auto", "human", "jsonl", "off"] {
         assert!(readme.contains(mode), "README omits console mode {mode}");
     }
@@ -322,7 +345,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         Outcome::Success,
         trigger_at,
     );
-    success.remote_ip = Some("192.0.2.1".parse().unwrap());
+    success.download_remote_ip = Some("192.0.2.1".parse().unwrap());
     let mut report = BandwidthReport {
         events: vec![success],
         outcome: Outcome::Success,

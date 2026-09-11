@@ -111,7 +111,7 @@ fn success_report(reserved: bool) -> BandwidthReport {
         Outcome::Success,
         at(30, 1, 0, 0),
     );
-    bandwidth.remote_ip = Some("192.0.2.1".parse().unwrap());
+    bandwidth.download_remote_ip = Some("192.0.2.1".parse().unwrap());
     BandwidthReport {
         events: vec![bandwidth],
         outcome: Outcome::Success,
@@ -222,7 +222,13 @@ fn force_overrides_direct_limits_but_not_the_mlab_hard_cap() {
         scheduler.preflight_manual("forced", forced_at).unwrap(),
         ManualDecision::Allowed
     );
-    assert_eq!(scheduler.reserve_run(forced_at).unwrap().daily_runs_used, 2);
+    assert_eq!(
+        scheduler
+            .reserve_run(forced_at)
+            .unwrap()
+            .daily_bandwidth_starts,
+        2
+    );
 
     let mlab_root = TempDir::new().unwrap();
     let mlab_path = state_path(&mlab_root);
@@ -790,6 +796,43 @@ fn provider_deadlines_survive_delayed_handling_and_never_shorten_existing_cooldo
                     }
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn retained_direction_resets_backoff_even_when_the_attempt_is_interrupted() {
+    for outcome in [Outcome::Timeout, Outcome::Cancelled] {
+        for upload in [false, true] {
+            let root = TempDir::new().unwrap();
+            let now = at(30, 1, 0, 0);
+            let mut scheduler =
+                Scheduler::open_seeded(state_path(&root), &mlab(), now, 31).unwrap();
+            let opportunity = BandwidthOpportunity {
+                reason: TriggerReason::Scheduled,
+                scheduled_at_utc: now,
+                interface: None,
+            };
+            let mut limited = rate_report(RequestStage::Locate, 429, None, false);
+            scheduler
+                .finish_attempt("run", now, opportunity, &mut limited)
+                .unwrap();
+            let deadline = scheduler.snapshot().cooldown_until_utc.unwrap();
+            let retry = scheduler
+                .poll("run", deadline, true)
+                .unwrap()
+                .opportunity
+                .unwrap();
+            let mut report = success_report(true);
+            report.outcome = outcome;
+            report.events[0].outcome = outcome;
+            if upload {
+                report.events[0].upload_remote_ip = report.events[0].download_remote_ip.take();
+            }
+            scheduler
+                .finish_attempt("run", deadline, retry, &mut report)
+                .unwrap();
+            assert_eq!(scheduler.snapshot().cooldown_until_utc, None);
         }
     }
 }

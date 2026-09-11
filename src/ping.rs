@@ -38,7 +38,7 @@ pub struct ProbeRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeBinding {
     pub interface: Option<String>,
-    pub source_ip: Option<IpAddr>,
+    pub local_ip: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,7 +427,7 @@ fn apply_common(
     event.scheduled_at_utc = Some(context.scheduled_at);
     event.started_at_utc = Some(started_at);
     event.interface.clone_from(&binding.interface);
-    event.source_ip = binding.source_ip;
+    event.local_ip = binding.local_ip;
     event.load_phase = context.load_phase;
     event.load_run_id.clone_from(&context.load_run_id);
     event.target = Some(target.to_owned());
@@ -638,7 +638,7 @@ impl SurgePingTransport {
                 Ok(source) => {
                     let binding = ProbeBinding {
                         interface: interface.map(str::to_owned),
-                        source_ip: Some(source.address),
+                        local_ip: Some(source.address),
                     };
                     let client = clients
                         .entry(source.address)
@@ -656,7 +656,7 @@ impl SurgePingTransport {
                 Err(failure) => TargetTransport::Failed {
                     binding: ProbeBinding {
                         interface: interface.map(str::to_owned),
-                        source_ip: None,
+                        local_ip: None,
                     },
                     failure,
                 },
@@ -1103,7 +1103,7 @@ mod tests {
             failed.binding.interface.as_deref(),
             Some("netband-missing-interface")
         );
-        assert_eq!(failed.binding.source_ip, None);
+        assert_eq!(failed.binding.local_ip, None);
         assert!(
             matches!(failed.result, Err(ProbeFailure::Io { message, .. }) if message.contains("does not exist"))
         );

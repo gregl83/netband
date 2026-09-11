@@ -28,7 +28,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     ping_failure.scheduled_at_utc = Some(timestamp(0));
     ping_failure.started_at_utc = Some(timestamp(0));
     ping_failure.interface = Some("eth0".into());
-    ping_failure.source_ip = Some("192.0.2.10".parse().unwrap());
+    ping_failure.local_ip = Some("192.0.2.10".parse().unwrap());
     ping_failure.load_phase = Some(LoadPhase::Download);
     ping_failure.load_run_id = Some("run-1".into());
     ping_failure.target = Some("1.1.1.1".into());
@@ -54,10 +54,12 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     bandwidth.provider_id = Some("direct:abc".into());
     bandwidth.provider_kind = Some(ProviderKind::Direct);
     bandwidth.server = Some("wss://ndt.example.net/ndt/v7?access_token=secret".into());
-    bandwidth.remote_ip = Some("203.0.113.20".parse().unwrap());
+    bandwidth.download_remote_ip = Some("203.0.113.20".parse().unwrap());
     bandwidth.duration_ms = Some(10_500.0);
-    bandwidth.download_mbps = Some(123.456789);
-    bandwidth.bytes_received = Some(123_456_789);
+    bandwidth.download_duration_ms = Some(10_500.0);
+    bandwidth.download_local_ip = Some("192.0.2.10".parse().unwrap());
+    bandwidth.download_mbps = Some(94.06231542857143);
+    bandwidth.download_bytes = Some(123_456_789);
     bandwidth.download_tcp_min_rtt_ms = Some(1.2);
     bandwidth.download_tcp_rtt_ms = Some(2.5);
     bandwidth.download_tcp_retransmitted_bytes = Some(7);
@@ -91,7 +93,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     deferred.provider_id = Some("mlab".into());
     deferred.provider_kind = Some(ProviderKind::Mlab);
     deferred.rate_limit_until_utc = Some(timestamp(3));
-    deferred.daily_runs_used = Some(2);
+    deferred.daily_bandwidth_starts = Some(2);
     deferred.error_kind = Some(ErrorKind::ProviderCooldown);
     deferred.error_message = Some("provider cooldown active".into());
 
@@ -99,7 +101,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     suppressed.trigger_reason = Some(TriggerReason::Scheduled);
     suppressed.provider_id = Some("mlab".into());
     suppressed.provider_kind = Some(ProviderKind::Mlab);
-    suppressed.daily_runs_used = Some(4);
+    suppressed.daily_bandwidth_starts = Some(4);
     suppressed.error_kind = Some(ErrorKind::DailyCap);
     suppressed.error_message = Some("daily maximum reached".into());
 
@@ -200,7 +202,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 45);
+    assert_eq!(partial_record.len(), 52);
     OpenOptions::new()
         .append(true)
         .open(&path)
@@ -410,4 +412,62 @@ fn complete_invalid_utf8_record_fails_without_modifying_the_file() {
         Err(JournalError::Corrupt(_))
     ));
     assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn connection_details_round_trip_and_extend_without_changing_csv_header() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("details.csv");
+    let mut events = vec![event(EventKind::PingSummary, Outcome::Success, "details-0")];
+    for details in [
+        serde_json::json!({}),
+        serde_json::json!({"wifi": {"signal_dbm": -62, "frequency_mhz": 5180, "band": "5GHz"}}),
+        serde_json::json!({"wifi": {"signal_dbm": -62, "future": {"label": "réseau, \"quoted\"\nline", "available": false, "count": 0, "absent": null}}, "other": [1, "two"]}),
+    ] {
+        let mut measurement = event(
+            EventKind::PingSummary,
+            Outcome::Success,
+            &format!("details-{}", events.len()),
+        );
+        measurement.connection_details = Some(details.as_object().unwrap().clone());
+        events.push(measurement);
+    }
+    for measurement in &events {
+        let (mut writer, _) =
+            JournalWriter::open_at(&OutputTarget::File(path.clone()), timestamp(0)).unwrap();
+        writer
+            .append_batch(std::slice::from_ref(measurement))
+            .unwrap();
+    }
+    let mut reader = csv::Reader::from_path(&path).unwrap();
+    let headers = reader.headers().unwrap().clone();
+    assert_eq!(headers.iter().collect::<Vec<_>>().join(","), CSV_HEADER);
+    for (row, measurement) in reader.records().zip(&events) {
+        let row = row.unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&netband::console::render_jsonl(measurement).unwrap()).unwrap();
+        assert_eq!(row.len(), json.as_object().unwrap().len());
+        for (field, cell) in headers.iter().zip(row.iter()) {
+            let value = &json[field];
+            if field == "connection_details" && !cell.is_empty() {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(cell).unwrap(),
+                    *value
+                );
+            } else if value.is_null() {
+                assert!(cell.is_empty(), "{field}");
+            } else if let Some(text) = value.as_str() {
+                assert_eq!(cell, text, "{field}");
+            } else {
+                assert_eq!(cell, value.to_string(), "{field}");
+            }
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(path)
+            .unwrap()
+            .matches(CSV_HEADER)
+            .count(),
+        1
+    );
 }

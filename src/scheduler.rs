@@ -169,7 +169,7 @@ pub enum ManualDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reservation {
-    pub daily_runs_used: u32,
+    pub daily_bandwidth_starts: u32,
 }
 
 #[derive(Debug)]
@@ -548,7 +548,7 @@ impl Scheduler {
                 blocked.message
             )));
         }
-        let daily_runs_used = {
+        let daily_bandwidth_starts = {
             let state = self.state_mut();
             state.runs.push(now);
             state.runs.sort_unstable();
@@ -557,7 +557,9 @@ impl Scheduler {
             runs_on_day(state, now.date_naive())
         };
         self.persist()?;
-        Ok(Reservation { daily_runs_used })
+        Ok(Reservation {
+            daily_bandwidth_starts,
+        })
     }
 
     pub fn finish_attempt(
@@ -640,7 +642,8 @@ impl Scheduler {
         } else {
             let successful_request = report.events.iter().any(|event| {
                 event.event_kind == EventKind::Bandwidth
-                    && (event.remote_ip.is_some()
+                    && (event.download_remote_ip.is_some()
+                        || event.upload_remote_ip.is_some()
                         || matches!(event.outcome, Outcome::Success | Outcome::Partial))
             });
             let state = self.state_mut();
@@ -664,7 +667,7 @@ impl Scheduler {
         for event in &mut report.events {
             event.trigger_reason = Some(opportunity.reason);
             event.scheduled_at_utc = Some(opportunity.scheduled_at_utc);
-            event.daily_runs_used = Some(used);
+            event.daily_bandwidth_starts = Some(used);
         }
         Ok(events)
     }
@@ -919,7 +922,7 @@ impl Scheduler {
         event.provider_kind = Some(self.policy.provider_kind);
         event.interface = context.interface;
         event.rate_limit_until_utc = context.cooldown_until;
-        event.daily_runs_used = Some(runs_on_day(self.state(), now.date_naive()));
+        event.daily_bandwidth_starts = Some(runs_on_day(self.state(), now.date_naive()));
         event.error_kind = context.error_kind;
         event.error_message = Some(message);
         event
@@ -940,7 +943,7 @@ impl ReservationGate for Scheduler {
     fn reserve(&mut self, started_at: DateTime<Utc>) -> Result<AdmissionReservation, String> {
         self.reserve_run(started_at)
             .map(|reservation| AdmissionReservation::Reserved {
-                daily_runs_used: reservation.daily_runs_used,
+                daily_bandwidth_starts: reservation.daily_bandwidth_starts,
             })
             .map_err(|error| error.to_string())
     }

@@ -168,7 +168,10 @@ fn replay_restores_all_providers_and_preserves_duplicate_start_timestamps() {
     let mut first = Scheduler::open_seeded(path(&root), &first_config, now(), 7).unwrap();
     let backup = fs::read(path(&root)).unwrap();
     for expected in 1..=4 {
-        assert_eq!(first.reserve_run(now()).unwrap().daily_runs_used, expected);
+        assert_eq!(
+            first.reserve_run(now()).unwrap().daily_bandwidth_starts,
+            expected
+        );
     }
     drop(first);
     let mut second_config = first_config.clone();
