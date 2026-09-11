@@ -7,7 +7,20 @@ use tempfile::tempdir;
 
 #[test]
 fn service_smoke_waits_for_the_restarted_process_segment() {
+    assert_smoke_waits_for_new_segments(false);
+}
+
+#[test]
+fn service_smoke_replaces_stale_output_from_an_already_running_service() {
+    assert_smoke_waits_for_new_segments(true);
+}
+
+fn assert_smoke_waits_for_new_segments(already_running: bool) {
     let dir = tempdir().unwrap();
+    if already_running {
+        fs::write(dir.path().join("previous.csv"), "header\n").unwrap();
+        fs::write(dir.path().join(".netband-active"), "previous.csv\n").unwrap();
+    }
     let script = include_str!("../scripts/smoke-systemd-linux.sh");
     // Exercise the real readiness function and its lifecycle callers without the
     // installer preamble or host systemd. Keep all measurement paths in the fixture.
@@ -17,7 +30,7 @@ fn service_smoke_waits_for_the_restarted_process_segment() {
         script[start..end].replace("/var/lib/netband/measurements", "$TEST_MEASUREMENTS");
     let harness = r#"
 set -euo pipefail
-running=0
+running=$TEST_SERVICE_RUNNING
 generation=0
 pending=''
 
@@ -31,10 +44,13 @@ publish_segment() {
 systemctl() {
   case "$1" in
     start|restart)
+      if [[ "$1" == start && "$running" == 1 ]]; then
+        return 0
+      fi
       generation=$((generation + 1))
       running=1
       printf '%s %s\n' "$1" "$generation" >>"$TEST_MEASUREMENTS/trace"
-      if [[ "$generation" == 1 ]]; then
+      if [[ "$generation" == 1 && ! -s "$TEST_MEASUREMENTS/.netband-active" ]]; then
         publish_segment
       else
         # Type=simple is already active, but recovery has not replaced the marker.
@@ -60,6 +76,10 @@ sleep() {
     let output = Command::new("bash")
         .args(["-c", &format!("{harness}\n{lifecycle}")])
         .env("TEST_MEASUREMENTS", dir.path())
+        .env(
+            "TEST_SERVICE_RUNNING",
+            if already_running { "1" } else { "0" },
+        )
         .output()
         .unwrap();
     let trace = fs::read_to_string(dir.path().join("trace")).unwrap();

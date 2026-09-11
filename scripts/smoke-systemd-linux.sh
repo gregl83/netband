@@ -38,11 +38,11 @@ install -Dm0644 packaging/netband.service /etc/systemd/system/netband.service
 systemctl daemon-reload
 
 wait_ready() {
+  local previous_segment="${1:-}" segment
   for _ in $(seq 1 100); do
     if systemctl is-active --quiet netband.service && [[ -s /var/lib/netband/measurements/.netband-active ]]; then
-      local segment
       read -r segment </var/lib/netband/measurements/.netband-active
-      if [[ -s "/var/lib/netband/measurements/$segment" ]]; then
+      if [[ "$segment" != "$previous_segment" && -s "/var/lib/netband/measurements/$segment" ]]; then
         return 0
       fi
     fi
@@ -52,18 +52,20 @@ wait_ready() {
   return 1
 }
 
+systemctl stop netband.service
+previous_segment="$(cat /var/lib/netband/measurements/.netband-active 2>/dev/null || true)"
 systemctl start netband.service
-wait_ready
+wait_ready "$previous_segment"
 first_segment="$(cat /var/lib/netband/measurements/.netband-active)"
 systemctl stop netband.service
 systemctl is-active --quiet netband.service && exit 1 || true
 systemctl start netband.service
-wait_ready
+wait_ready "$first_segment"
 second_segment="$(cat /var/lib/netband/measurements/.netband-active)"
 [[ "$first_segment" != "$second_segment" ]]
 before_restart="$(systemctl show netband.service -p MainPID --value)"
 systemctl restart netband.service
-wait_ready
+wait_ready "$second_segment"
 after_restart="$(systemctl show netband.service -p MainPID --value)"
 [[ "$before_restart" != "$after_restart" ]]
 third_segment="$(cat /var/lib/netband/measurements/.netband-active)"

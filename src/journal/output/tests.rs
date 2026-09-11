@@ -471,3 +471,34 @@ fn marker_staging_preserves_a_locked_explicit_journal() {
     fixed.append_batch(&[event("after-rejection")]).unwrap();
     assert_eq!(ids(&path), ["acknowledged", "after-rejection"]);
 }
+
+#[test]
+fn marker_collision_during_rotation_preserves_both_journals() {
+    let dir = tempdir().unwrap();
+    let target = OutputTarget::Directory(dir.path().to_owned());
+    let mut journal = Journal::open_at(&target, Some(1), now()).unwrap();
+    journal
+        .append_batch_at(&[event("acknowledged")], now())
+        .unwrap();
+    let active = journal.path().to_owned();
+    let before = fs::read(&active).unwrap();
+    let marker = fs::read(dir.path().join(ACTIVE)).unwrap();
+
+    let temporary = dir.path().join(MARKER_TEMP);
+    let (mut fixed, _) =
+        JournalWriter::open_at(&OutputTarget::File(temporary.clone()), now()).unwrap();
+    fixed.append_batch(&[event("explicit")]).unwrap();
+    let fixed_before = fs::read(&temporary).unwrap();
+
+    assert!(matches!(
+        journal.append_batch_at(&[event("unacknowledged")], now()),
+        Err(JournalError::Locked(path)) if path == temporary
+    ));
+    assert_eq!(fs::read(&active).unwrap(), before);
+    assert_eq!(fs::read(dir.path().join(ACTIVE)).unwrap(), marker);
+    assert_eq!(fs::read(&temporary).unwrap(), fixed_before);
+    assert!(journal.flush().is_err());
+    assert!(journal.append_batch_at(&[event("retry")], now()).is_err());
+    fixed.append_batch(&[event("after-rejection")]).unwrap();
+    assert_eq!(ids(&temporary), ["explicit", "after-rejection"]);
+}

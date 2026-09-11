@@ -249,15 +249,17 @@ impl Directory {
         let temporary = self.path.join(MARKER_TEMP);
         regular_or_missing(&temporary)?;
         let mut marker = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&temporary)?;
+        lock_file(&marker, &temporary)?;
+        marker.set_len(0)?;
         step(Step::MarkerWrite)?;
         writeln!(marker, "{}", path.file_name().unwrap().to_str().unwrap())?;
         step(Step::MarkerSync)?;
         marker.sync_all()?;
-        drop(marker);
         step(Step::MarkerRename)?;
         fs::rename(&temporary, self.path.join(ACTIVE))?;
         step(Step::MarkerDirectorySync)?;
