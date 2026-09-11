@@ -7,7 +7,7 @@ a ping attempt, bandwidth attempt, request failure, or scheduler decision.
 ## Fields and encoding
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,elapsed_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,upload_mbps,upload_bytes,download_bytes,download_duration_ms,upload_duration_ms,download_local_ip,upload_local_ip,download_remote_ip,upload_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
+schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,elapsed_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,download_bytes,download_duration_ms,download_local_ip,download_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_mbps,upload_bytes,upload_duration_ms,upload_local_ip,upload_remote_ip,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -65,18 +65,18 @@ version. Optional connection metadata follows the extension rules below.
 | `rate_limit_until_utc` | Provider retry deadline on request-failure rows; enforced cooldown deadline on scheduler rows, which may retain a later existing cooldown |
 | `daily_bandwidth_starts` | Bandwidth starts reserved for this provider and UTC day, including failed or interrupted attempts; not a count of successful tests |
 | `download_mbps` | NDT7 download throughput in decimal Mb/s |
-| `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
-| `upload_bytes` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
 | `download_bytes` | Application payload bytes received |
 | `download_duration_ms` | Client receive measurement window in milliseconds; empty when that direction is unavailable |
-| `upload_duration_ms` | Client send measurement window in milliseconds; excludes close-handshake waiting; empty when that direction is unavailable |
 | `download_local_ip` | Local address of the download connection; empty when that direction is unavailable |
-| `upload_local_ip` | Local address of the upload connection; empty when that direction is unavailable |
 | `download_remote_ip` | Remote address of the download connection; empty when that direction is unavailable |
-| `upload_remote_ip` | Remote address of the upload connection; empty when that direction is unavailable |
 | `download_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the download connection |
 | `download_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the download connection |
 | `download_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the download connection |
+| `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
+| `upload_bytes` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
+| `upload_duration_ms` | Client send measurement window in milliseconds; excludes close-handshake waiting; empty when that direction is unavailable |
+| `upload_local_ip` | Local address of the upload connection; empty when that direction is unavailable |
+| `upload_remote_ip` | Remote address of the upload connection; empty when that direction is unavailable |
 | `upload_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the upload connection |
 | `upload_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the upload connection |
 | `upload_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the upload connection |
