@@ -95,6 +95,21 @@ async fn attempt_and_request_timestamps_include_setup_on_success_and_failure() {
         assert_report_timestamps(&report);
         let bandwidth = report.events.last().unwrap();
         let boundaries = resolver.boundaries.lock().unwrap().clone();
+        assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
+        let measured = bandwidth.download_duration_ms.unwrap_or(0.0)
+            + bandwidth.upload_duration_ms.unwrap_or(0.0);
+        assert!(bandwidth.elapsed_ms.unwrap() >= measured + 95.0);
+        for request in report
+            .events
+            .iter()
+            .filter(|event| event.event_kind == EventKind::RequestFailure)
+        {
+            if request.request_stage == Some(RequestStage::Dns) {
+                assert!(request.elapsed_ms.unwrap() >= 50.0);
+            }
+            assert!(request.elapsed_ms.unwrap() >= 0.0);
+            assert!(request.elapsed_ms.unwrap() <= bandwidth.elapsed_ms.unwrap());
+        }
         assert!(before <= bandwidth.started_at_utc.unwrap());
         assert!(bandwidth.started_at_utc.unwrap() <= boundaries[0].0);
         assert!(boundaries.last().unwrap().1 <= bandwidth.finished_at_utc.unwrap());
@@ -630,6 +645,13 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
             .unwrap()
             .unwrap();
         assert_eq!(report.outcome, outcome);
+        let bandwidth = report.events.last().unwrap();
+        assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
+        assert!(
+            bandwidth.elapsed_ms.unwrap()
+                > bandwidth.download_duration_ms.unwrap_or(0.0)
+                    + bandwidth.upload_duration_ms.unwrap_or(0.0)
+        );
         assert_eq!(report.exit_code(), 1);
         assert!(report.reserved);
         assert!(
@@ -1280,7 +1302,7 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert!(bandwidth.upload_bytes.is_none());
                 if after_download {
                     assert!(bandwidth.download_mbps.unwrap() > 0.0);
-                    assert!(bandwidth.duration_ms.unwrap() > 0.0);
+                    assert!(bandwidth.elapsed_ms.unwrap() > 0.0);
                     assert!(bandwidth.download_tcp_rtt_ms.is_some());
                     assert!(bandwidth.upload_tcp_rtt_ms.is_none());
                 }

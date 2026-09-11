@@ -101,6 +101,8 @@ pub struct DirectionMeasurement {
 
 #[derive(Debug)]
 struct AttemptProgress {
+    started_monotonic: tokio::time::Instant,
+    stage_started_monotonic: tokio::time::Instant,
     started_at_utc: DateTime<Utc>,
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
@@ -113,6 +115,8 @@ impl AttemptProgress {
     fn new(stage: RequestStage) -> Self {
         let active = RequestFailure::simple(stage, ErrorKind::Internal, "", None, 1);
         Self {
+            started_monotonic: active.finished_monotonic,
+            stage_started_monotonic: active.finished_monotonic,
             started_at_utc: active.started_at_utc,
             download: None,
             upload: None,
@@ -125,10 +129,14 @@ impl AttemptProgress {
     fn begin_stage(&mut self, stage: RequestStage) {
         self.active.stage = stage;
         self.active.started_at_utc = Utc::now();
+        self.stage_started_monotonic = tokio::time::Instant::now();
     }
 
     fn record_failure(&mut self, mut failure: RequestFailure) {
         failure.started_at_utc = self.active.started_at_utc;
+        failure.elapsed = failure
+            .finished_monotonic
+            .saturating_duration_since(self.stage_started_monotonic);
         failure.direction = self.active.direction;
         if failure.server_name.is_none() {
             failure.server_name.clone_from(&self.active.server_name);
@@ -136,9 +144,18 @@ impl AttemptProgress {
         self.failures.push(failure);
     }
 
-    fn interrupt(&mut self, outcome: Outcome, timeout: Duration, finished_at: DateTime<Utc>) {
+    fn interrupt(
+        &mut self,
+        outcome: Outcome,
+        timeout: Duration,
+        finished_at: DateTime<Utc>,
+        finished_monotonic: tokio::time::Instant,
+    ) {
         let mut failure = self.active.clone();
         failure.finished_at_utc = finished_at;
+        failure.finished_monotonic = finished_monotonic;
+        failure.elapsed =
+            finished_monotonic.saturating_duration_since(self.stage_started_monotonic);
         failure.outcome = outcome;
         (failure.error_kind, failure.message) = match outcome {
             Outcome::Timeout => (
@@ -465,11 +482,18 @@ async fn measure_bandwidth_with_network_and_gate_observed<
     };
     // The attempt and its sockets are dropped before finalizing retained results.
     let finished_at = Utc::now();
+    let finished_monotonic = tokio::time::Instant::now();
     let outcome = result.unwrap_or_else(|outcome| {
-        progress.interrupt(outcome, config.bandwidth.whole_test_timeout, finished_at);
+        progress.interrupt(
+            outcome,
+            config.bandwidth.whole_test_timeout,
+            finished_at,
+            finished_monotonic,
+        );
         outcome
     });
     let mut report = report_from_result(ReportInput {
+        elapsed: finished_monotonic.saturating_duration_since(progress.started_monotonic),
         started_at_utc: progress.started_at_utc,
         finished_at_utc: finished_at,
         run_id,
@@ -897,6 +921,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
         Some(url.to_string()),
         attempt,
     );
+    progress.stage_started_monotonic = progress.active.finished_monotonic;
     progress.active.direction = Some(direction);
     progress.active.server_name = Some(candidate.logical_server.clone());
     let host = match url.host_str() {
@@ -1019,6 +1044,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
             }
             Err(WebSocketError::Http(response)) => {
                 let received_at = Utc::now();
+                let received_monotonic = tokio::time::Instant::now();
                 let status = response.status().as_u16();
                 let retry_header = response.headers().get("retry-after");
                 let retry_after = retry_header
@@ -1039,6 +1065,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
                 );
                 failure.finished_at_utc = received_at;
+                failure.finished_monotonic = received_monotonic;
                 progress.record_failure(failure);
                 return Err(());
             }
@@ -1193,6 +1220,8 @@ fn handshake_failure(
     let (outcome, disposition) = classify_handshake_status(candidate.provider_kind, http_status);
     let now = Utc::now();
     RequestFailure {
+        elapsed: Duration::ZERO,
+        finished_monotonic: tokio::time::Instant::now(),
         started_at_utc: now,
         finished_at_utc: now,
         direction: None,
@@ -1236,6 +1265,8 @@ fn stream_failure(
 ) -> RequestFailure {
     let now = Utc::now();
     RequestFailure {
+        elapsed: Duration::ZERO,
+        finished_monotonic: tokio::time::Instant::now(),
         started_at_utc: now,
         finished_at_utc: now,
         direction: None,
@@ -1270,6 +1301,7 @@ fn websocket_os_error(error: &WebSocketError) -> Option<i32> {
 }
 
 struct ReportInput<'a> {
+    elapsed: Duration,
     started_at_utc: DateTime<Utc>,
     finished_at_utc: DateTime<Utc>,
     run_id: &'a str,
@@ -1285,6 +1317,7 @@ struct ReportInput<'a> {
 
 fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     let ReportInput {
+        elapsed,
         started_at_utc,
         finished_at_utc,
         run_id,
@@ -1343,10 +1376,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
     bandwidth.upload_local_ip = upload.as_ref().map(|measurement| measurement.local_ip);
     bandwidth.upload_remote_ip = upload.as_ref().map(|measurement| measurement.remote_ip);
-    bandwidth.duration_ms = match (bandwidth.download_duration_ms, bandwidth.upload_duration_ms) {
-        (None, None) => None,
-        (download, upload) => Some(download.unwrap_or(0.0) + upload.unwrap_or(0.0)),
-    };
+    bandwidth.elapsed_ms = Some(elapsed.as_secs_f64() * 1_000.0);
     let download_metrics = download
         .as_ref()
         .map(|measurement| measurement.metrics)
@@ -1390,6 +1420,7 @@ fn failure_event(
         failure.finished_at_utc,
     );
     event.started_at_utc = Some(failure.started_at_utc);
+    event.elapsed_ms = Some(failure.elapsed.as_secs_f64() * 1_000.0);
     event.interface = interface.map(str::to_owned);
     event.provider_id = Some(provider_id.to_owned());
     event.provider_kind = Some(provider_kind);
@@ -1479,8 +1510,8 @@ mod tests {
         next_upload_message_size, transfer_upload, upload_payload,
     };
 
-    #[test]
-    fn stage_transitions_and_interruptions_preserve_their_own_boundaries() {
+    #[tokio::test(start_paused = true)]
+    async fn stage_transitions_and_interruptions_preserve_their_own_boundaries() {
         use super::*;
         let mut progress = AttemptProgress::new(RequestStage::Locate);
         let attempt_start = progress.started_at_utc;
@@ -1498,21 +1529,30 @@ mod tests {
             let stage_start = progress.active.started_at_utc;
             assert!(before <= stage_start && stage_start <= Utc::now());
             assert_eq!(progress.started_at_utc, attempt_start);
+            tokio::time::advance(Duration::from_secs(2)).await;
             let failure = RequestFailure::simple(stage, ErrorKind::Io, "fixture", None, 1);
             let failure_finish = failure.finished_at_utc;
+            tokio::time::advance(Duration::from_secs(3)).await;
             progress.record_failure(failure);
             let recorded = progress.failures.last().unwrap();
             assert_eq!(recorded.started_at_utc, stage_start);
             assert_eq!(recorded.finished_at_utc, failure_finish);
+            assert_eq!(recorded.elapsed, Duration::from_secs(2));
             for outcome in [Outcome::Timeout, Outcome::Cancelled] {
                 // A clock adjustment must not clamp or reconstruct observed termination.
                 let finish = stage_start - chrono::Duration::seconds(1);
-                progress.interrupt(outcome, Duration::from_secs(5), finish);
+                progress.interrupt(
+                    outcome,
+                    Duration::from_secs(5),
+                    finish,
+                    tokio::time::Instant::now(),
+                );
                 let failure = progress.failures.last().unwrap();
                 assert_eq!(failure.stage, stage);
                 assert_eq!(failure.outcome, outcome);
                 assert_eq!(failure.started_at_utc, stage_start);
                 assert_eq!(failure.finished_at_utc, finish);
+                assert_eq!(failure.elapsed, Duration::from_secs(5));
             }
         }
     }
@@ -1562,6 +1602,7 @@ mod tests {
                 failure.finished_at_utc = start + chrono::Duration::seconds(2);
                 failure.retry_after = parse_retry_after_value("60", failure.finished_at_utc);
                 let report = report_from_result(ReportInput {
+                    elapsed: Duration::from_secs(23),
                     started_at_utc: start,
                     finished_at_utc: finish,
                     run_id: "timing",
@@ -1642,12 +1683,7 @@ mod tests {
                     }
                 }
 
-                assert_eq!(
-                    event.duration_ms,
-                    (download || upload).then_some(
-                        if download { 10_000.0 } else { 0.0 } + if upload { 5_000.0 } else { 0.0 }
-                    )
-                );
+                assert_eq!(event.elapsed_ms, Some(23_000.0));
             }
         }
     }
@@ -1716,6 +1752,7 @@ mod tests {
                 let down = expected(&download);
                 let up = expected(&upload);
                 let report = report_from_result(ReportInput {
+                    elapsed: Duration::from_secs(23),
                     started_at_utc: now,
                     finished_at_utc: now,
                     run_id: "tcp",

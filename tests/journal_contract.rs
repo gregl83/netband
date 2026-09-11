@@ -33,7 +33,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     ping_failure.load_run_id = Some("run-1".into());
     ping_failure.target = Some("1.1.1.1".into());
     ping_failure.sequence = Some(7);
-    ping_failure.duration_ms = Some(2_000.125);
+    ping_failure.elapsed_ms = Some(2_000.125);
     ping_failure.packets_sent = Some(1);
     ping_failure.packets_received = Some(0);
     ping_failure.packet_loss_pct = Some(100.0);
@@ -58,7 +58,8 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     bandwidth.provider_kind = Some(ProviderKind::Direct);
     bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_remote_ip = Some("203.0.113.20".parse().unwrap());
-    bandwidth.duration_ms = Some(10_500.0);
+    bandwidth.started_at_utc = Some(timestamp(0) - chrono::TimeDelta::seconds(10));
+    bandwidth.elapsed_ms = Some(12_000.0);
     bandwidth.download_duration_ms = Some(10_500.0);
     bandwidth.download_local_ip = Some("192.0.2.10".parse().unwrap());
     bandwidth.download_mbps = Some(94.06231542857143);
@@ -73,6 +74,8 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     locate.provider_id = Some("mlab".into());
     locate.provider_kind = Some(ProviderKind::Mlab);
     locate.request_url = Some("https://locate.measurementlab.net/v2/nearest?token=secret".into());
+    locate.started_at_utc = Some(timestamp(0));
+    locate.elapsed_ms = Some(2_000.0);
     locate.request_stage = Some(RequestStage::Locate);
     locate.request_attempt = Some(2);
     locate.http_status = Some(429);
@@ -86,6 +89,8 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     websocket.provider_kind = Some(ProviderKind::Direct);
     websocket.request_url = Some("wss://ndt.example.net/custom/upload?key=secret".into());
     websocket.request_direction = Some(netband::model::RequestDirection::Upload);
+    websocket.started_at_utc = Some(timestamp(0));
+    websocket.elapsed_ms = Some(2_000.0);
     websocket.request_stage = Some(RequestStage::WebsocketHandshake);
     websocket.request_attempt = Some(1);
     websocket.http_status = Some(503);

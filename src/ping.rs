@@ -375,7 +375,7 @@ fn build_measurement(
         &target,
         request.sequence,
     );
-    probe.duration_ms = Some(duration.as_secs_f64() * 1_000.0);
+    probe.elapsed_ms = Some(duration.as_secs_f64() * 1_000.0);
     probe.rtt_ms = rtt.map(|value| value.as_secs_f64() * 1_000.0);
     probe.icmp_type = icmp_type;
     probe.icmp_code = icmp_code;

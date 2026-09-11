@@ -52,7 +52,7 @@ csv_event! { event;
     target => event.target,
     sequence => event.sequence,
     outcome => event.outcome,
-    duration_ms => event.duration_ms,
+    elapsed_ms => event.elapsed_ms,
     rtt_ms => event.rtt_ms,
     packets_sent => event.packets_sent,
     packets_received => event.packets_received,

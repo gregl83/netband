@@ -312,6 +312,17 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         );
     }
     for row in &example_rows {
+        if row["event_kind"] == "scheduler" {
+            assert!(row["elapsed_ms"].is_null());
+        } else {
+            let elapsed = row["elapsed_ms"].as_f64().unwrap();
+            assert!(elapsed.is_finite() && elapsed >= 0.0);
+            if row["event_kind"] == "bandwidth" {
+                let active = row["download_duration_ms"].as_f64().unwrap_or(0.0)
+                    + row["upload_duration_ms"].as_f64().unwrap_or(0.0);
+                assert!(elapsed >= active);
+            }
+        }
         if row["event_kind"] != "request_failure" || row["request_stage"] == "locate" {
             assert!(row["request_direction"].is_null());
         } else {

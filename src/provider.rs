@@ -36,6 +36,8 @@ pub enum FailureDisposition {
 
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
+    pub elapsed: Duration,
+    pub(crate) finished_monotonic: tokio::time::Instant,
     pub started_at_utc: DateTime<Utc>,
     pub finished_at_utc: DateTime<Utc>,
     pub direction: Option<RequestDirection>,
@@ -64,6 +66,8 @@ impl RequestFailure {
     ) -> Self {
         let now = Utc::now();
         Self {
+            elapsed: Duration::ZERO,
+            finished_monotonic: tokio::time::Instant::now(),
             started_at_utc: now,
             finished_at_utc: now,
             direction: None,
@@ -96,6 +100,7 @@ pub async fn resolve_endpoints(
     interface: Option<&str>,
 ) -> EndpointResolution {
     let started_at = Utc::now();
+    let started_monotonic = tokio::time::Instant::now();
     let mut resolution = match &config.provider {
         ProviderConfig::Direct(direct) => resolve_direct(config, direct),
         ProviderConfig::Mlab(mlab) if mlab.policy_accepted => {
@@ -119,6 +124,9 @@ pub async fn resolve_endpoints(
         .chain(resolution.terminal.iter_mut())
     {
         failure.started_at_utc = started_at;
+        failure.elapsed = failure
+            .finished_monotonic
+            .saturating_duration_since(started_monotonic);
     }
     resolution
 }
@@ -204,6 +212,7 @@ async fn resolve_mlab(
     };
 
     let received_at = Utc::now();
+    let received_monotonic = tokio::time::Instant::now();
     let status = response.status();
     let retry_after_present = response
         .headers()
@@ -226,6 +235,8 @@ async fn resolve_mlab(
             (false, _) => "Retry-After missing",
         };
         return terminal_resolution(RequestFailure {
+            elapsed: Duration::ZERO,
+            finished_monotonic: received_monotonic,
             started_at_utc: received_at,
             finished_at_utc: received_at,
             direction: None,

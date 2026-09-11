@@ -80,11 +80,6 @@ location and size threshold. Remove `rotate_max_bytes` for daily-only rotation. 
 one fixed file, replace `output_dir` with `output` and remove `rotate_max_bytes`.
 Rotation takes place inside the running process and preserves scheduler accounting.
 
-The previous service example appended to `/var/lib/netband/netband.csv`. Existing
-configurations keep that behavior until edited; the old CSV is not moved or deleted.
-When adopting the new example, install the updated unit as well so systemd creates
-the measurements directory. Keep the existing `state_file` and accounting files.
-
 With `DynamicUser=yes`, systemd protects the state tree under `/var/lib/private` and
 exposes it through `/var/lib/netband`. Use `sudo` to inspect it:
 
@@ -108,11 +103,10 @@ The recorded segment is needed for restart recovery even after the service stops
 Do not use `copytruncate` or rename an active CSV. A size threshold does not bound total
 disk usage, and the separate scheduler accounting ledger also grows over time.
 
-For sizing, a synthetic successful round with three IPv4 targets produced six rows
-and about 1.6 KB of CSV: roughly 28 MB/day at a five-second interval, before bandwidth
-and failure events. This is an illustration, not a storage budget. Target count,
-interval, identifiers, and diagnostics change the total. Measure your actual files,
-choose an archive policy and free-space reserve, and alert on disk-full failures.
+Each ping round emits one row per target. Three targets at a five-second interval
+produce 51,840 ping rows per day, plus bandwidth, request-failure, and scheduler
+records. Storage also depends on identifiers and diagnostics. Measure your actual
+files, choose an archive policy and free-space reserve, and alert on disk-full failures.
 
 ## ICMP permissions
 

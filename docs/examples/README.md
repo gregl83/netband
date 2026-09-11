@@ -19,21 +19,19 @@ collector could supply. **Current collectors leave connection details unavailabl
 The object demonstrates the extension contract; it does not claim Wi-Fi collection is
 implemented. Other fields illustrate current output behavior.
 
-Use `event_kind` to distinguish measurements from operational events. Each ping is
-one complete `ping_probe` row. Request failures join their single bandwidth result
-by `run_id`; `load_run_id` joins the loaded ping to its bandwidth result. Count only
-bandwidth rows when counting bandwidth tests. Missing upload values in partial or
-cancelled results are unavailable, not measured zero throughput. The successful
-upload's retransmitted-byte counter demonstrates a genuine zero.
+For field definitions, availability rules, units, and record relationships, use the
+[data-format reference](../data-format.md). The scenarios illustrate these together:
 
-`server_name` identifies the logical measurement server; `request_url` identifies a
-failed request's endpoint. The redacted query marker illustrates sanitization.
-Scheduler decisions currently use `error_message` for explanatory text, including
-non-error decisions; this example does not introduce the proposed scheduler-action
-field. `request_direction=upload` identifies the upload connection failure even
-though its `request_stage` is `connect`; Locate failures have no direction.
+| Example | Interpretation |
+| --- | --- |
+| Ping records (1–3) | One record per attempt; an unsent probe has no loss percentage |
+| Loaded ping (5) | `load_run_id` links to the bandwidth attempt; `load_phase` identifies download activity |
+| Successful bandwidth (6) | `elapsed_ms` is 20,200 ms; the two active transfer windows total 20,000 ms; upload retransmitted bytes demonstrates measured zero |
+| Upload failure (7–8) | `request_direction=upload` and `request_stage=connect` identify the failure; `request_url` names its endpoint and `server_name` the logical server; `run_id` joins the result |
+| Interrupted bandwidth (9–10) | Download measurements remain available; missing upload measurements are unavailable, not zero |
+| Locate failure (11–13) | Shared discovery has no request direction; the attempt has 100 ms elapsed time despite producing no transfer measurements |
+| Scheduler records (4, 13–14) | Decision explanations use `error_message`; measurement fields, including `elapsed_ms`, are null |
 
-Read the [data-format contract](../data-format.md) for units and field meanings.
 For easier inspection without changing the JSONL file:
 
 ```sh

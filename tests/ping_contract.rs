@@ -229,7 +229,7 @@ async fn timeout_unreachable_permission_and_cancelled_are_detailed() {
         assert_eq!(probe.packets_received, Some(0));
         assert_eq!(probe.packet_loss_pct, (index != 2).then_some(100.0));
     }
-    assert!(probes.iter().all(|event| event.duration_ms.is_some()));
+    assert!(probes.iter().all(|event| event.elapsed_ms.is_some()));
     assert!(probes.iter().all(|event| event.started_at_utc.is_some()));
     assert!(probes.iter().all(|event| event.finished_at_utc.is_some()));
 }
@@ -401,7 +401,7 @@ async fn panicked_probe_keeps_other_targets_and_load_context() {
             .all(|event| event.error_kind == Some(ErrorKind::Protocol)
                 && event.load_phase == Some(LoadPhase::Upload)
                 && event.load_run_id.as_deref() == Some("load-1")
-                && event.duration_ms == Some(0.0))
+                && event.elapsed_ms == Some(0.0))
     );
     assert_eq!(failed[0].packets_sent, Some(0));
     assert_eq!(report.events[1].outcome, Outcome::Success);

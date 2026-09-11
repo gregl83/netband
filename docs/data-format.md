@@ -1,24 +1,31 @@
 # CSV schema and outcomes
 
-The CSV journal is Netband's authoritative output. The current first-release schema version 1 has 54 columns, one header and
-one row per measurement or scheduler/request event. Existing files are appended only
-when their header exactly matches. On startup, an unterminated trailing record is
-discarded and reported to the operational log; completed malformed records fail closed.
-Each completed batch is flushed and synced.
+Netband's v1 journal has 54 fields shared by CSV and JSONL. CSV is the authoritative
+persisted output; JSONL emits the same records to the console. Each record represents
+a ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
-Explicit and automatically named CSV files hold an exclusive OS file lock from before
-header initialization or recovery until the file closes. A competing Netband writer
-fails without changing the file. The OS releases the lock when the process exits,
-including after a crash. Fixed-file output needs no separate lock file. On Linux the
-lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
+## Fields and encoding
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,upload_mbps,upload_bytes,download_bytes,download_duration_ms,upload_duration_ms,download_local_ip,upload_local_ip,download_remote_ip,upload_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
+schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,elapsed_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,upload_mbps,upload_bytes,download_bytes,download_duration_ms,upload_duration_ms,download_local_ip,upload_local_ip,download_remote_ip,upload_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
 UTC with millisecond precision. Durations and RTTs are milliseconds. Throughput is
-decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
+decimal megabits per second (`bytes * 8 / active_window_seconds / 1,000,000`).
+
+JSONL uses the same fields and types, with JSON null instead of empty CSV cells.
+Consumers must tolerate unknown JSON properties and future enum values without
+misclassifying them as success; select known event kinds/outcomes explicitly.
+Integers are decimal counters (some are unsigned 64-bit); readers must preserve their
+precision. Measurement floats must be finite. A zero-duration window has no rate;
+a direction that yields no measurement has unavailable duration, bytes and rate.
+These are distinct from an actual measured zero. Human output is for display, not
+parsing. Reject unsupported schema versions before interpreting measurements.
+
+Schema version `1` identifies this contract independently of the application version.
+Changes to CSV columns, order, types, units, or field meanings require a new schema
+version. Optional connection metadata follows the extension rules below.
 
 | Field | Meaning |
 | --- | --- |
@@ -30,7 +37,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `finished_at_utc` | Event completion time |
 | `interface` | Selected Linux interface; empty means default route |
 | `local_ip` | Netband’s local address actually bound/used for ping or request failures; empty on combined bandwidth rows |
-| `connection_details` | Optional JSON object containing extensible connection metadata; see below |
+| `connection_details` | Optional JSON object describing connection context; unavailable until supplied by a collector |
 | `event_kind` | `ping_probe`, `bandwidth`, `request_failure`, or `scheduler` |
 | `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
 | `load_phase` | Concurrent NDT7 phase at ping-round start: `setup`, `download`, or `upload`; empty without a concurrent test |
@@ -38,10 +45,10 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `target` | Ping target address |
 | `sequence` | ICMP sequence number |
 | `outcome` | Classified result listed below |
-| `duration_ms` | Attempt duration; for bandwidth, sum of direction measurement windows, excluding setup and upload close-handshake waiting |
+| `elapsed_ms` | Monotonic elapsed time in milliseconds: full ping/bandwidth attempt or failed request stage; populated on those events even without a measurement, empty on scheduler events |
 | `rtt_ms` | Successful ICMP round-trip time in milliseconds |
-| `packets_sent` | Probe count represented by the row |
-| `packets_received` | Successful reply count represented by the row |
+| `packets_sent` | Ping-only: 1 if the probe was sent, otherwise 0 |
+| `packets_received` | Ping-only: 1 if a successful reply was received, otherwise 0 |
 | `packet_loss_pct` | Packet loss percentage from 0 through 100; empty when no packet was sent |
 | `icmp_type` | Returned ICMP type when available |
 | `icmp_code` | Returned ICMP code when available |
@@ -75,7 +82,88 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `upload_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the upload connection |
 | `os_error_code` | Operating-system error number when available |
 | `error_kind` | Stable machine-readable failure classification |
-| `error_message` | Sanitized human diagnostic; wording may change in future releases |
+| `error_message` | Sanitized human explanation of a failure or scheduler decision; not a machine-readable contract |
+
+
+## Event context and relationships
+
+| Event kind | Record scope | Field context |
+| --- | --- | --- |
+| `ping_probe` | One attempt against one target | Target, sequence, packet counts, loss, RTT, ICMP details, and any failure; load fields identify a concurrent bandwidth attempt |
+| `bandwidth` | One bandwidth attempt | Provider, logical server, trigger, accounting, and independently available download/upload measurements |
+| `request_failure` | One failed request or stage within a bandwidth attempt | Request URL, direction, stage, attempt number, known endpoints, response details, and diagnostic |
+| `scheduler` | One scheduling decision | Provider, trigger, accounting, applicable cooldown, and decision explanation; measurement fields are unavailable |
+
+Each ping attempt produces one complete `ping_probe`, including failures. Packet
+counts describe that attempt; rolling health calculations remain internal.
+
+Join request failures to their bandwidth summary by `run_id` (and use `event_id` for
+deduplication). An automatic attempt has its own nested `run_id`; use `load_run_id`
+from ping events to join it. Use `request_direction` together with `request_stage`
+for failure attribution. For example, `upload` plus `tls` means upload TLS setup failed. Direction is selected
+before DNS and retained through timeout/cancellation and cleanup; it does not depend
+on URL path naming or whether a measurement was retained. Shared Locate discovery
+and pre-connection admission failures leave direction unavailable/not applicable.
+Do not infer direction from diagnostic prose or count each request as a bandwidth test.
+Rate availability and diagnostics must be assessed independently of overall outcome.
+
+During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
+interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`
+covers discovery and connection work that does not itself represent throughput load.
+The upload phase includes bounded cleanup because buffered traffic can still drain.
+Load-classified pings remain durable measurements but are excluded from the health window
+that can request another bandwidth test. Join `load_run_id` to the bandwidth row's
+`run_id` when analyzing loaded latency. Because rows are committed as operations finish,
+use their timestamps rather than file order when constructing a timeline.
+
+## Timing and throughput
+
+Bandwidth `started_at_utc` is captured before endpoint resolution, and
+`finished_at_utc` when the attempt terminates, including setup and upload cleanup.
+Both are recorded even when the attempt fails, times out, or is cancelled before
+producing measurements. Request-failure rows retain the stage start and failure time.
+UTC timestamps reflect the observed wall clock and can move backward after a clock
+adjustment. Elapsed time and active durations use a monotonic clock.
+
+`download_duration_ms` and `upload_duration_ms` retain each active monotonic window.
+Recompute download as `8 * download_bytes / (1000 * download_duration_ms)` and upload
+as `8 * upload_bytes / (1000 * upload_duration_ms)` in decimal Mb/s. Allow floating-point
+roundoff (relative tolerance `1e-12`); CSV and JSONL do not round measurements for display.
+`elapsed_ms` measures the entire attempt independently, including discovery, connection
+setup, transfer and cleanup. It is available even when both directions fail before
+measurement. It is not the sum of the direction windows and is not used to calculate
+throughput. On request-failure rows it measures that failed stage (Locate covers the
+discovery operation, including redirects), not the whole bandwidth attempt. Timings
+are captured when the operation finishes; delayed journaling does not extend them.
+Scheduler decisions have no measured operation interval and leave `elapsed_ms` empty.
+Do not derive elapsed time by subtracting UTC timestamps: those timestamps have
+millisecond precision and can move backward when the system clock changes.
+
+NDT7 upload accepts new payloads for at most ten seconds after its handshake, or until
+the peer closes or a transport error occurs. Its rate uses locally accepted bytes and
+that active window, not confirmed server receipt. An accepted final payload may still
+drain during cleanup; neither those bytes nor pure close-handshake waiting are counted
+again. Upload cleanup has a separate two-second limit, subject to earlier cancellation
+or the whole-test timeout. A normal active-window deadline is not an error. A stalled
+close handshake produces an `upload_failed` diagnostic with
+`upload close handshake timed out after 2s`; other transport errors retain their details.
+Collected direction measurements remain available even when cleanup fails, so a
+bandwidth `success` means both rates are available, not that transport shutdown was clean.
+
+If the whole-test deadline or shutdown interrupts an attempt, its bandwidth row keeps
+`timeout` or `cancelled` as the outcome and retains all completed direction measurements.
+For example, a completed download remains available when upload setup or transfer is
+interrupted. Upload bytes, rate, and measurement duration are retained once its active
+window ends, even if cleanup is interrupted. An unfinished direction is left empty,
+not reported as zero throughput. Earlier request diagnostics are preserved, and the
+terminal `request_failure` identifies the interrupted stage.
+
+Use field availability alongside `outcome` when analyzing these rows; filtering only
+for `success` discards usable measurements from interrupted attempts. Retained rates
+keep their normal observation points and exclude cleanup time. Interruption does not
+refund a reserved start.
+
+## Server and connection identity
 
 `server_name` and `request_url` serve different purposes. A TLS name can differ from
 an IP-literal URL host; download and upload may use different endpoints. Do not derive
@@ -85,17 +173,27 @@ can carry the machine name and the Locate URL that returned them. `request_url` 
 the configured Locate URL (not necessarily the final redirect URL) or the direction's
 NDT7 URL. A bandwidth summary has a logical name but no single request URL.
 
-See the [synthetic JSONL examples](examples/README.md) for all row types, failure
-paths, partial measurements, and illustrative optional metadata.
+Direction-specific addresses remain empty when that direction has no retained
+measurement. Generic `local_ip` and `remote_ip` are empty on bandwidth summaries;
+use the direction-specific addresses even when both endpoints share a hostname.
+`local_ip` always means Netband’s endpoint and `remote_ip` the server’s endpoint,
+regardless of which side sends the payload.
 
-## Connection details and schema evolution
+## TCP measurements
+
+TCP fields identify their download or upload connection and remain empty when
+unavailable for that direction. Values come from that direction's last parsed TCPInfo
+snapshot, rather than a time series or a difference calculated by Netband. Both sets
+are server-reported: upload retransmitted bytes describe the server's TCP connection
+counters, not client-side upload retransmissions or a packet-loss ratio.
+
+## Connection metadata
 
 `connection_details` is an optional JSON object. JSONL embeds the object directly;
 CSV stores compact JSON text in one normally escaped CSV cell. Unavailable details
 are JSONL `null` and an empty CSV cell, not the strings `"null"` or `"{}"`. An explicit
-empty object `{}` is valid but makes no claim that collection succeeded. Current
-collectors leave this field unavailable. No Wi-Fi/system metadata collection is
-introduced by the schema field.
+empty object `{}` is valid but makes no claim that collection succeeded. Collectors
+leave this field unavailable; Wi-Fi/system metadata collection is not implemented.
 
 A future producer could emit this object (illustrative, not currently collected):
 
@@ -119,32 +217,7 @@ object values; it does not sanitize arbitrary nested metadata. Interface names,
 addresses, network identifiers and timestamps can identify a host or network. Share
 a reviewed copy while retaining the original journal as evidence.
 
-Schema versions are independent of application versions. This is the first supported
-release format and retains `schema_version=1`. Pre-release journals with earlier
-headers are not compatible: preserve them and select a new file/output directory;
-do not rewrite their headers. The writer requires an exact header to append.
-After this freeze, changes to CSV columns, order, types, units or field meanings
-require a schema-version change and a new journal or explicit migration. Optional
-connection-detail properties follow the additive rule above.
-
-JSONL uses the same fields and types, with JSON null instead of empty CSV cells.
-Consumers must tolerate unknown JSON properties and future enum values without
-misclassifying them as success; select known event kinds/outcomes explicitly.
-Integers are decimal counters (some are unsigned 64-bit); readers must preserve their
-precision. Measurement floats must be finite. A zero-duration window has no rate;
-a direction that yields no measurement has unavailable duration, bytes and rate.
-These are distinct from an actual measured zero. Human output is for display, not
-parsing. Reject unsupported schema versions before interpreting measurements.
-
-Join request failures to their bandwidth summary by `run_id` (and use `event_id` for
-deduplication). An automatic attempt has its own nested `run_id`; use `load_run_id`
-from ping events to join it. Use `request_direction` together with `request_stage` for failure attribution. For
-example, `upload` plus `tls` means upload TLS setup failed. Direction is selected
-before DNS and retained through timeout/cancellation and cleanup; it does not depend
-on URL path naming or whether a measurement was retained. Shared Locate discovery
-and pre-connection admission failures leave direction unavailable/not applicable.
-Do not infer direction from diagnostic prose or count each request as a bandwidth test.
-Rate availability and diagnostics must be assessed independently of overall outcome.
+## Diagnostics
 
 `error_kind` is empty/null without a classified error; its emitted values are:
 `icmp_timeout`, `icmp_unreachable`, `permission_denied`, `dns`, `connect`, `tls`,
@@ -152,6 +225,43 @@ Rate availability and diagnostics must be assessed independently of overall outc
 `provider_cooldown`, `daily_cap`, `cancelled`, `timeout`, `io`, `protocol`, `internal`.
 `os_error_code` is platform-specific; `error_message` is sanitized explanatory prose
 and is not a stable machine contract.
+
+Scheduler events also use `error_message` for ordinary decision explanations; a
+nonempty message does not itself indicate failure.
+
+## Outcomes
+
+| Outcome | Meaning |
+| --- | --- |
+| `success` | Requested operation completed |
+| `partial` | One bandwidth direction is available without an overriding timeout, cancellation, or provider-wide failure |
+| `timeout` | Configured operation deadline expired |
+| `unreachable` | ICMP/network unreachable response |
+| `permission_denied` | Host denied the required socket or file operation |
+| `cancelled` | Shutdown cancelled the active operation |
+| `error` | Classified failure not represented by another outcome |
+| `no_capacity` | Provider reported no usable server/capacity |
+| `rate_limited` | Provider requested traffic reduction |
+| `scheduled` | Scheduler admitted an opportunity |
+| `rescheduled` | Remaining opportunities were recalculated |
+| `deferred` | Opportunity retained for later eligibility |
+| `suppressed` | Cap, spacing, cooldown, or policy permanently blocked this opportunity |
+| `expired` | Pending opportunity exceeded its lifetime/attempt limit |
+
+Failures are data. A failed ping still produces one `ping_probe`; HTTP,
+TLS, WebSocket, download, and upload failures produce sanitized `request_failure` rows.
+
+## Journal storage
+
+Existing CSV files are appended only when their header exactly matches the schema. On startup, an unterminated trailing record is
+discarded and reported to the operational log; completed malformed records fail closed.
+Each completed batch is flushed and synced.
+
+Explicit and automatically named CSV files hold an exclusive OS file lock from before
+header initialization or recovery until the file closes. A competing Netband writer
+fails without changing the file. The OS releases the lock when the process exits,
+including after a crash. Fixed-file output needs no separate lock file. On Linux the
+lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
 
 ## Rotating directory output
 
@@ -203,89 +313,10 @@ automatically compressed or deleted. Rotation limits individual segment growth s
 to the batch exception; it does not bound total storage. Keep scheduler accounting and
 scientific dataset manifests/checksums separate from any operator archive cleanup.
 
-This changes the earlier directory behavior of one file per process start and permits
-only one directory writer per directory. Fixed-file rotation behavior is unchanged. Existing timestamped CSVs without a marker are retained untouched;
-validate them independently before treating them as complete archives.
+## Reading examples
 
-## Bandwidth field limitations
-
-Bandwidth `started_at_utc` is captured before endpoint resolution, and
-`finished_at_utc` when the attempt terminates, including setup and upload cleanup.
-Both are recorded even when the attempt fails, times out, or is cancelled before
-producing measurements. Request-failure rows retain the stage start and failure time.
-UTC timestamps reflect the observed wall clock and can move backward after a clock
-adjustment. Throughput and active durations use monotonic elapsed time.
-
-`download_duration_ms` and `upload_duration_ms` retain each active monotonic window.
-Recompute download as `8 * download_bytes / (1000 * download_duration_ms)` and upload
-as `8 * upload_bytes / (1000 * upload_duration_ms)` in decimal Mb/s. Allow floating-point
-roundoff (relative tolerance `1e-12`); CSV and JSONL do not round measurements for display.
-`duration_ms` is their sum, or unavailable when neither direction was measured.
-The six direction-specific duration/address fields remain empty for an unavailable
-direction. Generic `local_ip` and `remote_ip` are empty on bandwidth summaries;
-use the direction-specific addresses even when both endpoints share a hostname.
-`local_ip` always means Netband’s endpoint and `remote_ip` the server’s endpoint,
-regardless of which side sends the payload.
-TCP fields identify their
-download or upload connection and remain empty when unavailable for that direction.
-Values come from that direction's last parsed TCPInfo snapshot, rather than a time series
-or a difference calculated by Netband. Both sets are server-reported: upload retransmitted bytes describe the server's TCP
-connection counters, not client-side upload retransmissions or a packet-loss ratio.
-
-## Outcomes
-
-| Outcome | Meaning |
-| --- | --- |
-| `success` | Requested operation completed |
-| `partial` | One bandwidth direction is available without an overriding timeout, cancellation, or provider-wide failure |
-| `timeout` | Configured operation deadline expired |
-| `unreachable` | ICMP/network unreachable response |
-| `permission_denied` | Host denied the required socket or file operation |
-| `cancelled` | Shutdown cancelled the active operation |
-| `error` | Classified failure not represented by another outcome |
-| `no_capacity` | Provider reported no usable server/capacity |
-| `rate_limited` | Provider requested traffic reduction |
-| `scheduled` | Scheduler admitted an opportunity |
-| `rescheduled` | Remaining opportunities were recalculated |
-| `deferred` | Opportunity retained for later eligibility |
-| `suppressed` | Cap, spacing, cooldown, or policy permanently blocked this opportunity |
-| `expired` | Pending opportunity exceeded its lifetime/attempt limit |
-
-Failures are data. A failed ping still produces one `ping_probe`; HTTP,
-TLS, WebSocket, download, and upload failures produce sanitized `request_failure` rows.
-
-NDT7 upload accepts new payloads for at most ten seconds after its handshake, or until
-the peer closes or a transport error occurs. Its rate uses locally accepted bytes and
-that active window, not confirmed server receipt. An accepted final payload may still
-drain during cleanup; neither those bytes nor pure close-handshake waiting are counted
-again. Upload cleanup has a separate two-second limit, subject to earlier cancellation
-or the whole-test timeout. A normal active-window deadline is not an error. A stalled
-close handshake produces an `upload_failed` diagnostic with
-`upload close handshake timed out after 2s`; other transport errors retain their details.
-Collected direction measurements remain available even when cleanup fails, so a
-bandwidth `success` means both rates are available, not that transport shutdown was clean.
-
-If the whole-test deadline or shutdown interrupts an attempt, its bandwidth row keeps
-`timeout` or `cancelled` as the outcome and retains all completed direction measurements.
-For example, a completed download remains available when upload setup or transfer is
-interrupted. Upload bytes, rate, and measurement duration are retained once its active
-window ends, even if cleanup is interrupted. An unfinished direction is left empty,
-not reported as zero throughput. Earlier request diagnostics are preserved, and the
-terminal `request_failure` identifies the interrupted stage.
-
-Use field availability alongside `outcome` when analyzing these rows; filtering only
-for `success` discards usable measurements from interrupted attempts. Retained rates
-keep their normal observation points and exclude cleanup time. Interruption does not
-refund a reserved start or change the CSV schema.
-
-During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
-interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`
-covers discovery and connection work that does not itself represent throughput load.
-The upload phase includes bounded cleanup because buffered traffic can still drain.
-Load-classified pings remain durable measurements but are excluded from the health window
-that can request another bandwidth test. Join `load_run_id` to the bandwidth row's
-`run_id` when analyzing loaded latency. Because rows are committed as operations finish,
-use their timestamps rather than file order when constructing a timeline.
+See the [synthetic JSONL examples](examples/README.md) for every event kind, failure
+paths, partial measurements, and illustrative optional metadata.
 
 Use an independent CSV implementation when ingesting journals. For example:
 
@@ -298,8 +329,3 @@ assert rows and "ping_probe" in {r["event_kind"] for r in rows}
 print(f"parsed {len(rows)} rows with {len(rows[0])} fields")
 PY
 ```
-
-Each ping attempt produces exactly one `ping_probe` event, including sent/received
-counts, per-attempt loss availability, RTT, ICMP details, and any failure. No
-`ping_summary` events are emitted. Rolling health calculations remain internal;
-scheduler decisions and request failures remain separate events in the mixed journal.
