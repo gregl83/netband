@@ -253,7 +253,7 @@ async fn durable_state_errors_stop_before_provider_activity() {
 #[tokio::test]
 async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership() {
     use netband::config::OutputTarget;
-    use netband::journal::Journal;
+    use netband::journal::JournalWriter;
     for signal in ["-INT", "-TERM"] {
         let fixture = CommandFixture::new().await;
         let mut child = fixture.spawn();
@@ -272,7 +272,7 @@ async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership()
             && row["daily_runs_used"] == "1"));
         let output = fixture.root.path().join("results.csv");
         let (_journal, _) =
-            Journal::open_at(&OutputTarget::File(output), chrono::Utc::now()).unwrap();
+            JournalWriter::open_at(&OutputTarget::File(output), chrono::Utc::now()).unwrap();
         let mut tail = Vec::new();
         tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut tail))
             .await

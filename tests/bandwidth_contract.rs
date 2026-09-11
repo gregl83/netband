@@ -1316,7 +1316,7 @@ async fn reservation_failure_and_prior_cancellation_never_start_connections() {
 
 #[tokio::test]
 async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
-    use netband::journal::Journal;
+    use netband::journal::JournalWriter;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1360,7 +1360,7 @@ async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
     let event = report.events.last().unwrap();
     let json: serde_json::Value =
         serde_json::from_str(&netband::console::render_jsonl(event).unwrap()).unwrap();
-    let mut journal = Journal::from_writer(Vec::new()).unwrap();
+    let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
     journal.append_batch(&report.events).unwrap();
     let bytes = journal.into_inner().unwrap();
     let mut csv = csv::Reader::from_reader(bytes.as_slice());

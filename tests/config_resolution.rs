@@ -682,3 +682,98 @@ fn direct_tls_options_apply_when_either_endpoint_is_secure() {
         }
     }
 }
+
+#[test]
+fn rotating_output_defaults_precedence_and_validation() {
+    let dir = tempdir().unwrap();
+    let ctx = context(dir.path().to_owned(), false);
+    let defaults = resolve(&parse(&["netband", "run"]), &ctx).unwrap();
+    assert_eq!(
+        defaults.output,
+        OutputTarget::Directory(dir.path().to_owned())
+    );
+    assert_eq!(defaults.rotate_max_bytes, None);
+    assert!(defaults.summary().contains("rotation=daily-utc"));
+    let config = dir.path().join("rotation.toml");
+    std::fs::write(
+        &config,
+        "output_dir = 'measurements'\nrotate_max_bytes = 4096\n",
+    )
+    .unwrap();
+    let args = ["netband", "--config", config.to_str().unwrap(), "run"];
+    let configured = resolve(&parse(&args), &ctx).unwrap();
+    assert_eq!(
+        configured.output,
+        OutputTarget::Directory(dir.path().join("measurements"))
+    );
+    assert_eq!(configured.rotate_max_bytes, Some(4096));
+    let overridden = resolve(
+        &parse(&[
+            "netband",
+            "--config",
+            config.to_str().unwrap(),
+            "--output-dir",
+            "other",
+            "--rotate-max-bytes",
+            "8192",
+            "run",
+        ]),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.output,
+        OutputTarget::Directory(dir.path().join("other"))
+    );
+    assert_eq!(overridden.rotate_max_bytes, Some(8192));
+    assert!(overridden.summary().contains("rotate_max_bytes=8192"));
+    assert!(
+        resolve(
+            &parse(&[
+                "netband",
+                "--config",
+                config.to_str().unwrap(),
+                "--output",
+                "fixed.csv",
+                "run",
+            ]),
+            &ctx
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("requires directory output")
+    );
+    for text in [
+        "rotate_max_bytes = 0",
+        "rotate_max_bytes = -1",
+        "rotate_max_bytes = '64MiB'",
+        "output = 'fixed.csv'\nrotate_max_bytes = 1024",
+    ] {
+        std::fs::write(&config, text).unwrap();
+        assert!(resolve(&parse(&args), &ctx).is_err(), "{text}");
+    }
+    assert!(resolve(&parse(&["netband", "--rotate-max-bytes", "0", "run"]), &ctx).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "netband",
+            "--output",
+            "fixed.csv",
+            "--rotate-max-bytes",
+            "1",
+            "run"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "netband",
+            "--rotate-max-bytes",
+            "18446744073709551616",
+            "run"
+        ])
+        .is_err()
+    );
+    assert!(!dir.path().join("measurements").exists());
+    assert!(!dir.path().join("fixed.csv").exists());
+    assert!(!dir.path().join("state").exists());
+}

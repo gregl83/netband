@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use chrono::{TimeZone, Utc};
 use netband::cli::ConsoleMode;
 use netband::console::{Console, ConsoleDiagnostic, ConsoleSink, human_line, render_jsonl};
-use netband::journal::{Journal, OutputCoordinator};
+use netband::journal::{JournalWriter, OutputCoordinator};
 use netband::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
     TriggerReason,
@@ -220,7 +220,7 @@ async fn full_queue_drops_only_console_events_and_shutdown_is_bounded() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn blocked_console_drops_do_not_remove_durable_csv_rows() {
-    let journal = Journal::from_writer(Vec::new()).unwrap();
+    let journal = JournalWriter::from_writer(Vec::new()).unwrap();
     let console = Console::spawn(ConsoleMode::Jsonl, PendingWriter, 1, |_| {});
     let mut coordinator = OutputCoordinator::new(journal, console);
     for index in 0..10 {

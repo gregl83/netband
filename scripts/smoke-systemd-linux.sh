@@ -20,7 +20,7 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "error: run this smoke test as root" >&2
   exit 2
 fi
-for command in systemctl systemd-analyze journalctl; do
+for command in systemctl systemd-analyze journalctl python3; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "error: required command not found: $command" >&2
     exit 2
@@ -39,8 +39,12 @@ systemctl daemon-reload
 
 wait_ready() {
   for _ in $(seq 1 100); do
-    if systemctl is-active --quiet netband.service && [[ -s /var/lib/netband/netband.csv ]]; then
-      return 0
+    if systemctl is-active --quiet netband.service && [[ -s /var/lib/netband/measurements/.netband-active ]]; then
+      local segment
+      read -r segment </var/lib/netband/measurements/.netband-active
+      if [[ -s "/var/lib/netband/measurements/$segment" ]]; then
+        return 0
+      fi
     fi
     sleep 0.1
   done
@@ -50,16 +54,41 @@ wait_ready() {
 
 systemctl start netband.service
 wait_ready
+first_segment="$(cat /var/lib/netband/measurements/.netband-active)"
 systemctl stop netband.service
 systemctl is-active --quiet netband.service && exit 1 || true
 systemctl start netband.service
 wait_ready
+second_segment="$(cat /var/lib/netband/measurements/.netband-active)"
+[[ "$first_segment" != "$second_segment" ]]
 before_restart="$(systemctl show netband.service -p MainPID --value)"
 systemctl restart netband.service
 wait_ready
 after_restart="$(systemctl show netband.service -p MainPID --value)"
 [[ "$before_restart" != "$after_restart" ]]
+third_segment="$(cat /var/lib/netband/measurements/.netband-active)"
+[[ "$second_segment" != "$third_segment" ]]
 systemctl stop netband.service
+
+python3 - "$first_segment" "$second_segment" "$third_segment" <<'PYCSV'
+import csv
+import pathlib
+import sys
+
+root = pathlib.Path("/var/lib/netband/measurements")
+identifiers = set()
+for name in sys.argv[1:]:
+    with (root / name).open(newline="", encoding="utf-8") as stream:
+        rows = csv.DictReader(stream)
+        assert rows.fieldnames and rows.fieldnames[0] == "schema_version"
+        for row in rows:
+            assert None not in row and None not in row.values()
+            assert row["schema_version"] == "1"
+            identity = (row["run_id"], row["event_id"])
+            assert identity not in identifiers
+            identifiers.add(identity)
+print("systemd segment restart and CSV validation: passed")
+PYCSV
 
 journal_output="$(mktemp)"
 trap 'rm -f "$journal_output"' EXIT

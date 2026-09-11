@@ -110,7 +110,7 @@ where
         identifier: (u64::from(std::process::id()) ^ run_number) as u16,
         health: HealthConfig::from(&config.bandwidth.trigger),
     };
-    let (journal, output_path) = Journal::open_at(&config.output, started_at)?;
+    let journal = Journal::open_at(&config.output, config.rotate_max_bytes, started_at)?;
     let console = Console::spawn(
         config.console,
         console_writer,
@@ -133,14 +133,15 @@ where
         monitor_ping(transport, settings, &mut coordinator, shutdown).await
     };
     let flush_result = coordinator.flush();
+    let (journal, console) = coordinator.into_parts();
+    let output_path = journal.path().to_owned();
     if flush_result.is_ok() {
         tracing::info!(path = %output_path.display(), "measurement journal flushed");
     }
-    let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    flush_result?;
     let monitor_stats = result?;
+    flush_result?;
     Ok(PingMonitorExecution {
         output_path,
         monitor_stats,
@@ -192,7 +193,7 @@ where
         identifier: (u64::from(std::process::id()) ^ run_number) as u16,
         health: HealthConfig::from(&config.bandwidth.trigger),
     };
-    let (journal, output_path) = Journal::open_at(&config.output, started_at)?;
+    let journal = Journal::open_at(&config.output, config.rotate_max_bytes, started_at)?;
     let console = Console::spawn(
         config.console,
         console_writer,
@@ -216,14 +217,15 @@ where
     )
     .await;
     let flush_result = coordinator.flush();
+    let (journal, console) = coordinator.into_parts();
+    let output_path = journal.path().to_owned();
     if flush_result.is_ok() {
         tracing::info!(path = %output_path.display(), "measurement journal flushed");
     }
-    let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    flush_result?;
     let monitor_stats = result?;
+    flush_result?;
     Ok(PingMonitorExecution {
         output_path,
         monitor_stats,

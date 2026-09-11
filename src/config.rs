@@ -40,6 +40,7 @@ pub struct ResolvedConfig {
     pub verbosity: Verbosity,
     pub interfaces: Vec<String>,
     pub output: OutputTarget,
+    pub rotate_max_bytes: Option<u64>,
     pub state_file: PathBuf,
     pub shutdown_grace: Duration,
     pub no_bandwidth: bool,
@@ -122,6 +123,7 @@ struct FileConfig {
     interfaces: Option<Vec<String>>,
     output: Option<PathBuf>,
     output_dir: Option<PathBuf>,
+    rotate_max_bytes: Option<u64>,
     state_file: Option<PathBuf>,
     shutdown_grace: Option<String>,
     ping: Option<FilePing>,
@@ -268,6 +270,15 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
         file.output_dir.as_ref(),
         &context.current_dir,
     )?;
+    let rotate_max_bytes = cli.options.rotate_max_bytes.or(file.rotate_max_bytes);
+    if let Some(limit) = rotate_max_bytes {
+        if limit == 0 {
+            return Err(error("rotate_max_bytes must be positive"));
+        }
+        if matches!(output, OutputTarget::File(_)) {
+            return Err(error("rotate_max_bytes requires directory output"));
+        }
+    }
     let state_file = make_absolute(
         cli.options
             .state_file
@@ -309,6 +320,7 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
             .unwrap_or(Verbosity::Info),
         interfaces,
         output,
+        rotate_max_bytes,
         state_file,
         shutdown_grace,
         no_bandwidth: cli.options.no_bandwidth,
@@ -905,6 +917,15 @@ impl ResolvedConfig {
             }
         );
         let _ = writeln!(summary, "output={output}");
+        if matches!(self.output, OutputTarget::Directory(_)) {
+            let _ = writeln!(summary, "rotation=daily-utc");
+            let _ = writeln!(
+                summary,
+                "rotate_max_bytes={}",
+                self.rotate_max_bytes
+                    .map_or_else(|| "unset".to_owned(), |bytes| bytes.to_string())
+            );
+        }
         let _ = writeln!(summary, "state_file={}", self.state_file.display());
         let _ = writeln!(
             summary,

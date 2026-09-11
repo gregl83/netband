@@ -9,7 +9,7 @@ Each completed batch is flushed and synced.
 Explicit and automatically named CSV files hold an exclusive OS file lock from before
 header initialization or recovery until the file closes. A competing Netband writer
 fails without changing the file. The OS releases the lock when the process exits,
-including after a crash; there is no separate CSV lock file to remove. On Linux the
+including after a crash. Fixed-file output needs no separate lock file. On Linux the
 lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
 
 ```csv
@@ -67,6 +67,61 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `os_error_code` | Operating-system error number when available |
 | `error_kind` | Stable machine-readable failure classification |
 | `error_message` | Sanitized human diagnostic; wording may change in future releases |
+
+## Rotating directory output
+
+`--output FILE` appends to one CSV across restarts and never rotates.
+`--output-dir DIR` (or the current directory when neither option is supplied) creates
+segments named `netband-YYYYMMDDTHHMMSS.sssZ.csv`. A numeric suffix resolves collisions
+without overwriting files. Every startup creates a fresh segment.
+
+Directory output rotates during collection at the first write on a later UTC date.
+An optional `--rotate-max-bytes BYTES` also rotates before the next batch would exceed
+that size, counting the header and actual encoded bytes. Each batch stays together;
+a batch larger than the limit is written to one segment. Empty batches do not rotate,
+and idle days do not create intervening files. A backward clock adjustment does not
+reopen older segments or reset the running writer's date boundary.
+
+Segment selection uses journal write time. Event timestamps remain unchanged, so a
+measurement spanning midnight can have records in different segments. Group records
+by `run_id` and `event_id`, and parse each CSV separately to account for its header.
+Filenames do not establish measurement order after wall-clock adjustments.
+
+Rotation syncs the previous segment and initializes a complete, synced header before
+publishing the next CSV. A hard link publishes the staged file without overwriting an
+existing name. Unix builds sync directory metadata before committing events. This
+requires a local filesystem supporting file locks, hard links, and the relevant sync
+operations; it does not establish durability on arbitrary network filesystems or
+against hardware that ignores sync requests. Rotation does not restart scheduling,
+but disk I/O can delay commits. Creation, locking, write, and sync failures are fatal.
+
+Directory mode holds `.netband-output.lock` for the process lifetime. Only one Netband
+directory writer may use that directory. `.netband-active` records the current CSV
+basename and is atomically replaced and synced before that segment receives events.
+On restart, Netband validates and recovers only that recorded segment before starting
+a new file. Missing segments, invalid markers/headers, and malformed complete rows
+fail closed; an incomplete final row is discarded with a diagnostic, as in fixed-file
+mode. A competing explicit-file writer prevents recovery while it holds the CSV lock.
+Historical CSVs are not scanned or modified.
+
+Do not delete the lock or marker files, or move the recorded segment independently.
+The lock file can remain after exit: the OS lock is released automatically. Temporary
+`.netband-header.tmp` and `.netband-active.tmp` files can remain after a failure and are
+reused or replaced on the next successful startup. A failure before the first event
+can leave a valid header-only CSV. Preserve damaged recovery evidence for inspection;
+restore the recorded segment from a trusted copy or start in a fresh directory after
+preserving the old directory. Do not bypass corruption by deleting the marker.
+
+Acknowledgement follows batch sync. A crash can leave a complete but unacknowledged
+row; automatic replay of uncertain batches is not provided. Closed segments are never
+automatically compressed or deleted. Rotation limits individual segment growth subject
+to the batch exception; it does not bound total storage. Keep scheduler accounting and
+scientific dataset manifests/checksums separate from any operator archive cleanup.
+
+This changes the earlier directory behavior of one file per process start and permits
+only one directory writer per directory. Fixed-file behavior and CSV schema version 1
+are unchanged. Existing timestamped CSVs without a marker are retained untouched;
+validate them independently before treating them as complete archives.
 
 ## Bandwidth field limitations
 

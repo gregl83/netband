@@ -1,3 +1,6 @@
+mod output;
+pub use output::Journal;
+
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -84,18 +87,21 @@ impl JournalError {
     }
 }
 
-pub struct Journal<W: Write> {
+/// Serialize CSV records and flush/sync a single writer.
+pub struct JournalWriter<W: Write> {
     writer: csv::Writer<W>,
     sync: Option<fn(&W) -> io::Result<()>>,
 }
 
-impl<W: Write> fmt::Debug for Journal<W> {
+impl<W: Write> fmt::Debug for JournalWriter<W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Journal").finish_non_exhaustive()
+        formatter
+            .debug_struct("JournalWriter")
+            .finish_non_exhaustive()
     }
 }
 
-impl<W: Write> Journal<W> {
+impl<W: Write> JournalWriter<W> {
     pub fn from_writer(writer: W) -> Result<Self, JournalError> {
         let mut journal = Self::without_header(writer);
         journal.writer.write_record(CSV_FIELDS)?;
@@ -136,7 +142,7 @@ impl<W: Write> Journal<W> {
     }
 }
 
-impl Journal<File> {
+impl JournalWriter<File> {
     pub fn open_at(
         output: &OutputTarget,
         started_at: DateTime<Utc>,
@@ -281,13 +287,13 @@ pub trait JournalSink {
     }
 }
 
-impl<W: Write> JournalSink for Journal<W> {
+impl<W: Write> JournalSink for JournalWriter<W> {
     fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
-        Journal::append_batch(self, events)
+        JournalWriter::append_batch(self, events)
     }
 
     fn flush(&mut self) -> Result<(), JournalError> {
-        Journal::flush(self)
+        JournalWriter::flush(self)
     }
 }
 

@@ -14,7 +14,17 @@ netband --config examples/netband.toml --ping-interval 10s config check
 
 The complete default-oriented file is [examples/netband.toml](../examples/netband.toml).
 The service file is [packaging/netband.toml](../packaging/netband.toml). `output` and
-`output_dir` are mutually exclusive.
+`output_dir` are mutually exclusive. `rotate_max_bytes` requires directory output;
+combining it with a resolved fixed-file target is an error, including when the size
+setting comes from TOML and `--output` comes from the CLI. Remove the size setting to
+switch to a fixed file. Sizes are integer bytes, not strings such as `64MiB`.
+
+Directory output rotates before the first nonempty batch on a later UTC date, or
+before the next batch would exceed `rotate_max_bytes`. A batch stays together, so a
+segment may exceed the limit by one batch. The default has daily rotation but no size
+trigger; the service example adds a 64 MiB threshold. Files are never auto-deleted.
+Use one output directory per running process. Directories must already exist.
+See [CSV rotation and recovery](data-format.md#rotating-directory-output).
 
 ## CLI options and defaults
 
@@ -31,8 +41,9 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--ping-timeout DURATION` | `ping.timeout` | `2s` per probe |
 | `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
 | `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
-| `--output FILE` | `output` | No fixed file; create a timestamped CSV in the current directory |
-| `--output-dir DIR` | `output_dir` | Current directory when neither output option is set |
+| `--output FILE` | `output` | Unset; when selected, append to a single CSV without rotation |
+| `--output-dir DIR` | `output_dir` | Current directory; create CSV segments and rotate daily at UTC midnight |
+| `--rotate-max-bytes BYTES` | `rotate_max_bytes` | Unset; optional positive soft size limit for directory output, including the header |
 | `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
 | `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
 | `--ndt-provider mlab\|direct` | `bandwidth.provider` | `mlab` |

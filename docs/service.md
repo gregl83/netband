@@ -2,7 +2,7 @@
 
 The example service runs Netband in the foreground under systemd as a non-root dynamic
 user. systemd owns `/var/lib/netband`, stdout is disabled, and operational stderr goes
-to journald. Measurements remain exclusively in the configured CSV file.
+to journald. Measurements remain exclusively in the configured CSV segments.
 
 ## Install
 
@@ -57,8 +57,8 @@ sudo systemctl stop netband.service
 sudo systemctl restart netband.service
 ```
 
-The unit uses `DynamicUser=yes`, `StateDirectory=netband`, and only `CAP_NET_RAW` in its
-ambient/bounding capability set. `ProtectSystem=strict` makes the state directory the
+The unit uses `DynamicUser=yes`, `StateDirectory=netband netband/measurements`, and only
+`CAP_NET_RAW` in its ambient/bounding capability set. `ProtectSystem=strict` makes the state directory the
 persistent writable location. Keep `TimeoutStopSec` longer than Netband's configured
 `shutdown_grace` (30 seconds by default).
 
@@ -69,25 +69,50 @@ scheduler decisions, and shutdown diagnostics remain available there.
 
 ## Measurements and logs
 
-The packaged configuration writes measurements to `/var/lib/netband/netband.csv`.
-Change `output` in `/etc/netband/netband.toml` to select another file within the
-service's writable state directory.
+The packaged configuration writes rotating CSVs under
+`/var/lib/netband/measurements/`. It rotates daily at UTC midnight or before a batch
+would exceed 64 MiB (`rotate_max_bytes = 67108864`), whichever comes first. Complete
+batches stay together, so the size threshold is soft. systemd provisions both the
+state root and measurements subdirectory with mode 0700.
 
-With `DynamicUser=yes` and `StateDirectory=netband`, systemd stores the directory at
-`/var/lib/private/netband` and exposes it through `/var/lib/netband` as a symlink.
-The CSV at either path is the same file. The private parent protects data when dynamic
-user IDs are reused; use `sudo` to inspect it from an administrator's shell.
+Change `output_dir` and `rotate_max_bytes` in `/etc/netband/netband.toml` to choose the
+location and size threshold. Remove `rotate_max_bytes` for daily-only rotation. To use
+one fixed file, replace `output_dir` with `output` and remove `rotate_max_bytes`.
+Rotation takes place inside the running process and preserves scheduler accounting.
+
+The previous service example appended to `/var/lib/netband/netband.csv`. Existing
+configurations keep that behavior until edited; the old CSV is not moved or deleted.
+When adopting the new example, install the updated unit as well so systemd creates
+the measurements directory. Keep the existing `state_file` and accounting files.
+
+With `DynamicUser=yes`, systemd protects the state tree under `/var/lib/private` and
+exposes it through `/var/lib/netband`. Use `sudo` to inspect it:
 
 ```sh
-sudo tail -f /var/lib/netband/netband.csv
+sudo ls -lah /var/lib/netband/measurements/
 sudo journalctl -u netband.service -f
 sudo journalctl -u netband.service -n 100 --no-pager
 sudo journalctl -u netband.service -b
 ```
 
-The journal contains operational diagnostics. CSV contains measurement and scheduler
-events; use a [CSV reader](data-format.md) for analysis. Press `Ctrl-C` to stop following
-output, or `q` to exit the journal pager.
+The operational log reports each new segment path. `.netband-active` in the measurement
+directory records the current CSV basename. Following one CSV with `tail -f` does not
+switch to new segments; use a [CSV reader](data-format.md#rotating-directory-output)
+across the directory for analysis. Press `Ctrl-C` to stop following logs, or `q` to exit
+the journal pager.
+
+All segments are retained. Monitor available disk space and journal errors, and archive
+closed segments under an explicit operator policy. Do not remove the segment named in
+`.netband-active`, any `.netband-*` control files, or scheduler state and accounting.
+The recorded segment is needed for restart recovery even after the service stops.
+Do not use `copytruncate` or rename an active CSV. A size threshold does not bound total
+disk usage, and the separate scheduler accounting ledger also grows over time.
+
+For sizing, a synthetic successful round with three IPv4 targets produced six rows
+and about 1.6 KB of CSV: roughly 28 MB/day at a five-second interval, before bandwidth
+and failure events. This is an illustration, not a storage budget. Target count,
+interval, identifiers, and diagnostics change the total. Measure your actual files,
+choose an archive policy and free-space reserve, and alert on disk-full failures.
 
 ## ICMP permissions
 
@@ -186,7 +211,7 @@ provider cooldown, or five-attempt expiry. Direct endpoints never fall back to M
 
 **No measurements in journald**
 
-This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/netband.csv`
+This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/measurements/`
 with a CSV reader; journald contains operational diagnostics only.
 
 ## State recovery

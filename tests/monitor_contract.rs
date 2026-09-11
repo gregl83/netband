@@ -305,3 +305,133 @@ async fn closed_stdout_disables_console_without_stopping_measurements() {
     assert_eq!(journal.batches.load(Ordering::SeqCst), 4);
     assert!(console_stats.disabled);
 }
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn rotating_monitor_drains_inflight_round_and_reports_final_segment() {
+    use clap::Parser;
+    use netband::cli::Cli;
+    use netband::config::{ResolveContext, resolve};
+    use netband::monitor::execute_ping_monitor;
+
+    let root = tempfile::tempdir().unwrap();
+    let cli = Cli::try_parse_from([
+        "netband",
+        "--no-bandwidth",
+        "--rotate-max-bytes",
+        "1",
+        "--ping-target",
+        "192.0.2.1",
+        "--ping-interval",
+        "5s",
+        "run",
+    ])
+    .unwrap();
+    let config = resolve(
+        &cli,
+        &ResolveContext {
+            stdout_is_terminal: false,
+            current_dir: root.path().to_owned(),
+            state_dir: root.path().join("state"),
+        },
+    )
+    .unwrap();
+    let untouched = root.path().join("scheduler.json");
+    std::fs::write(&untouched, "untouched accounting sentinel").unwrap();
+    let transport = Arc::new(FakeTransport::new(
+        Duration::from_secs(1),
+        ResultMode::Success,
+    ));
+    let (shutdown_tx, shutdown) = cancellation_channel();
+    let task_transport = transport.clone();
+    let task = tokio::spawn(async move {
+        execute_ping_monitor(&config, task_transport, tokio::io::sink(), shutdown).await
+    });
+    wait_for_calls(&transport.calls, 1).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    wait_for_calls(&transport.calls, 2).await;
+    shutdown_tx.send(true).unwrap();
+    let execution = task.await.unwrap().unwrap();
+    assert_eq!(execution.monitor_stats.rounds_started, 2);
+    assert_eq!(execution.monitor_stats.rounds_completed, 2);
+    let paths: Vec<_> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "csv"))
+        .collect();
+    assert_eq!(paths.len(), 2);
+    let mut identifiers = HashSet::new();
+    for path in &paths {
+        let mut reader = csv::Reader::from_path(path).unwrap();
+        let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert!(identifiers.insert((row[1].to_owned(), row[2].to_owned())));
+        }
+    }
+    let last = std::fs::read_to_string(root.path().join(".netband-active")).unwrap();
+    assert_eq!(execution.output_path, root.path().join(last.trim()));
+    assert_eq!(
+        std::fs::read_to_string(untouched).unwrap(),
+        "untouched accounting sentinel"
+    );
+    assert!(!root.path().join("state").exists());
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn rotation_failure_stops_monitor_and_preserves_original_error() {
+    use clap::Parser;
+    use netband::cli::Cli;
+    use netband::config::{ResolveContext, resolve};
+    use netband::monitor::execute_ping_monitor;
+
+    let root = tempfile::tempdir().unwrap();
+    let config = resolve(
+        &Cli::try_parse_from([
+            "netband",
+            "--no-bandwidth",
+            "--rotate-max-bytes",
+            "1",
+            "--ping-target",
+            "192.0.2.1",
+            "run",
+        ])
+        .unwrap(),
+        &ResolveContext {
+            stdout_is_terminal: false,
+            current_dir: root.path().to_owned(),
+            state_dir: root.path().join("state"),
+        },
+    )
+    .unwrap();
+    let transport = Arc::new(FakeTransport::new(
+        Duration::from_secs(1),
+        ResultMode::Success,
+    ));
+    let (_shutdown_tx, shutdown) = cancellation_channel();
+    let task_transport = transport.clone();
+    let task = tokio::spawn(async move {
+        execute_ping_monitor(&config, task_transport, tokio::io::sink(), shutdown).await
+    });
+    wait_for_calls(&transport.calls, 1).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    let obstruction = root.path().join(".netband-header.tmp");
+    std::fs::create_dir(&obstruction).unwrap();
+    let error = task.await.unwrap().unwrap_err();
+    assert!(
+        matches!(error, MonitorError::Journal(JournalError::Corrupt(path)) if path == obstruction)
+    );
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    let active = std::fs::read_to_string(root.path().join(".netband-active")).unwrap();
+    let mut reader = csv::Reader::from_path(root.path().join(active.trim())).unwrap();
+    assert_eq!(
+        reader
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len(),
+        2
+    );
+}

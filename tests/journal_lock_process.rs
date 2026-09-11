@@ -2,7 +2,7 @@ use std::process::Command;
 
 use chrono::Utc;
 use netband::config::OutputTarget;
-use netband::journal::{Journal, JournalError};
+use netband::journal::{JournalError, JournalWriter};
 use tempfile::tempdir;
 
 // Keep process spawning separate from tests that close and immediately reopen files:
@@ -13,7 +13,7 @@ fn both_output_modes_reject_another_process() {
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let path = std::path::PathBuf::from(path);
         assert!(matches!(
-            Journal::open_at(&OutputTarget::File(path.clone()), Utc::now()),
+            JournalWriter::open_at(&OutputTarget::File(path.clone()), Utc::now()),
             Err(JournalError::Locked(locked)) if locked == path
         ));
         return;
@@ -26,7 +26,7 @@ fn both_output_modes_reject_another_process() {
         } else {
             OutputTarget::File(dir.path().join("locked.csv"))
         };
-        let (journal, path) = Journal::open_at(&output, Utc::now()).unwrap();
+        let (journal, path) = JournalWriter::open_at(&output, Utc::now()).unwrap();
         let before = std::fs::read(&path).unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "both_output_modes_reject_another_process"])
@@ -36,6 +36,6 @@ fn both_output_modes_reject_another_process() {
         assert!(child.status.success(), "{child:?}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         drop(journal);
-        Journal::open_at(&OutputTarget::File(path), Utc::now()).unwrap();
+        JournalWriter::open_at(&OutputTarget::File(path), Utc::now()).unwrap();
     }
 }

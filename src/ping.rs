@@ -253,7 +253,7 @@ where
         load_run_id: None,
     };
     validate_round_request(&round_request)?;
-    let (journal, output_path) = Journal::open_at(&config.output, scheduled_at)?;
+    let journal = Journal::open_at(&config.output, config.rotate_max_bytes, scheduled_at)?;
     let console = Console::spawn(
         config.console,
         console_writer,
@@ -266,10 +266,11 @@ where
     let mut coordinator = OutputCoordinator::new(journal, console);
     let publish_result = coordinator.publish_batch(&report.events);
     let flush_result = coordinator.flush();
+    let (journal, console) = coordinator.into_parts();
+    let output_path = journal.path().to_owned();
     if flush_result.is_ok() {
         tracing::info!(path = %output_path.display(), "measurement journal flushed");
     }
-    let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
     publish_result?;

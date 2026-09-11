@@ -44,6 +44,17 @@ Start foreground ping monitoring without bandwidth tests:
 netband --output netband.csv --no-bandwidth run
 ```
 
+For rotating output, create a directory and use it instead of a fixed file:
+
+```sh
+mkdir -p measurements
+netband --output-dir measurements --rotate-max-bytes 67108864 --no-bandwidth run
+```
+
+This rotates daily at UTC midnight or at a soft 64 MiB limit, keeping each batch
+together. Segments are retained until you archive or remove them. See
+[rotation and recovery](docs/data-format.md#rotating-directory-output).
+
 Stop it with `Ctrl-C`. Netband flushes completed measurements before exiting. To test
 bandwidth through M-Lab, first review [Netband privacy](PRIVACY.md), the
 [M-Lab acceptable-use policy](https://www.measurementlab.net/aup/), and the
