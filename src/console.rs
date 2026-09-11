@@ -11,8 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::cli::ConsoleMode;
 use crate::model::{
-    EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, sanitize_endpoint,
-    sanitize_message, timestamp_text,
+    EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, sanitize_message, timestamp_text,
 };
 
 #[derive(Debug, Error)]
@@ -286,12 +285,12 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
             reason,
         )),
         EventKind::Bandwidth => Some(format!(
-            "{timestamp} bandwidth interface={interface} provider={} server={} outcome={} download_mbps={} upload_mbps={}{}\n",
+            "{timestamp} bandwidth interface={interface} provider={} server_name={} outcome={} download_mbps={} upload_mbps={}{}\n",
             event.provider_kind.map(provider_name).unwrap_or("-"),
             event
-                .server
+                .server_name
                 .as_deref()
-                .map(sanitize_endpoint)
+                .map(sanitize_message)
                 .unwrap_or_else(|| "-".to_owned()),
             outcome_name(event.outcome),
             decimal_or_dash(event.download_mbps),

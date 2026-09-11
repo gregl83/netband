@@ -170,4 +170,4 @@ with that provider's terms and traffic policy.
 
 URLs may contain operator query parameters, but credentials embedded in URL userinfo
 are rejected. Query values are removed from logs, stdout, provider fingerprints, and
-the CSV `server` field. Prefer a protected config file if an endpoint requires a token.
+the CSV `request_url` field. Prefer a protected config file if an endpoint requires a token.

@@ -189,7 +189,7 @@ Review the first week before treating the results as a baseline:
    the instance may be limiting the result.
 3. Compare measured download speed with the plan's `Network Out` limit. A result
    clustered near that limit requires a larger plan for accurate faster links.
-4. Inspect Netband's CSV `outcome`, `server`, duration, and error fields for
+4. Inspect Netband's CSV `outcome`, `server_name`, `request_url`, duration, and error fields for
    timeouts or failed directions.
 5. Check Akamai Cloud Manager's monthly transfer pool and instance network graph.
 

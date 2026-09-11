@@ -69,13 +69,13 @@ fn human_output_is_concise_and_omits_internal_events() {
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial);
     bandwidth.provider_kind = Some(ProviderKind::Direct);
-    bandwidth.server = Some("wss://ndt.example.net/down?token=secret".into());
+    bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_mbps = Some(100.25);
     bandwidth.upload_mbps = None;
     bandwidth.error_message = Some("upload failed".into());
     let line = human_line(&bandwidth).unwrap();
     assert!(line.contains("provider=direct"));
-    assert!(line.contains("server=wss://ndt.example.net/down?[redacted]"));
+    assert!(line.contains("server_name=ndt.example.net"));
     assert!(line.contains("download_mbps=100.25 upload_mbps=-"));
     assert!(!line.contains("secret"));
 
@@ -109,7 +109,7 @@ fn human_numbers_are_readable_without_rounding_machine_output() {
 fn jsonl_is_versioned_flat_and_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::RateLimited);
     request.provider_kind = Some(ProviderKind::Mlab);
-    request.server = Some("https://locate.example/nearest?access_token=secret".into());
+    request.request_url = Some("https://locate.example/nearest?access_token=secret".into());
     request.request_stage = Some(RequestStage::Locate);
     request.http_status = Some(429);
     request.retry_after_ms = Some(60_000);
@@ -129,16 +129,24 @@ fn jsonl_is_versioned_flat_and_sanitized() {
     assert_eq!(value["rtt_ms"], serde_json::Value::Null);
     assert_eq!(value["load_phase"], serde_json::Value::Null);
     assert_eq!(value["load_run_id"], serde_json::Value::Null);
-    assert_eq!(value["server"], "https://locate.example/nearest?[redacted]");
+    assert_eq!(
+        value["request_url"],
+        "https://locate.example/nearest?[redacted]"
+    );
 }
 
 #[test]
 fn diagnostic_text_and_endpoint_credentials_are_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::Error);
-    request.server = Some("https://user:password@example.test/path?token=server-secret".into());
+    request.server_name = Some("logical.example.test".into());
+    request.request_url = Some("https://user:password@192.0.2.10/path?token=server-secret".into());
     request.error_message = Some("access_token=first api_key=second token=third key=fourth".into());
 
     let line = render_jsonl(&request).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(json["server_name"], "logical.example.test");
+    assert_eq!(json["request_url"], "https://192.0.2.10/path?[redacted]");
+    assert!(json.get("server").is_none());
     for secret in [
         "user",
         "password",

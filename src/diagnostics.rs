@@ -26,7 +26,8 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 outcome = ?event.outcome,
                 provider_id = event.provider_id.as_deref().unwrap_or("-"),
                 provider_kind = ?event.provider_kind,
-                server = event.server.as_deref().unwrap_or("-"),
+                server_name = event.server_name.as_deref().unwrap_or("-"),
+                request_url = event.request_url.as_deref().unwrap_or("-"),
                 remote_ip = ?event.remote_ip,
                 stage = ?event.request_stage,
                 http_status = ?event.http_status,
@@ -59,7 +60,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 provider_id = event.provider_id.as_deref().unwrap_or("-"),
                 provider_kind = ?event.provider_kind,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
-                server = event.server.as_deref().unwrap_or("-"),
+                server_name = event.server_name.as_deref().unwrap_or("-"),
                 download_remote_ip = ?event.download_remote_ip,
                 upload_remote_ip = ?event.upload_remote_ip,
                 "bandwidth measurement finished"

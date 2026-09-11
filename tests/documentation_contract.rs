@@ -258,7 +258,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 52);
+    assert_eq!(CSV_HEADER.split(',').count(), 53);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -268,7 +268,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     let examples = fs::read_to_string(root().join("docs/examples/console.jsonl")).unwrap();
     for line in examples.lines() {
         let row: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(row.as_object().unwrap().len(), 52);
+        assert_eq!(row.as_object().unwrap().len(), 53);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");

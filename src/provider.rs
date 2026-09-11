@@ -42,7 +42,8 @@ pub struct RequestFailure {
     pub outcome: Outcome,
     pub error_kind: ErrorKind,
     pub message: String,
-    pub server: Option<String>,
+    pub server_name: Option<String>,
+    pub request_url: Option<String>,
     pub local_ip: Option<IpAddr>,
     pub remote_ip: Option<IpAddr>,
     pub os_error_code: Option<i32>,
@@ -57,7 +58,7 @@ impl RequestFailure {
         stage: RequestStage,
         error_kind: ErrorKind,
         message: impl Into<String>,
-        server: Option<String>,
+        request_url: Option<String>,
         attempt: u32,
     ) -> Self {
         let now = Utc::now();
@@ -68,7 +69,8 @@ impl RequestFailure {
             outcome: Outcome::Error,
             error_kind,
             message: message.into(),
-            server,
+            server_name: None,
+            request_url,
             local_ip: None,
             remote_ip: None,
             os_error_code: None,
@@ -228,7 +230,8 @@ async fn resolve_mlab(
             outcome,
             error_kind: ErrorKind::HttpStatus,
             message: format!("{base_message}; {retry_detail}"),
-            server: Some(mlab.locate_url.to_string()),
+            server_name: None,
+            request_url: Some(mlab.locate_url.to_string()),
             local_ip: None,
             remote_ip: None,
             os_error_code: None,
@@ -276,11 +279,21 @@ pub fn parse_locate_candidates(
     for (index, result) in body.results.into_iter().enumerate() {
         let attempt = index as u32 + 1;
         let Some(download) = result.urls.get(DOWNLOAD_KEY) else {
-            failures.push(missing_url_failure(&result.machine, DOWNLOAD_KEY, attempt));
+            failures.push(missing_url_failure(
+                &result.machine,
+                DOWNLOAD_KEY,
+                attempt,
+                locate_url,
+            ));
             continue;
         };
         let Some(upload) = result.urls.get(UPLOAD_KEY) else {
-            failures.push(missing_url_failure(&result.machine, UPLOAD_KEY, attempt));
+            failures.push(missing_url_failure(
+                &result.machine,
+                UPLOAD_KEY,
+                attempt,
+                locate_url,
+            ));
             continue;
         };
         let parsed = Url::parse(download)
@@ -288,13 +301,15 @@ pub fn parse_locate_candidates(
             .zip(Url::parse(upload).ok())
             .filter(|(download, upload)| download.scheme() == "wss" && upload.scheme() == "wss");
         let Some((download_url, upload_url)) = parsed else {
-            failures.push(RequestFailure::simple(
+            let mut failure = RequestFailure::simple(
                 RequestStage::Locate,
                 ErrorKind::Protocol,
                 "Locate candidate has invalid or insecure NDT7 URLs",
-                Some(result.machine),
+                Some(locate_url.to_string()),
                 attempt,
-            ));
+            );
+            failure.server_name = Some(result.machine);
+            failures.push(failure);
             continue;
         };
         candidates.push(EndpointCandidate {
@@ -324,14 +339,15 @@ pub fn parse_locate_candidates(
     }
 }
 
-fn missing_url_failure(machine: &str, key: &str, attempt: u32) -> RequestFailure {
+fn missing_url_failure(machine: &str, key: &str, attempt: u32, locate_url: &Url) -> RequestFailure {
     let mut failure = RequestFailure::simple(
         RequestStage::Locate,
         ErrorKind::Protocol,
         format!("Locate candidate is missing {key}"),
-        Some(machine.to_owned()),
+        Some(locate_url.to_string()),
         attempt,
     );
+    failure.server_name = Some(machine.to_owned());
     failure.disposition = FailureDisposition::TryNextTarget;
     failure
 }

@@ -971,6 +971,11 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
     let config = tls_direct_config(dir.path(), address, &ca_path, "localhost");
     let (_shutdown_tx, shutdown) = cancellation_channel();
     let report = measure_bandwidth(&config, "run-tls", shutdown).await;
+    assert_eq!(
+        report.events.last().unwrap().server_name.as_deref(),
+        Some("localhost")
+    );
+    assert!(report.events.last().unwrap().request_url.is_none());
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(
@@ -1003,6 +1008,19 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
         event.event_kind == EventKind::RequestFailure
             && event.request_stage == Some(RequestStage::Tls)
     }));
+    let failures = report
+        .events
+        .iter()
+        .filter(|event| event.event_kind == EventKind::RequestFailure)
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 2);
+    for (failure, direction) in failures.iter().zip(["download", "upload"]) {
+        assert_eq!(failure.server_name.as_deref(), Some("wrong.example"));
+        assert_eq!(
+            failure.request_url.as_deref(),
+            Some(format!("wss://{address}/ndt/v7/{direction}").as_str())
+        );
+    }
 }
 
 async fn execute_mode(mode: ConsoleMode) -> (String, Vec<csv::StringRecord>) {
@@ -1260,6 +1278,14 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert_eq!(terminal.event_kind, EventKind::RequestFailure);
                 assert_eq!(terminal.request_stage, Some(stage));
                 assert_eq!(terminal.outcome, outcome);
+                assert!(terminal.server_name.is_some());
+                let request_url = terminal.request_url.as_deref().unwrap();
+                assert!(request_url.contains(if after_download {
+                    "/upload"
+                } else {
+                    "/download"
+                }));
+                assert!(bandwidth.request_url.is_none());
                 assert!(terminal.started_at_utc.unwrap() <= stage_observed);
                 assert!(terminal.finished_at_utc.unwrap() >= stage_observed);
                 assert_eq!(terminal.finished_at_utc, bandwidth.finished_at_utc);

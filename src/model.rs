@@ -124,7 +124,8 @@ pub struct MeasurementEvent {
     pub icmp_code: Option<u8>,
     pub provider_id: Option<String>,
     pub provider_kind: Option<ProviderKind>,
-    pub server: Option<String>,
+    pub server_name: Option<String>,
+    pub request_url: Option<String>,
     pub remote_ip: Option<IpAddr>,
     pub request_stage: Option<RequestStage>,
     pub request_attempt: Option<u32>,
@@ -188,7 +189,8 @@ impl MeasurementEvent {
             icmp_code: None,
             provider_id: None,
             provider_kind: None,
-            server: None,
+            server_name: None,
+            request_url: None,
             remote_ip: None,
             request_stage: None,
             request_attempt: None,
@@ -220,7 +222,8 @@ impl MeasurementEvent {
 
     pub fn sanitized(&self) -> Self {
         let mut event = self.clone();
-        event.server = event.server.as_deref().map(sanitize_endpoint);
+        event.server_name = event.server_name.as_deref().map(sanitize_message);
+        event.request_url = event.request_url.as_deref().map(sanitize_endpoint);
         event.error_message = event.error_message.as_deref().map(sanitize_message);
         event
     }

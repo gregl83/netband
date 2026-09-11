@@ -30,6 +30,11 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
     assert!(resolution.terminal.is_none());
     assert_eq!(resolution.candidates.len(), 1);
     assert_eq!(resolution.failures.len(), 1);
+    assert!(resolution.failures[0].server_name.is_some());
+    assert_eq!(
+        resolution.failures[0].request_url.as_deref(),
+        Some(locate.as_str())
+    );
     assert_eq!(
         resolution.candidates[0].logical_server,
         "ndt-a.example.test"
@@ -43,7 +48,10 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
 
     let malformed = parse_locate_candidates(b"{not-json", "mlab", &locate);
     assert!(malformed.candidates.is_empty());
-    assert_eq!(malformed.terminal.unwrap().stage, RequestStage::Locate);
+    let terminal = malformed.terminal.unwrap();
+    assert_eq!(terminal.stage, RequestStage::Locate);
+    assert!(terminal.server_name.is_none());
+    assert_eq!(terminal.request_url.as_deref(), Some(locate.as_str()));
 }
 
 #[test]
@@ -295,7 +303,7 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
         let failure = &report.events[0];
         assert_eq!(failure.request_stage, Some(RequestStage::Locate));
         assert_eq!(failure.outcome, outcome);
-        assert!(failure.server.is_some());
+        assert!(failure.request_url.is_some());
         let bandwidth = report.events.last().unwrap();
         assert!(failure.started_at_utc.unwrap() <= observed);
         assert!(failure.finished_at_utc.unwrap() >= observed);

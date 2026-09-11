@@ -53,7 +53,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     bandwidth.interface = Some("eth0".into());
     bandwidth.provider_id = Some("direct:abc".into());
     bandwidth.provider_kind = Some(ProviderKind::Direct);
-    bandwidth.server = Some("wss://ndt.example.net/ndt/v7?access_token=secret".into());
+    bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_remote_ip = Some("203.0.113.20".parse().unwrap());
     bandwidth.duration_ms = Some(10_500.0);
     bandwidth.download_duration_ms = Some(10_500.0);
@@ -69,7 +69,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     let mut locate = event(EventKind::RequestFailure, Outcome::RateLimited, "event-4");
     locate.provider_id = Some("mlab".into());
     locate.provider_kind = Some(ProviderKind::Mlab);
-    locate.server = Some("https://locate.measurementlab.net/v2/nearest?token=secret".into());
+    locate.request_url = Some("https://locate.measurementlab.net/v2/nearest?token=secret".into());
     locate.request_stage = Some(RequestStage::Locate);
     locate.request_attempt = Some(2);
     locate.http_status = Some(429);
@@ -81,7 +81,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     let mut websocket = event(EventKind::RequestFailure, Outcome::Error, "event-5");
     websocket.provider_id = Some("direct:abc".into());
     websocket.provider_kind = Some(ProviderKind::Direct);
-    websocket.server = Some("wss://ndt.example.net/custom/upload?key=secret".into());
+    websocket.request_url = Some("wss://ndt.example.net/custom/upload?key=secret".into());
     websocket.request_stage = Some(RequestStage::WebsocketHandshake);
     websocket.request_attempt = Some(1);
     websocket.http_status = Some(503);
@@ -202,7 +202,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 52);
+    assert_eq!(partial_record.len(), 53);
     OpenOptions::new()
         .append(true)
         .open(&path)

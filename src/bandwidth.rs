@@ -105,7 +105,7 @@ struct AttemptProgress {
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
     failures: Vec<RequestFailure>,
-    server: Option<String>,
+    server_name: Option<String>,
     active: RequestFailure,
 }
 
@@ -117,7 +117,7 @@ impl AttemptProgress {
             download: None,
             upload: None,
             failures: Vec::new(),
-            server: None,
+            server_name: None,
             active,
         }
     }
@@ -129,6 +129,9 @@ impl AttemptProgress {
 
     fn record_failure(&mut self, mut failure: RequestFailure) {
         failure.started_at_utc = self.active.started_at_utc;
+        if failure.server_name.is_none() {
+            failure.server_name.clone_from(&self.active.server_name);
+        }
         self.failures.push(failure);
     }
 
@@ -412,7 +415,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
         ProviderKind::Direct => RequestStage::Dns,
     });
     if let crate::config::ProviderConfig::Mlab(mlab) = &config.bandwidth.provider {
-        progress.active.server = Some(mlab.locate_url.to_string());
+        progress.active.request_url = Some(mlab.locate_url.to_string());
     }
     let mut admission = AdmissionReservation::Untracked;
     let mut reservation_error = None;
@@ -472,7 +475,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
         interface,
         provider_id: &config.bandwidth.provider_id,
         provider_kind: provider_kind(config),
-        server: progress.server,
+        server_name: progress.server_name,
         failures: progress.failures,
         download: progress.download,
         upload: progress.upload,
@@ -507,7 +510,7 @@ async fn run_candidates<C: TcpConnector, R: AddressResolver>(
     progress: &mut AttemptProgress,
 ) -> Outcome {
     for candidate in candidates {
-        progress.server = Some(candidate.logical_server.clone());
+        progress.server_name = Some(candidate.logical_server.clone());
         report_phase(phase, LoadPhase::Setup);
         progress.download =
             run_download(candidate, interface, connector, resolver, phase, progress).await;
@@ -890,6 +893,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
         Some(url.to_string()),
         attempt,
     );
+    progress.active.server_name = Some(candidate.logical_server.clone());
     let host = match url.host_str() {
         Some(host) => host,
         None => {
@@ -1190,7 +1194,8 @@ fn handshake_failure(
         outcome,
         error_kind: ErrorKind::WebsocketHandshake,
         message,
-        server: Some(url.to_string()),
+        server_name: Some(candidate.logical_server.clone()),
+        request_url: Some(url.to_string()),
         local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code: None,
@@ -1235,7 +1240,11 @@ fn stream_failure(
             _ => ErrorKind::Io,
         },
         message,
-        server: Some(candidate.logical_server.clone()),
+        server_name: Some(candidate.logical_server.clone()),
+        request_url: Some(match stage {
+            RequestStage::Upload => candidate.upload_url.to_string(),
+            _ => candidate.download_url.to_string(),
+        }),
         local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code,
@@ -1260,7 +1269,7 @@ struct ReportInput<'a> {
     interface: Option<&'a str>,
     provider_id: &'a str,
     provider_kind: ProviderKind,
-    server: Option<String>,
+    server_name: Option<String>,
     failures: Vec<RequestFailure>,
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
@@ -1275,7 +1284,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         interface,
         provider_id,
         provider_kind,
-        server,
+        server_name,
         failures,
         download,
         upload,
@@ -1308,7 +1317,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
     bandwidth.provider_id = Some(provider_id.to_owned());
     bandwidth.provider_kind = Some(provider_kind);
-    bandwidth.server = server;
+    bandwidth.server_name = server_name;
     bandwidth.download_mbps = download
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
@@ -1377,7 +1386,8 @@ fn failure_event(
     event.interface = interface.map(str::to_owned);
     event.provider_id = Some(provider_id.to_owned());
     event.provider_kind = Some(provider_kind);
-    event.server.clone_from(&failure.server);
+    event.server_name.clone_from(&failure.server_name);
+    event.request_url.clone_from(&failure.request_url);
     event.local_ip = failure.local_ip;
     event.remote_ip = failure.remote_ip;
     event.request_stage = Some(failure.stage);
@@ -1550,7 +1560,7 @@ mod tests {
                     interface: None,
                     provider_id: "direct",
                     provider_kind: ProviderKind::Direct,
-                    server: None,
+                    server_name: None,
                     failures: vec![failure.clone()],
                     download: download.then(|| direction(1_000_000, 10)),
                     upload: upload.then(|| direction(2_000_000, 5)),
@@ -1704,7 +1714,7 @@ mod tests {
                     interface: None,
                     provider_id: "direct",
                     provider_kind: ProviderKind::Direct,
-                    server: None,
+                    server_name: None,
                     failures: Vec::new(),
                     download,
                     upload,
