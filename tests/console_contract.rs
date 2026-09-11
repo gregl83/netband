@@ -84,6 +84,28 @@ fn human_output_is_concise_and_omits_internal_events() {
 }
 
 #[test]
+fn human_numbers_are_readable_without_rounding_machine_output() {
+    let mut ping = event(EventKind::PingSummary, Outcome::Success);
+    ping.rtt_ms = Some(0.011236999999999999);
+    ping.packet_loss_pct = Some(0.0);
+    let line = human_line(&ping).unwrap();
+    assert!(line.contains("rtt_ms=0.011 loss_pct=0"));
+    assert!(render_jsonl(&ping).unwrap().contains(&format!(
+        "\"rtt_ms\":{}",
+        serde_json::to_string(&ping.rtt_ms.unwrap()).unwrap()
+    )));
+
+    let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+    bandwidth.download_mbps = Some(12.694732433504065);
+    bandwidth.upload_mbps = Some(1000.0);
+    assert!(
+        human_line(&bandwidth)
+            .unwrap()
+            .contains("download_mbps=12.695 upload_mbps=1000")
+    );
+}
+
+#[test]
 fn jsonl_is_versioned_flat_and_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::RateLimited);
     request.provider_kind = Some(ProviderKind::Mlab);

@@ -309,7 +309,16 @@ fn quote_human(value: &str) -> String {
 }
 
 fn decimal_or_dash(value: Option<f64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
+    value.map_or_else(
+        || "-".to_owned(),
+        |value| {
+            let rounded = format!("{value:.3}");
+            rounded
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned()
+        },
+    )
 }
 
 fn outcome_name(outcome: Outcome) -> &'static str {

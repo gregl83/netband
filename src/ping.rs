@@ -405,7 +405,7 @@ fn build_measurement(
     summary.rtt_ms = probe.rtt_ms;
     summary.packets_sent = Some(u32::from(attempt.sent));
     summary.packets_received = Some(u32::from(success));
-    summary.packet_loss_pct = Some(if success { 0.0 } else { 100.0 });
+    summary.packet_loss_pct = attempt.sent.then_some(if success { 0.0 } else { 100.0 });
     summary.os_error_code = os_error_code;
     summary.error_kind = error_kind;
     summary.error_message = error_message;

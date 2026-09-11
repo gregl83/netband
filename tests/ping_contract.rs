@@ -458,5 +458,5 @@ async fn io_failure_retains_os_error_and_unsent_accounting() {
     }
     assert_eq!(report.events[1].packets_sent, Some(0));
     assert_eq!(report.events[1].packets_received, Some(0));
-    assert_eq!(report.events[1].packet_loss_pct, Some(100.0));
+    assert_eq!(report.events[1].packet_loss_pct, None);
 }

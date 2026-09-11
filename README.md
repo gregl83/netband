@@ -81,10 +81,13 @@ records the attempt, and cannot exceed M-Lab's hard four-start daily maximum.
 | `--console jsonl` | Authoritative | Versioned JSON Lines | Logs |
 | `--console off` | Authoritative | Disabled | Logs |
 | systemd example | Authoritative | Explicitly disabled | journald |
+| `config check` | None | Resolved configuration as `key=value`, regardless of console mode | Errors |
 
 CSV is the source of truth. Human and JSONL stdout are independent, best-effort live
 views. JSONL uses `schema_version=1`, but records may be dropped or the stream may stop
 under backpressure or a broken pipe without affecting CSV or service health.
+Human output rounds numeric measurements to three decimal places and omits trailing
+zeros; CSV and JSONL retain full precision.
 
 ```sh
 # Interactive human output

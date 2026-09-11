@@ -41,7 +41,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `rtt_ms` | Successful ICMP round-trip time in milliseconds |
 | `packets_sent` | Probe count represented by the row |
 | `packets_received` | Successful reply count represented by the row |
-| `packet_loss_pct` | Packet loss percentage from 0 through 100 |
+| `packet_loss_pct` | Packet loss percentage from 0 through 100; empty when no packet was sent |
 | `icmp_type` | Returned ICMP type when available |
 | `icmp_code` | Returned ICMP code when available |
 | `provider_id` | Persisted provider identity (`mlab` or hashed direct endpoint identity) |
