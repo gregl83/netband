@@ -10,7 +10,6 @@ pub const SCHEMA_VERSION: u8 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     PingProbe,
-    PingSummary,
     Bandwidth,
     RequestFailure,
     Scheduler,

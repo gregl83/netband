@@ -34,19 +34,22 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     ping_failure.target = Some("1.1.1.1".into());
     ping_failure.sequence = Some(7);
     ping_failure.duration_ms = Some(2_000.125);
+    ping_failure.packets_sent = Some(1);
+    ping_failure.packets_received = Some(0);
+    ping_failure.packet_loss_pct = Some(100.0);
     ping_failure.icmp_type = Some(3);
     ping_failure.icmp_code = Some(1);
     ping_failure.os_error_code = Some(10060);
     ping_failure.error_kind = Some(ErrorKind::IcmpTimeout);
     ping_failure.error_message = Some("réseau, timeout\nsecond line".into());
 
-    let mut ping_summary = event(EventKind::PingSummary, Outcome::Success, "event-2");
-    ping_summary.interface = Some("eth0".into());
-    ping_summary.target = Some("8.8.8.8".into());
-    ping_summary.rtt_ms = Some(12.5);
-    ping_summary.packets_sent = Some(1);
-    ping_summary.packets_received = Some(1);
-    ping_summary.packet_loss_pct = Some(0.0);
+    let mut ping_success = event(EventKind::PingProbe, Outcome::Success, "event-2");
+    ping_success.interface = Some("eth0".into());
+    ping_success.target = Some("8.8.8.8".into());
+    ping_success.rtt_ms = Some(12.5);
+    ping_success.packets_sent = Some(1);
+    ping_success.packets_received = Some(1);
+    ping_success.packet_loss_pct = Some(0.0);
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial, "event-3");
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
@@ -107,7 +110,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
 
     vec![
         ping_failure,
-        ping_summary,
+        ping_success,
         bandwidth,
         locate,
         websocket,
@@ -418,14 +421,14 @@ fn complete_invalid_utf8_record_fails_without_modifying_the_file() {
 fn connection_details_round_trip_and_extend_without_changing_csv_header() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("details.csv");
-    let mut events = vec![event(EventKind::PingSummary, Outcome::Success, "details-0")];
+    let mut events = vec![event(EventKind::PingProbe, Outcome::Success, "details-0")];
     for details in [
         serde_json::json!({}),
         serde_json::json!({"wifi": {"signal_dbm": -62, "frequency_mhz": 5180, "band": "5GHz"}}),
         serde_json::json!({"wifi": {"signal_dbm": -62, "future": {"label": "réseau, \"quoted\"\nline", "available": false, "count": 0, "absent": null}}, "other": [1, "two"]}),
     ] {
         let mut measurement = event(
-            EventKind::PingSummary,
+            EventKind::PingProbe,
             Outcome::Success,
             &format!("details-{}", events.len()),
         );

@@ -159,7 +159,7 @@ async fn immediate_start_and_regular_ticks_cover_one_logical_hour() {
     assert_eq!(stats.skipped_ticks, 0);
     assert_eq!(journal.batches.load(Ordering::SeqCst), 721);
     let events = journal.events.lock().unwrap();
-    assert_eq!(events.len(), 1_442);
+    assert_eq!(events.len(), 721);
     assert!(events.iter().all(|event| event.run_id == "continuous-test"));
     assert_eq!(
         events
@@ -169,10 +169,11 @@ async fn immediate_start_and_regular_ticks_cover_one_logical_hour() {
             .len(),
         events.len()
     );
-    assert!(events.as_chunks::<2>().0.iter().all(|pair| {
-        pair[0].event_kind == netband::model::EventKind::PingProbe
-            && pair[1].event_kind == netband::model::EventKind::PingSummary
-    }));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_kind == netband::model::EventKind::PingProbe)
+    );
 }
 
 #[tokio::test(start_paused = true, flavor = "current_thread")]
@@ -365,7 +366,7 @@ async fn rotating_monitor_drains_inflight_round_and_reports_final_segment() {
     for path in &paths {
         let mut reader = csv::Reader::from_path(path).unwrap();
         let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         for row in rows {
             assert!(identifiers.insert((row[1].to_owned(), row[2].to_owned())));
         }
@@ -432,6 +433,6 @@ async fn rotation_failure_stops_monitor_and_preserves_original_error() {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
             .len(),
-        2
+        1
     );
 }

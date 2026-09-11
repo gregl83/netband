@@ -185,7 +185,7 @@ where
         ));
     }
 
-    let mut events = Vec::with_capacity(request.targets.len() * 2);
+    let mut events = Vec::with_capacity(request.targets.len());
     let mut successful_targets = 0;
     let mut failed_targets = 0;
     for (target, sequence, task) in tasks {
@@ -203,7 +203,7 @@ where
         } else {
             failed_targets += 1;
         }
-        events.extend(measurement.events);
+        events.push(measurement.event);
     }
 
     Ok(PingRoundReport {
@@ -297,7 +297,7 @@ fn trace_console_diagnostic(diagnostic: ConsoleDiagnostic) {
 }
 
 struct TargetMeasurement {
-    events: [MeasurementEvent; 2],
+    event: MeasurementEvent,
     success: bool,
 }
 
@@ -381,37 +381,13 @@ fn build_measurement(
     probe.icmp_code = icmp_code;
     probe.os_error_code = os_error_code;
     probe.error_kind = error_kind;
-    probe.error_message = error_message.clone();
-
-    let mut summary = MeasurementEvent::new(
-        run_id,
-        format!(
-            "{run_id}:ping-round:{}:ping-summary:{}",
-            context.round_number, request.sequence
-        ),
-        EventKind::PingSummary,
-        outcome,
-        finished_at,
-    );
-    apply_common(
-        &mut summary,
-        context,
-        started_at,
-        &attempt.binding,
-        &target,
-        request.sequence,
-    );
-    summary.duration_ms = probe.duration_ms;
-    summary.rtt_ms = probe.rtt_ms;
-    summary.packets_sent = Some(u32::from(attempt.sent));
-    summary.packets_received = Some(u32::from(success));
-    summary.packet_loss_pct = attempt.sent.then_some(if success { 0.0 } else { 100.0 });
-    summary.os_error_code = os_error_code;
-    summary.error_kind = error_kind;
-    summary.error_message = error_message;
+    probe.error_message = error_message;
+    probe.packets_sent = Some(u32::from(attempt.sent));
+    probe.packets_received = Some(u32::from(success));
+    probe.packet_loss_pct = attempt.sent.then_some(if success { 0.0 } else { 100.0 });
 
     TargetMeasurement {
-        events: [probe, summary],
+        event: probe,
         success,
     }
 }

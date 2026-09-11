@@ -287,11 +287,7 @@ async fn degraded_round_drains_before_one_triggered_bandwidth_attempt() {
             .all(|event| { event.load_run_id.as_deref() == Some("adaptive-run:bandwidth:0") })
     );
     assert!(events.iter().all(|event| {
-        event.load_phase.is_none()
-            || matches!(
-                event.event_kind,
-                EventKind::PingProbe | EventKind::PingSummary
-            )
+        event.load_phase.is_none() || matches!(event.event_kind, EventKind::PingProbe)
     }));
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::PingProbe

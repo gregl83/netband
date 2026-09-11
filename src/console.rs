@@ -275,7 +275,7 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
         )
     });
     match event.event_kind {
-        EventKind::PingSummary => Some(format!(
+        EventKind::PingProbe => Some(format!(
             "{timestamp} ping interface={interface} target={} outcome={} rtt_ms={} loss_pct={}{}{}\n",
             event.target.as_deref().unwrap_or("-"),
             outcome_name(event.outcome),
@@ -297,7 +297,7 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
             decimal_or_dash(event.upload_mbps),
             reason,
         )),
-        EventKind::PingProbe | EventKind::RequestFailure | EventKind::Scheduler => None,
+        EventKind::RequestFailure | EventKind::Scheduler => None,
     }
 }
 

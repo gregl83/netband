@@ -266,8 +266,70 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         );
     }
     let examples = fs::read_to_string(root().join("docs/examples/console.jsonl")).unwrap();
-    for line in examples.lines() {
-        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+    let example_rows: Vec<serde_json::Value> = examples
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds = example_rows
+        .iter()
+        .map(|row| row["event_kind"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        ["ping_probe", "bandwidth", "request_failure", "scheduler"]
+            .into_iter()
+            .collect()
+    );
+    let ids = example_rows
+        .iter()
+        .map(|row| {
+            (
+                row["run_id"].as_str().unwrap(),
+                row["event_id"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), example_rows.len());
+    assert!(
+        example_rows
+            .iter()
+            .any(|row| row["connection_details"].is_object())
+    );
+    for outcome in [
+        "success",
+        "timeout",
+        "permission_denied",
+        "partial",
+        "cancelled",
+        "rate_limited",
+        "scheduled",
+        "deferred",
+        "suppressed",
+    ] {
+        assert!(
+            example_rows.iter().any(|row| row["outcome"] == outcome),
+            "missing scenario: {outcome}"
+        );
+    }
+    for row in &example_rows {
+        if row["event_kind"] == "request_failure" {
+            assert_eq!(
+                example_rows
+                    .iter()
+                    .filter(|candidate| candidate["event_kind"] == "bandwidth"
+                        && candidate["run_id"] == row["run_id"])
+                    .count(),
+                1
+            );
+        }
+        if !row["load_run_id"].is_null() {
+            assert!(
+                example_rows
+                    .iter()
+                    .any(|candidate| candidate["event_kind"] == "bandwidth"
+                        && candidate["run_id"] == row["load_run_id"])
+            );
+        }
         assert_eq!(row.as_object().unwrap().len(), 53);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {

@@ -31,7 +31,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `interface` | Selected Linux interface; empty means default route |
 | `local_ip` | Netband’s local address actually bound/used for ping or request failures; empty on combined bandwidth rows |
 | `connection_details` | Optional JSON object containing extensible connection metadata; see below |
-| `event_kind` | `ping_probe`, `ping_summary`, `bandwidth`, `request_failure`, or `scheduler` |
+| `event_kind` | `ping_probe`, `bandwidth`, `request_failure`, or `scheduler` |
 | `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
 | `load_phase` | Concurrent NDT7 phase at ping-round start: `setup`, `download`, or `upload`; empty without a concurrent test |
 | `load_run_id` | `run_id` of the concurrent bandwidth attempt; empty without a concurrent test |
@@ -83,6 +83,9 @@ Locate failures normally have no measurement-server name; invalid candidate reco
 can carry the machine name and the Locate URL that returned them. `request_url` records
 the configured Locate URL (not necessarily the final redirect URL) or the direction's
 NDT7 URL. A bandwidth summary has a logical name but no single request URL.
+
+See the [synthetic JSONL examples](examples/README.md) for all row types, failure
+paths, partial measurements, and illustrative optional metadata.
 
 ## Connection details and schema evolution
 
@@ -244,7 +247,7 @@ connection counters, not client-side upload retransmissions or a packet-loss rat
 | `suppressed` | Cap, spacing, cooldown, or policy permanently blocked this opportunity |
 | `expired` | Pending opportunity exceeded its lifetime/attempt limit |
 
-Failures are data. A failed ping still produces a `ping_probe` and `ping_summary`; HTTP,
+Failures are data. A failed ping still produces one `ping_probe`; HTTP,
 TLS, WebSocket, download, and upload failures produce sanitized `request_failure` rows.
 
 NDT7 upload accepts new payloads for at most ten seconds after its handshake, or until
@@ -287,7 +290,12 @@ python3 - <<'PY'
 import csv
 with open("netband.csv", newline="", encoding="utf-8") as stream:
     rows = list(csv.DictReader(stream))
-assert rows and {"ping_probe", "ping_summary"} <= {r["event_kind"] for r in rows}
+assert rows and "ping_probe" in {r["event_kind"] for r in rows}
 print(f"parsed {len(rows)} rows with {len(rows[0])} fields")
 PY
 ```
+
+Each ping attempt produces exactly one `ping_probe` event, including sent/received
+counts, per-attempt loss availability, RTT, ICMP details, and any failure. No
+`ping_summary` events are emitted. Rolling health calculations remain internal;
+scheduler decisions and request failures remain separate events in the mixed journal.

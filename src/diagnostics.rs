@@ -65,7 +65,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 upload_remote_ip = ?event.upload_remote_ip,
                 "bandwidth measurement finished"
             ),
-            EventKind::PingProbe | EventKind::PingSummary => {}
+            EventKind::PingProbe => {}
         }
     }
 }

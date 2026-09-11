@@ -126,26 +126,25 @@ async fn targets_overlap_but_events_remain_in_configuration_order() {
     assert_eq!(report.successful_targets, 3);
     assert_eq!(report.failed_targets, 0);
     assert_eq!(report.exit_status(), PingExitStatus::Success);
-    assert_eq!(report.events.len(), 6);
-    for (index, pair) in report.events.as_chunks::<2>().0.iter().enumerate() {
-        assert_eq!(pair[0].event_kind, EventKind::PingProbe);
-        assert_eq!(pair[1].event_kind, EventKind::PingSummary);
+    assert_eq!(report.events.len(), 3);
+    for (index, probe) in report.events.iter().enumerate() {
+        assert_eq!(probe.event_kind, EventKind::PingProbe);
         assert_eq!(
-            pair[0].target.as_deref(),
+            probe.target.as_deref(),
             Some(targets[index].to_string()).as_deref()
         );
-        assert_eq!(pair[0].sequence, Some(index as u16));
-        assert_eq!(pair[0].outcome, Outcome::Success);
-        assert_eq!(pair[0].local_ip, Some(ip("192.0.2.10")));
-        assert_eq!(pair[0].interface.as_deref(), Some("eth-test"));
-        assert_eq!(pair[1].packets_sent, Some(1));
-        assert_eq!(pair[1].packets_received, Some(1));
-        assert_eq!(pair[1].packet_loss_pct, Some(0.0));
+        assert_eq!(probe.sequence, Some(index as u16));
+        assert_eq!(probe.outcome, Outcome::Success);
+        assert_eq!(probe.local_ip, Some(ip("192.0.2.10")));
+        assert_eq!(probe.interface.as_deref(), Some("eth-test"));
+        assert_eq!(probe.packets_sent, Some(1));
+        assert_eq!(probe.packets_received, Some(1));
+        assert_eq!(probe.packet_loss_pct, Some(0.0));
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_round_snapshots_load_context_for_probe_and_summary_rows() {
+async fn a_round_snapshots_load_context_for_probe_rows() {
     let target = ip("192.0.2.1");
     let transport = Arc::new(FakeTransport::new([(
         target,
@@ -157,7 +156,7 @@ async fn a_round_snapshots_load_context_for_probe_and_summary_rows() {
 
     let report = measure_round(transport, request).await.unwrap();
 
-    assert_eq!(report.events.len(), 2);
+    assert_eq!(report.events.len(), 1);
     assert!(report.events.iter().all(|event| {
         event.load_phase == Some(LoadPhase::Download)
             && event.load_run_id.as_deref() == Some("run-test:bandwidth:0")
@@ -224,6 +223,12 @@ async fn timeout_unreachable_permission_and_cancelled_are_detailed() {
             .contains("ping_group_range")
     );
     assert_eq!(probes[3].outcome, Outcome::Cancelled);
+    assert_eq!(report.events.len(), 4);
+    for (index, probe) in probes.iter().enumerate() {
+        assert_eq!(probe.packets_sent, Some(u32::from(index != 2)));
+        assert_eq!(probe.packets_received, Some(0));
+        assert_eq!(probe.packet_loss_pct, (index != 2).then_some(100.0));
+    }
     assert!(probes.iter().all(|event| event.duration_ms.is_some()));
     assert!(probes.iter().all(|event| event.started_at_utc.is_some()));
     assert!(probes.iter().all(|event| event.finished_at_utc.is_some()));
@@ -338,20 +343,20 @@ async fn one_shot_cli_pipeline_records_all_rows_and_separates_console_modes() {
     assert_eq!(human.lines().count(), 2);
     assert!(human.contains("outcome=success"));
     assert!(human.contains("outcome=timeout"));
-    assert_eq!(human_csv.len(), 4);
+    assert_eq!(human_csv.len(), 2);
 
     let (jsonl, jsonl_csv, _) = execute_mode(ConsoleMode::Jsonl).await;
-    assert_eq!(jsonl.lines().count(), 4);
+    assert_eq!(jsonl.lines().count(), 2);
     for line in jsonl.lines() {
         serde_json::from_str::<serde_json::Value>(line).unwrap();
     }
     assert!(jsonl.contains("\"event_kind\":\"ping_probe\""));
     assert!(jsonl.contains("\"error_kind\":\"icmp_timeout\""));
-    assert_eq!(jsonl_csv.len(), 4);
+    assert_eq!(jsonl_csv.len(), 2);
 
     let (off, off_csv, _) = execute_mode(ConsoleMode::Off).await;
     assert!(off.is_empty());
-    assert_eq!(off_csv.len(), 4);
+    assert_eq!(off_csv.len(), 2);
 }
 
 #[tokio::test]
@@ -389,7 +394,7 @@ async fn panicked_probe_keeps_other_targets_and_load_context() {
     request.load_run_id = Some("load-1".to_owned());
     let report = measure_round(transport, request).await.unwrap();
     assert_eq!((report.successful_targets, report.failed_targets), (1, 1));
-    let failed = &report.events[..2];
+    let failed = &report.events[..1];
     assert!(
         failed
             .iter()
@@ -398,9 +403,9 @@ async fn panicked_probe_keeps_other_targets_and_load_context() {
                 && event.load_run_id.as_deref() == Some("load-1")
                 && event.duration_ms == Some(0.0))
     );
-    assert_eq!(failed[1].packets_sent, Some(0));
-    assert_eq!(report.events[2].outcome, Outcome::Success);
-    assert_eq!(report.events[2].target, Some(targets[1].to_string()));
+    assert_eq!(failed[0].packets_sent, Some(0));
+    assert_eq!(report.events[1].outcome, Outcome::Success);
+    assert_eq!(report.events[1].target, Some(targets[1].to_string()));
 }
 
 #[tokio::test]
@@ -422,12 +427,12 @@ async fn sequence_wrap_and_ipv6_reply_validation_preserve_measurements() {
         .await
         .unwrap();
     assert_eq!(report.exit_status().code(), 0);
-    for (index, pair) in report.events.as_chunks::<2>().0.iter().enumerate() {
-        assert_eq!(pair[0].sequence, Some(index as u16));
-        assert_eq!(pair[0].icmp_type, Some(129));
-        assert_eq!(pair[0].rtt_ms, Some(0.125));
-        assert_eq!(pair[1].packets_received, Some(1));
-        assert_eq!(pair[1].packet_loss_pct, Some(0.0));
+    for (index, probe) in report.events.iter().enumerate() {
+        assert_eq!(probe.sequence, Some(index as u16));
+        assert_eq!(probe.icmp_type, Some(129));
+        assert_eq!(probe.rtt_ms, Some(0.125));
+        assert_eq!(probe.packets_received, Some(1));
+        assert_eq!(probe.packet_loss_pct, Some(0.0));
     }
 }
 
@@ -456,7 +461,7 @@ async fn io_failure_retains_os_error_and_unsent_accounting() {
         assert_eq!(event.error_message.as_deref(), Some("send failed"));
         assert_eq!(event.rtt_ms, None);
     }
-    assert_eq!(report.events[1].packets_sent, Some(0));
-    assert_eq!(report.events[1].packets_received, Some(0));
-    assert_eq!(report.events[1].packet_loss_pct, None);
+    assert_eq!(report.events[0].packets_sent, Some(0));
+    assert_eq!(report.events[0].packets_received, Some(0));
+    assert_eq!(report.events[0].packet_loss_pct, None);
 }

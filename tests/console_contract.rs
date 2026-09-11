@@ -48,7 +48,7 @@ fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
 
 #[test]
 fn human_output_is_concise_and_omits_internal_events() {
-    let mut ping = event(EventKind::PingSummary, Outcome::Timeout);
+    let mut ping = event(EventKind::PingProbe, Outcome::Timeout);
     ping.interface = Some("eth0".into());
     ping.target = Some("1.1.1.1".into());
     ping.packets_sent = Some(1);
@@ -85,7 +85,7 @@ fn human_output_is_concise_and_omits_internal_events() {
 
 #[test]
 fn human_numbers_are_readable_without_rounding_machine_output() {
-    let mut ping = event(EventKind::PingSummary, Outcome::Success);
+    let mut ping = event(EventKind::PingProbe, Outcome::Success);
     ping.rtt_ms = Some(0.011236999999999999);
     ping.packet_loss_pct = Some(0.0);
     let line = human_line(&ping).unwrap();
@@ -166,7 +166,7 @@ async fn worker_writes_jsonl_and_drains_on_shutdown() {
     let (writer, mut reader) = tokio::io::duplex(16 * 1024);
     let console = Console::spawn(ConsoleMode::Jsonl, writer, 8, |_| {});
     console.offer(&event(EventKind::PingProbe, Outcome::Success));
-    console.offer(&event(EventKind::PingSummary, Outcome::Success));
+    console.offer(&event(EventKind::PingProbe, Outcome::Success));
     let stats = console.shutdown(Duration::from_secs(1)).await;
     assert!(!stats.disabled);
     assert_eq!(stats.dropped_events, 0);
@@ -334,7 +334,7 @@ async fn broken_stdout_disables_console_once_without_payload_diagnostics() {
     let console = Console::spawn(ConsoleMode::Human, BrokenWriter, 8, move |diagnostic| {
         captured.lock().unwrap().push(diagnostic);
     });
-    let mut sensitive = event(EventKind::PingSummary, Outcome::Error);
+    let mut sensitive = event(EventKind::PingProbe, Outcome::Error);
     sensitive.target = Some("access-token-must-not-appear".into());
     console.offer(&sensitive);
     tokio::task::yield_now().await;
