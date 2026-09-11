@@ -14,7 +14,9 @@ use netband::bandwidth::{
 };
 use netband::cli::{Cli, ConsoleMode};
 use netband::config::{OutputTarget, ResolveContext, resolve};
-use netband::model::{ErrorKind, EventKind, LoadPhase, Outcome, ProviderKind, RequestStage};
+use netband::model::{
+    ErrorKind, EventKind, LoadPhase, Outcome, ProviderKind, RequestDirection, RequestStage,
+};
 use netband::provider::FailureDisposition;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::ServerConfig;
@@ -1015,6 +1017,14 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
         .collect::<Vec<_>>();
     assert_eq!(failures.len(), 2);
     for (failure, direction) in failures.iter().zip(["download", "upload"]) {
+        assert_eq!(
+            failure.request_direction,
+            Some(if direction == "download" {
+                RequestDirection::Download
+            } else {
+                RequestDirection::Upload
+            })
+        );
         assert_eq!(failure.server_name.as_deref(), Some("wrong.example"));
         assert_eq!(
             failure.request_url.as_deref(),
@@ -1278,6 +1288,15 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert_eq!(terminal.event_kind, EventKind::RequestFailure);
                 assert_eq!(terminal.request_stage, Some(stage));
                 assert_eq!(terminal.outcome, outcome);
+                assert_eq!(
+                    terminal.request_direction,
+                    Some(if after_download {
+                        RequestDirection::Upload
+                    } else {
+                        RequestDirection::Download
+                    })
+                );
+                assert!(bandwidth.request_direction.is_none());
                 assert!(terminal.server_name.is_some());
                 let request_url = terminal.request_url.as_deref().unwrap();
                 assert!(request_url.contains(if after_download {

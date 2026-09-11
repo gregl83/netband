@@ -30,7 +30,8 @@ upload's retransmitted-byte counter demonstrates a genuine zero.
 failed request's endpoint. The redacted query marker illustrates sanitization.
 Scheduler decisions currently use `error_message` for explanatory text, including
 non-error decisions; this example does not introduce the proposed scheduler-action
-or request-direction fields.
+field. `request_direction=upload` identifies the upload connection failure even
+though its `request_stage` is `connect`; Locate failures have no direction.
 
 Read the [data-format contract](../data-format.md) for units and field meanings.
 For easier inspection without changing the JSONL file:

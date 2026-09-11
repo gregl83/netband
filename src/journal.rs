@@ -64,6 +64,7 @@ csv_event! { event;
     server_name => event.server_name,
     request_url => event.request_url,
     remote_ip => event.remote_ip,
+    request_direction => event.request_direction,
     request_stage => event.request_stage,
     request_attempt => event.request_attempt,
     http_status => event.http_status,

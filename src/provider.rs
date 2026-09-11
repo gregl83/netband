@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::config::{BandwidthConfig, DirectConfig, MlabConfig, ProviderConfig};
-use crate::model::{ErrorKind, Outcome, ProviderKind, RequestStage};
+use crate::model::{ErrorKind, Outcome, ProviderKind, RequestDirection, RequestStage};
 
 pub const USER_AGENT: &str = concat!("netband/", env!("CARGO_PKG_VERSION"));
 const DOWNLOAD_KEY: &str = "wss:///ndt/v7/download";
@@ -38,6 +38,7 @@ pub enum FailureDisposition {
 pub struct RequestFailure {
     pub started_at_utc: DateTime<Utc>,
     pub finished_at_utc: DateTime<Utc>,
+    pub direction: Option<RequestDirection>,
     pub stage: RequestStage,
     pub outcome: Outcome,
     pub error_kind: ErrorKind,
@@ -65,6 +66,7 @@ impl RequestFailure {
         Self {
             started_at_utc: now,
             finished_at_utc: now,
+            direction: None,
             stage,
             outcome: Outcome::Error,
             error_kind,
@@ -226,6 +228,7 @@ async fn resolve_mlab(
         return terminal_resolution(RequestFailure {
             started_at_utc: received_at,
             finished_at_utc: received_at,
+            direction: None,
             stage: RequestStage::Locate,
             outcome,
             error_kind: ErrorKind::HttpStatus,

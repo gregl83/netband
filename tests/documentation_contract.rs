@@ -258,7 +258,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 53);
+    assert_eq!(CSV_HEADER.split(',').count(), 54);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -312,6 +312,14 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         );
     }
     for row in &example_rows {
+        if row["event_kind"] != "request_failure" || row["request_stage"] == "locate" {
+            assert!(row["request_direction"].is_null());
+        } else {
+            assert!(matches!(
+                row["request_direction"].as_str(),
+                Some("download" | "upload")
+            ));
+        }
         if row["event_kind"] == "request_failure" {
             assert_eq!(
                 example_rows
@@ -330,7 +338,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 53);
+        assert_eq!(row.as_object().unwrap().len(), 54);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");

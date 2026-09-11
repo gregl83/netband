@@ -29,6 +29,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 server_name = event.server_name.as_deref().unwrap_or("-"),
                 request_url = event.request_url.as_deref().unwrap_or("-"),
                 remote_ip = ?event.remote_ip,
+                direction = ?event.request_direction,
                 stage = ?event.request_stage,
                 http_status = ?event.http_status,
                 cooldown_until = ?event.rate_limit_until_utc,

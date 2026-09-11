@@ -60,6 +60,13 @@ pub enum ProviderKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RequestDirection {
+    Download,
+    Upload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestStage {
     Locate,
     Dns,
@@ -126,6 +133,7 @@ pub struct MeasurementEvent {
     pub server_name: Option<String>,
     pub request_url: Option<String>,
     pub remote_ip: Option<IpAddr>,
+    pub request_direction: Option<RequestDirection>,
     pub request_stage: Option<RequestStage>,
     pub request_attempt: Option<u32>,
     pub http_status: Option<u16>,
@@ -191,6 +199,7 @@ impl MeasurementEvent {
             server_name: None,
             request_url: None,
             remote_ip: None,
+            request_direction: None,
             request_stage: None,
             request_attempt: None,
             http_status: None,

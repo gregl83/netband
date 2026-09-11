@@ -85,6 +85,7 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     websocket.provider_id = Some("direct:abc".into());
     websocket.provider_kind = Some(ProviderKind::Direct);
     websocket.request_url = Some("wss://ndt.example.net/custom/upload?key=secret".into());
+    websocket.request_direction = Some(netband::model::RequestDirection::Upload);
     websocket.request_stage = Some(RequestStage::WebsocketHandshake);
     websocket.request_attempt = Some(1);
     websocket.http_status = Some(503);
@@ -205,7 +206,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 53);
+    assert_eq!(partial_record.len(), 54);
     OpenOptions::new()
         .append(true)
         .open(&path)

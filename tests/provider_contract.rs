@@ -30,6 +30,7 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
     assert!(resolution.terminal.is_none());
     assert_eq!(resolution.candidates.len(), 1);
     assert_eq!(resolution.failures.len(), 1);
+    assert!(resolution.failures[0].direction.is_none());
     assert!(resolution.failures[0].server_name.is_some());
     assert_eq!(
         resolution.failures[0].request_url.as_deref(),
@@ -50,6 +51,7 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
     assert!(malformed.candidates.is_empty());
     let terminal = malformed.terminal.unwrap();
     assert_eq!(terminal.stage, RequestStage::Locate);
+    assert!(terminal.direction.is_none());
     assert!(terminal.server_name.is_none());
     assert_eq!(terminal.request_url.as_deref(), Some(locate.as_str()));
 }

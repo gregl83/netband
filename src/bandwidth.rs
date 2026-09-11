@@ -28,8 +28,8 @@ use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
 use crate::journal::{Journal, JournalError, OutputCoordinator};
 use crate::model::{
-    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
-    TriggerReason,
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestDirection,
+    RequestStage, TriggerReason,
 };
 use crate::provider::{
     EndpointCandidate, FailureDisposition, RequestFailure, RetryAfter,
@@ -129,6 +129,7 @@ impl AttemptProgress {
 
     fn record_failure(&mut self, mut failure: RequestFailure) {
         failure.started_at_utc = self.active.started_at_utc;
+        failure.direction = self.active.direction;
         if failure.server_name.is_none() {
             failure.server_name.clone_from(&self.active.server_name);
         }
@@ -559,6 +560,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.download_url,
+        RequestDirection::Download,
         candidate,
         interface,
         connector,
@@ -651,6 +653,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.upload_url,
+        RequestDirection::Upload,
         candidate,
         interface,
         connector,
@@ -879,6 +882,7 @@ struct ConnectedSocket {
 
 async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     url: &Url,
+    direction: RequestDirection,
     candidate: &EndpointCandidate,
     interface: Option<&str>,
     connector: &C,
@@ -893,6 +897,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
         Some(url.to_string()),
         attempt,
     );
+    progress.active.direction = Some(direction);
     progress.active.server_name = Some(candidate.logical_server.clone());
     let host = match url.host_str() {
         Some(host) => host,
@@ -1190,6 +1195,7 @@ fn handshake_failure(
     RequestFailure {
         started_at_utc: now,
         finished_at_utc: now,
+        direction: None,
         stage: RequestStage::WebsocketHandshake,
         outcome,
         error_kind: ErrorKind::WebsocketHandshake,
@@ -1232,6 +1238,7 @@ fn stream_failure(
     RequestFailure {
         started_at_utc: now,
         finished_at_utc: now,
+        direction: None,
         stage,
         outcome: Outcome::Error,
         error_kind: match stage {
@@ -1390,6 +1397,7 @@ fn failure_event(
     event.request_url.clone_from(&failure.request_url);
     event.local_ip = failure.local_ip;
     event.remote_ip = failure.remote_ip;
+    event.request_direction = failure.direction;
     event.request_stage = Some(failure.stage);
     event.request_attempt = Some(failure.attempt);
     event.http_status = failure.http_status;

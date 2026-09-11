@@ -1,6 +1,6 @@
 # CSV schema and outcomes
 
-The CSV journal is Netband's authoritative output. The current first-release schema version 1 has 53 columns, one header and
+The CSV journal is Netband's authoritative output. The current first-release schema version 1 has 54 columns, one header and
 one row per measurement or scheduler/request event. Existing files are appended only
 when their header exactly matches. On startup, an unterminated trailing record is
 discarded and reported to the operational log; completed malformed records fail closed.
@@ -13,7 +13,7 @@ including after a crash. Fixed-file output needs no separate lock file. On Linux
 lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,upload_mbps,upload_bytes,download_bytes,download_duration_ms,upload_duration_ms,download_local_ip,upload_local_ip,download_remote_ip,upload_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
+schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,upload_mbps,upload_bytes,download_bytes,download_duration_ms,upload_duration_ms,download_local_ip,upload_local_ip,download_remote_ip,upload_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -50,6 +50,7 @@ decimal megabits per second (`bytes * 8 / elapsed_seconds / 1,000,000`).
 | `server_name` | Logical measurement-server identity: M-Lab machine name, or direct TLS name/download hostname; not necessarily the requested host |
 | `request_url` | Sanitized endpoint URL on request-failure events, including scheme, host, port and path; credentials/fragments removed and query redacted; empty on bandwidth summaries |
 | `remote_ip` | Actual remote address for request failures when known; empty on combined bandwidth rows |
+| `request_direction` | `download` or `upload` on NDT7 request failures, including setup, transfer, and cleanup; null/empty for shared discovery or admission failures and all other event kinds |
 | `request_stage` | `locate`, `dns`, `connect`, `tls`, `websocket_handshake`, `download`, or `upload` |
 | `request_attempt` | One-based request/candidate attempt number |
 | `http_status` | HTTP/WebSocket handshake status when returned |
@@ -137,9 +138,12 @@ parsing. Reject unsupported schema versions before interpreting measurements.
 
 Join request failures to their bandwidth summary by `run_id` (and use `event_id` for
 deduplication). An automatic attempt has its own nested `run_id`; use `load_run_id`
-from ping events to join it. Use `request_stage` for failure-stage attribution;
-early setup failures do not necessarily identify a direction. Do not infer missing
-direction attribution from diagnostic prose or count each request as a bandwidth test.
+from ping events to join it. Use `request_direction` together with `request_stage` for failure attribution. For
+example, `upload` plus `tls` means upload TLS setup failed. Direction is selected
+before DNS and retained through timeout/cancellation and cleanup; it does not depend
+on URL path naming or whether a measurement was retained. Shared Locate discovery
+and pre-connection admission failures leave direction unavailable/not applicable.
+Do not infer direction from diagnostic prose or count each request as a bandwidth test.
 Rate availability and diagnostics must be assessed independently of overall outcome.
 
 `error_kind` is empty/null without a classified error; its emitted values are:
