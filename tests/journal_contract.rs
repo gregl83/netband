@@ -60,7 +60,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial, "event-3");
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
     bandwidth.interface = Some("eth0".into());
-    bandwidth.provider_id = Some("direct:abc".into());
+    bandwidth.provider_id = Some("ba7816bf8f01cfea".into());
     bandwidth.provider_kind = Some(ProviderKind::Direct);
     bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_remote_ip = Some("203.0.113.20".parse().unwrap());
@@ -78,7 +78,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     bandwidth.message = Some("upload stream closed".into());
 
     let mut locate = event(EventKind::RequestFailure, Outcome::RateLimited, "event-4");
-    locate.provider_id = Some("mlab".into());
+    locate.provider_id = Some("6ae7f3b72d6430cf".into());
     locate.provider_kind = Some(ProviderKind::Mlab);
     locate.request_url = Some("https://locate.measurementlab.net/v2/nearest?token=secret".into());
     locate.started_at_utc = Some(timestamp(0));
@@ -92,7 +92,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     locate.message = Some("capacity unavailable".into());
 
     let mut websocket = event(EventKind::RequestFailure, Outcome::Error, "event-5");
-    websocket.provider_id = Some("direct:abc".into());
+    websocket.provider_id = Some("ba7816bf8f01cfea".into());
     websocket.provider_kind = Some(ProviderKind::Direct);
     websocket.request_url = Some("wss://ndt.example.net/custom/upload?key=secret".into());
     websocket.request_direction = Some(netband::model::RequestDirection::Upload);
@@ -106,7 +106,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
 
     let mut deferred = event(EventKind::Scheduler, Outcome::Deferred, "event-6");
     deferred.trigger_reason = Some(TriggerReason::PingLoss);
-    deferred.provider_id = Some("mlab".into());
+    deferred.provider_id = Some("6ae7f3b72d6430cf".into());
     deferred.provider_kind = Some(ProviderKind::Mlab);
     deferred.scheduler_not_before_utc = Some(timestamp(3));
     deferred.provider_accounting_date = Some(timestamp(2).date_naive());
@@ -117,7 +117,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
 
     let mut suppressed = event(EventKind::Scheduler, Outcome::Suppressed, "event-7");
     suppressed.trigger_reason = Some(TriggerReason::Scheduled);
-    suppressed.provider_id = Some("mlab".into());
+    suppressed.provider_id = Some("6ae7f3b72d6430cf".into());
     suppressed.provider_kind = Some(ProviderKind::Mlab);
     suppressed.provider_accounting_date = Some(timestamp(2).date_naive());
     suppressed.provider_daily_starts = Some(4);

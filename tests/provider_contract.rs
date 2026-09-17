@@ -26,20 +26,20 @@ fn context(root: PathBuf) -> ResolveContext {
 fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
     let body = include_bytes!("fixtures/locate-v2.json");
     let locate = Url::parse("https://locate.example.test/v2/nearest/ndt/ndt7").unwrap();
-    let resolution = parse_locate_candidates(body, "mlab", &locate);
+    let resolution = parse_locate_candidates(body, "6ae7f3b72d6430cf", &locate);
 
     assert!(resolution.terminal.is_none());
     assert_eq!(resolution.candidates.len(), 1);
     assert_eq!(resolution.failures.len(), 1);
     // The invalid second candidate belongs to the original discovery request.
     assert!(!resolution.failures[0].request_id.to_string().is_empty());
-    let other = parse_locate_candidates(body, "mlab", &locate);
+    let other = parse_locate_candidates(body, "6ae7f3b72d6430cf", &locate);
     assert_ne!(
         resolution.failures[0].request_id,
         other.failures[0].request_id
     );
     let invalid = br#"{"results":[{"machine":"one","urls":{}},{"machine":"two","urls":{}}]}"#;
-    let invalid = parse_locate_candidates(invalid, "mlab", &locate);
+    let invalid = parse_locate_candidates(invalid, "6ae7f3b72d6430cf", &locate);
     assert_eq!(invalid.failures.len(), 2);
     assert_eq!(
         invalid.failures[0].request_id,
@@ -66,7 +66,7 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
             .contains("wss:///ndt/v7/upload")
     );
 
-    let malformed = parse_locate_candidates(b"{not-json", "mlab", &locate);
+    let malformed = parse_locate_candidates(b"{not-json", "6ae7f3b72d6430cf", &locate);
     assert!(malformed.candidates.is_empty());
     let terminal = malformed.terminal.unwrap();
     assert_eq!(terminal.stage, RequestStage::Locate);

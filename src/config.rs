@@ -546,7 +546,7 @@ fn resolve_bandwidth(
                     locate_url,
                     policy_accepted,
                 }),
-                "mlab".to_owned(),
+                provider_id(Sha256::new_with_prefix(b"mlab")),
                 daily_max > 0 && policy_accepted,
             )
         }
@@ -761,12 +761,16 @@ fn direct_provider_id(direct: &DirectConfig) -> String {
         hasher.update(b"\nsni=");
         hasher.update(name.to_ascii_lowercase());
     }
+    provider_id(hasher)
+}
+
+fn provider_id(hasher: Sha256) -> String {
     let digest = hasher.finalize();
     let mut prefix = String::with_capacity(16);
     for byte in &digest[..8] {
         let _ = write!(prefix, "{byte:02x}");
     }
-    format!("direct:{prefix}")
+    prefix
 }
 
 fn endpoint_identity(url: &Url) -> String {

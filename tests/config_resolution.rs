@@ -777,3 +777,79 @@ fn rotating_output_defaults_precedence_and_validation() {
     assert!(!dir.path().join("fixed.csv").exists());
     assert!(!dir.path().join("state").exists());
 }
+
+#[test]
+fn opaque_provider_ids_preserve_accounting_identity() {
+    use netband::scheduler::Scheduler;
+    let dir = tempdir().unwrap();
+    let ctx = context(dir.path().to_owned(), false);
+    let config = |options: &[&str]| {
+        let mut args = vec!["netband"];
+        args.extend_from_slice(options);
+        args.extend(["config", "check"]);
+        resolve(&parse(&args), &ctx).unwrap().bandwidth
+    };
+    let mlab = config(&["--accept-mlab-policy"]);
+    let alternate = config(&[
+        "--accept-mlab-policy",
+        "--mlab-locate-url",
+        "https://locate.example.net/ndt",
+    ]);
+    let direct = config(&[
+        "--ndt-provider",
+        "direct",
+        "--ndt-target",
+        "ndt.example.net",
+    ]);
+    let other = config(&[
+        "--ndt-provider",
+        "direct",
+        "--ndt-target",
+        "other.example.net",
+    ]);
+    assert_eq!(mlab.provider_id, alternate.provider_id);
+    assert_ne!(mlab.provider_id, direct.provider_id);
+    assert_ne!(direct.provider_id, other.provider_id);
+    assert_eq!(
+        direct.provider_id,
+        config(&[
+            "--ndt-provider",
+            "direct",
+            "--ndt-target",
+            "NDT.EXAMPLE.NET:443"
+        ])
+        .provider_id
+    );
+    assert_ne!(
+        direct.provider_id,
+        config(&[
+            "--ndt-provider",
+            "direct",
+            "--ndt-target",
+            "ndt.example.net",
+            "--ndt-tls-server-name",
+            "tls.example.net"
+        ])
+        .provider_id
+    );
+    for provider in [&mlab, &direct, &other] {
+        assert_eq!(provider.provider_id.len(), 16);
+        assert!(
+            provider
+                .provider_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+    }
+    let path = dir.path().join("scheduler.json");
+    let now = chrono::Utc::now();
+    {
+        let mut scheduler = Scheduler::open(&path, &mlab, now).unwrap();
+        scheduler.reserve_run(now).unwrap();
+    }
+    let mut scheduler = Scheduler::open(&path, &alternate, now).unwrap();
+    assert!(
+        scheduler.reserve_run(now).is_err(),
+        "changing Locate must not bypass spacing"
+    );
+}

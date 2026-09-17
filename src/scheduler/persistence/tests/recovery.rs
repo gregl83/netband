@@ -65,7 +65,11 @@ fn mismatched_installations_and_snapshot_accounting_are_rejected() {
     open(&root).unwrap();
     let mut state: SchedulerStore =
         parse_store(&path(&root), &fs::read(path(&root)).unwrap()).unwrap();
-    state.providers.get_mut("mlab").unwrap().cooldown_until_utc = Some(now());
+    state
+        .providers
+        .get_mut("6ae7f3b72d6430cf")
+        .unwrap()
+        .cooldown_until_utc = Some(now());
     fs::write(path(&root), json(&state)).unwrap();
     assert_rejected_unchanged(&root);
 }
@@ -225,7 +229,13 @@ fn ledger_record_corruption_is_detected_even_beyond_the_checkpoint() {
                 "digest" => record.digest = "0".repeat(64),
                 "sequence" => record.sequence += 1,
                 "chain" => record.previous_digest = "0".repeat(64),
-                "state" => record.state.providers.get_mut("mlab").unwrap().runs.clear(),
+                "state" => record
+                    .state
+                    .providers
+                    .get_mut("6ae7f3b72d6430cf")
+                    .unwrap()
+                    .runs
+                    .clear(),
                 "schema" => record.state.schema_version = 99,
                 _ => {}
             }
@@ -260,7 +270,7 @@ fn unsupported_schemas_and_checkpoint_variants_fail_closed() {
                     "version" => state["schema_version"] = 99.into(),
                     "identity" => state["checkpoint"] = serde_json::Value::Null,
                     "sequence" => state["checkpoint"]["sequence"] = u64::MAX.into(),
-                    _ => state["providers"]["mlab"]["backoff_step"] = 99.into(),
+                    _ => state["providers"]["6ae7f3b72d6430cf"]["backoff_step"] = 99.into(),
                 }
                 fs::write(file, json(&state)).unwrap();
             } else if target == "checkpoint" {

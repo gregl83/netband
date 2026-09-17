@@ -326,7 +326,7 @@ async fn starts_are_durable_before_network_work_and_kill_leaves_runs_unfinished(
     assert_eq!(starts[1]["event_kind"], "run_started");
     assert_eq!(starts[1]["run_kind"], "bandwidth");
     assert_eq!(starts[1]["provider_kind"], "direct");
-    assert!(starts[1]["provider_id"].starts_with("direct:"));
+    assert_eq!(starts[1]["provider_id"].len(), 16);
     assert_eq!(starts[1]["trigger_reason"], "manual");
     for field in [
         "server_name",
