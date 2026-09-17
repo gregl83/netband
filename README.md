@@ -86,8 +86,10 @@ records the attempt, and cannot exceed M-Lab's hard four-start daily maximum.
 CSV is the source of truth. Human and JSONL stdout are independent, best-effort live
 views. JSONL uses `schema_version=1`, but records may be dropped or the stream may stop
 under backpressure or a broken pipe without affecting CSV or service health.
-Human output rounds numeric measurements to three decimal places and omits trailing
-zeros; CSV and JSONL retain full precision.
+Human bandwidth output selects bps, Kbps, Mbps, Gbps, or Tbps with up to three
+significant digits (for example, `download=94.2 Mbps upload=1.25 Gbps`). Extreme
+values use scientific notation; missing results display `-`. Ping values use up to
+three decimal places. CSV and JSONL retain full precision and fixed Mbps fields.
 
 ```sh
 # Interactive human output

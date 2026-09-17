@@ -78,7 +78,7 @@ fn human_output_is_concise_and_omits_internal_events() {
     let line = human_line(&bandwidth).unwrap();
     assert!(line.contains("provider=direct"));
     assert!(line.contains("server_name=ndt.example.net"));
-    assert!(line.contains("download_mbps=100.25 upload_mbps=-"));
+    assert!(line.contains("download=100 Mbps upload=-"));
     assert!(!line.contains("secret"));
 
     assert!(human_line(&event(EventKind::RequestFailure, Outcome::Error)).is_none());
@@ -104,8 +104,65 @@ fn human_numbers_are_readable_without_rounding_machine_output() {
     assert!(
         human_line(&bandwidth)
             .unwrap()
-            .contains("download_mbps=12.695 upload_mbps=1000")
+            .contains("download=12.7 Mbps upload=1 Gbps")
     );
+}
+
+#[test]
+fn bandwidth_units_cover_small_large_and_rounding_boundary_values() {
+    for (mbps, expected) in [
+        (0.0, "0 bps"),
+        (0.0000001, "0.1 bps"),
+        (1e-10, "1.00e-4 bps"),
+        (0.0001, "100 bps"),
+        (0.0009994, "999 bps"),
+        (0.0009996, "1 Kbps"),
+        (0.001, "1 Kbps"),
+        (0.25, "250 Kbps"),
+        (0.9996, "1 Mbps"),
+        (1.0, "1 Mbps"),
+        (94.234, "94.2 Mbps"),
+        (999.6, "1 Gbps"),
+        (1250.0, "1.25 Gbps"),
+        (10000.0, "10 Gbps"),
+        (999600.0, "1 Tbps"),
+        (1250000.0, "1.25 Tbps"),
+        (1e12, "1.00e6 Tbps"),
+    ] {
+        let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+        bandwidth.download_mbps = Some(mbps);
+        bandwidth.upload_mbps = Some(mbps);
+        let line = human_line(&bandwidth).unwrap();
+        assert!(
+            line.contains(&format!("download={expected} upload={expected}\n")),
+            "{mbps} Mbps: {line}"
+        );
+    }
+}
+
+#[test]
+fn bandwidth_presentation_preserves_csv_and_jsonl_mbps() {
+    let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+    bandwidth.download_mbps = Some(0.000123456789);
+    bandwidth.upload_mbps = Some(12345.678901234);
+    let original = bandwidth.clone();
+    human_line(&bandwidth).unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&render_jsonl(&bandwidth).unwrap()).unwrap();
+    let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
+    journal.append_batch(&[bandwidth]).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    let headers = reader.headers().unwrap().clone();
+    let row = reader.records().next().unwrap().unwrap();
+    for (field, expected) in [
+        ("download_mbps", original.download_mbps.unwrap()),
+        ("upload_mbps", original.upload_mbps.unwrap()),
+    ] {
+        assert_eq!(json[field].as_f64().unwrap(), expected);
+        let column = headers.iter().position(|header| header == field).unwrap();
+        assert_eq!(row[column].parse::<f64>().unwrap(), expected);
+    }
 }
 
 #[test]
