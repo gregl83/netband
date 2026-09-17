@@ -17,7 +17,7 @@ use netband::interfaces::{
     FairInterfaceSelector, InterfaceError, InterfaceResolver, ResolvedInterface,
 };
 use netband::journal::{JournalError, JournalSink, OutputCoordinator};
-use netband::model::{EventKind, MeasurementEvent, Outcome};
+use netband::model::{EventKind, MeasurementEvent, Outcome, SchedulerReason};
 use netband::monitor::{
     PingMonitorConfig, PingTransportFactory, cancellation_channel, monitor_multi_interface,
 };
@@ -256,12 +256,14 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
         event.event_kind == EventKind::Scheduler
             && event.interface.as_deref() == Some("eth-b")
             && event.outcome == Outcome::Deferred
+            && event.scheduler_reason == Some(SchedulerReason::InterfaceUnavailable)
             && event.ping_local_ip.is_none()
     }));
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::Scheduler
             && event.interface.as_deref() == Some("eth-b")
             && event.outcome == Outcome::Success
+            && event.scheduler_reason == Some(SchedulerReason::InterfaceAvailable)
     }));
     for event in events
         .iter()

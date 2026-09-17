@@ -12,7 +12,7 @@ use crate::config::{BandwidthConfig, ProviderConfig};
 use crate::health::{DegradationReason, HealthDecision};
 use crate::model::{
     ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, RunId,
-    SchedulerAction, TriggerReason,
+    SchedulerAction, SchedulerReason, TriggerReason,
 };
 
 mod persistence;
@@ -312,7 +312,7 @@ impl Scheduler {
                     Outcome::Deferred,
                     trigger_reason,
                     EventContext::for_interface(interface),
-                    (action, message),
+                    (action, SchedulerReason::HealthDegraded, message),
                 ));
             }
             HealthDecision::Recovered(_) => {
@@ -334,6 +334,7 @@ impl Scheduler {
                         EventContext::for_interface(interface),
                         (
                             SchedulerAction::TriggerCancelled,
+                            SchedulerReason::HealthRecovered,
                             "reason=health_recovered".to_owned(),
                         ),
                     ));
@@ -399,6 +400,7 @@ impl Scheduler {
                     EventContext::for_interface(interface_from_key(&key)),
                     (
                         SchedulerAction::TriggerExpired,
+                        SchedulerReason::TriggerTtlExpired,
                         "reason=ttl latch=retained rearm=health_recovery".to_owned(),
                     ),
                 ));
@@ -419,6 +421,11 @@ impl Scheduler {
                     EventContext::new(None, self.state().cooldown_until_utc),
                     (
                         SchedulerAction::DeferredExpired,
+                        if now >= deferred.expires_at_utc {
+                            SchedulerReason::DayLimit
+                        } else {
+                            SchedulerReason::AttemptLimit
+                        },
                         "reason=day_or_attempt_limit".to_owned(),
                     ),
                 ));
@@ -486,7 +493,7 @@ impl Scheduler {
                     reason,
                     EventContext::new(Some(blocked.kind), blocked.cooldown_until)
                         .with_interface(pending_interface.as_deref()),
-                    (blocked.action, blocked.message),
+                    (blocked.action, blocked.reason, blocked.message),
                 ),
             );
             return Ok(SchedulerPoll {
@@ -512,6 +519,7 @@ impl Scheduler {
             EventContext::NONE,
             (
                 SchedulerAction::BandwidthStart,
+                SchedulerReason::OpportunityReady,
                 "bandwidth start".to_owned(),
             ),
         ));
@@ -543,7 +551,7 @@ impl Scheduler {
                 Outcome::Suppressed,
                 TriggerReason::Manual,
                 EventContext::new(Some(blocked.kind), blocked.cooldown_until),
-                (blocked.action, blocked.message),
+                (blocked.action, blocked.reason, blocked.message),
             )))),
             None => Ok(ManualDecision::Allowed),
         }
@@ -632,6 +640,7 @@ impl Scheduler {
                         .with_interface(opportunity.interface.as_deref()),
                     (
                         SchedulerAction::RateLimit,
+                        SchedulerReason::ProviderRateLimit,
                         format!(
                             "stage={} status={} retry_after={} reserved={} deferred_attempts={}",
                             stage_text(rate_limit.stage),
@@ -756,6 +765,7 @@ impl Scheduler {
                 EventContext::new(Some(ErrorKind::Internal), None),
                 (
                     SchedulerAction::ClockRollback,
+                    SchedulerReason::ClockRollback,
                     format!(
                         "previous={} current={}",
                         previous.to_rfc3339(),
@@ -820,6 +830,7 @@ impl Scheduler {
                 };
             return Some(BlockReason {
                 action: SchedulerAction::Suppressed,
+                reason: SchedulerReason::DailyCap,
                 kind: ErrorKind::DailyCap,
                 cooldown_until: None,
                 message: format!("reason=daily_cap used={} maximum={}", used, maximum),
@@ -833,6 +844,7 @@ impl Scheduler {
         {
             return Some(BlockReason {
                 action: SchedulerAction::Deferred,
+                reason: SchedulerReason::ProviderCooldown,
                 kind: ErrorKind::ProviderCooldown,
                 cooldown_until: Some(deadline),
                 message: format!("reason=provider_cooldown until={}", deadline.to_rfc3339()),
@@ -843,6 +855,7 @@ impl Scheduler {
             if now < eligible {
                 return Some(BlockReason {
                     action: SchedulerAction::Deferred,
+                    reason: SchedulerReason::MinimumSpacing,
                     kind: ErrorKind::ProviderCooldown,
                     cooldown_until: Some(eligible),
                     message: format!("reason=minimum_spacing until={}", eligible.to_rfc3339()),
@@ -919,7 +932,7 @@ impl Scheduler {
         outcome: Outcome,
         reason: TriggerReason,
         context: EventContext,
-        decision: (SchedulerAction, String),
+        decision: (SchedulerAction, SchedulerReason, String),
     ) -> MeasurementEvent {
         let mut event = MeasurementEvent::new(run_id, EventKind::Scheduler, outcome, now);
         event.trigger_reason = Some(reason);
@@ -929,7 +942,8 @@ impl Scheduler {
         event.scheduler_not_before_utc = context.cooldown_until;
         event.provider_daily_starts = Some(runs_on_day(self.state(), now.date_naive()));
         event.scheduler_action = Some(decision.0);
-        event.message = Some(decision.1);
+        event.scheduler_reason = Some(decision.1);
+        event.message = Some(decision.2);
         event.error_kind = context
             .error_kind
             .filter(|kind| !matches!(kind, ErrorKind::DailyCap | ErrorKind::ProviderCooldown));
@@ -960,6 +974,7 @@ impl ReservationGate for Scheduler {
 #[derive(Debug)]
 struct BlockReason {
     action: SchedulerAction,
+    reason: SchedulerReason,
     kind: ErrorKind,
     cooldown_until: Option<DateTime<Utc>>,
     message: String,

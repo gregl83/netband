@@ -71,6 +71,28 @@ pub enum SchedulerAction {
     BandwidthInterfaceSkipped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerReason {
+    HealthDegraded,
+    HealthRecovered,
+    TriggerTtlExpired,
+    DayLimit,
+    AttemptLimit,
+    OpportunityReady,
+    ProviderRateLimit,
+    ClockRollback,
+    DailyCap,
+    ProviderCooldown,
+    MinimumSpacing,
+    InterfaceAvailable,
+    InterfaceUnavailable,
+    TriggerInterfaceMissing,
+    TriggerInterfaceBackoff,
+    TriggerInterfaceUnavailable,
+    NoHealthyInterface,
+}
+
 pub const SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -209,6 +231,7 @@ pub struct MeasurementEvent {
 
     // Scheduling and accounting.
     pub scheduler_action: Option<SchedulerAction>,
+    pub scheduler_reason: Option<SchedulerReason>,
     pub trigger_reason: Option<TriggerReason>,
     #[serde(serialize_with = "serialize_optional_timestamp")]
     pub scheduler_not_before_utc: Option<DateTime<Utc>>,
@@ -301,6 +324,7 @@ impl MeasurementEvent {
             provider_kind: None,
             server_name: None,
             scheduler_action: None,
+            scheduler_reason: None,
             trigger_reason: None,
             scheduler_not_before_utc: None,
             provider_daily_starts: None,

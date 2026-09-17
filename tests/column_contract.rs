@@ -10,7 +10,7 @@ const FAMILIES: &[&str] = &[
     "command,netband_version,process_id",
     "interface,connection_details",
     "provider_id,provider_kind,server_name",
-    "scheduler_action,trigger_reason,scheduler_not_before_utc,provider_daily_starts",
+    "scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_daily_starts",
     "ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code",
     "load_run_id,load_phase",
     "request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc",
@@ -38,7 +38,7 @@ impl<'de> Visitor<'de> for Keys {
 #[test]
 fn csv_and_json_use_the_same_complete_family_order() {
     let expected = FAMILIES.join(",");
-    assert_eq!(expected.split(',').count(), 64);
+    assert_eq!(expected.split(',').count(), 65);
     assert_eq!(CSV_HEADER, expected);
     let event = MeasurementEvent::new(
         RunId::new(),
@@ -57,8 +57,8 @@ fn csv_and_json_use_the_same_complete_family_order() {
 fn removed_fields_are_absent_and_family_specific_values_start_unavailable() {
     let event = MeasurementEvent::new(
         RunId::new(),
-        EventKind::Scheduler,
-        Outcome::Deferred,
+        EventKind::PingProbe,
+        Outcome::Success,
         chrono::Utc::now(),
     );
     let json = serde_json::to_value(event).unwrap();
@@ -78,6 +78,7 @@ fn removed_fields_are_absent_and_family_specific_values_start_unavailable() {
         assert!(json.get(removed).is_none(), "obsolete column: {removed}");
     }
     for field in [
+        "scheduler_reason",
         "ping_local_ip",
         "request_local_ip",
         "request_remote_ip",

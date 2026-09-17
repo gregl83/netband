@@ -19,6 +19,7 @@ use crate::interfaces::{FairInterfaceSelector, InterfaceResolver, SystemInterfac
 use crate::journal::{Journal, JournalError, JournalSink, OutputCoordinator};
 use crate::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind, SchedulerAction,
+    SchedulerReason,
 };
 use crate::ping::{
     PingRoundError, PingRoundReport, PingRoundRequest, PingTransport, SurgePingTransport,
@@ -485,11 +486,15 @@ where
                         if runtime.mark_available() {
                             let event = interface_event(
                                 &config.run_id,
-                                            &runtime.name,
+                                &runtime.name,
                                 Outcome::Success,
                                 None,
                                 None,
-                (SchedulerAction::InterfaceRecovered, "interface recovered".to_owned()),
+                                (
+                                    SchedulerAction::InterfaceRecovered,
+                                    SchedulerReason::InterfaceAvailable,
+                                    "interface recovered".to_owned(),
+                                ),
                             );
                             coordinator.publish_batch(&[event])?;
                         }
@@ -506,11 +511,15 @@ where
                         stats.interface_failures += 1;
                         let event = interface_event(
                             &config.run_id,
-                                    &runtime.name,
+                            &runtime.name,
                             Outcome::Deferred,
                             Some(ErrorKind::Io),
                             Some(Utc::now() + chrono_duration(delay)),
-                (SchedulerAction::InterfaceRetry, format!("error={error}")),
+                            (
+                                SchedulerAction::InterfaceRetry,
+                                SchedulerReason::InterfaceUnavailable,
+                                format!("error={error}"),
+                            ),
                         );
                         coordinator.publish_batch(&[event])?;
                     }
@@ -808,6 +817,7 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                 None,
                 (
                     SchedulerAction::BandwidthSuppressed,
+                    SchedulerReason::TriggerInterfaceMissing,
                     "reason=trigger_interface_missing".to_owned(),
                 ),
             ));
@@ -822,6 +832,7 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                 runtime.retry_at.map(instant_to_utc),
                 (
                     SchedulerAction::BandwidthSuppressed,
+                    SchedulerReason::TriggerInterfaceBackoff,
                     "reason=trigger_interface_backoff".to_owned(),
                 ),
             ));
@@ -843,6 +854,7 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                     Some(Utc::now() + chrono_duration(delay)),
                     (
                         SchedulerAction::BandwidthSuppressed,
+                        SchedulerReason::TriggerInterfaceUnavailable,
                         format!("reason=trigger_interface_unavailable error={error}"),
                     ),
                 ));
@@ -879,6 +891,7 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                     Some(Utc::now() + chrono_duration(delay)),
                     (
                         SchedulerAction::BandwidthInterfaceSkipped,
+                        SchedulerReason::InterfaceUnavailable,
                         format!("reason=unavailable error={error}"),
                     ),
                 ));
@@ -894,6 +907,7 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
         None,
         (
             SchedulerAction::BandwidthSuppressed,
+            SchedulerReason::NoHealthyInterface,
             "reason=no_healthy_interface".to_owned(),
         ),
     ));
@@ -906,14 +920,15 @@ fn interface_event(
     outcome: Outcome,
     error_kind: Option<ErrorKind>,
     retry_at: Option<DateTime<Utc>>,
-    decision: (SchedulerAction, String),
+    decision: (SchedulerAction, SchedulerReason, String),
 ) -> MeasurementEvent {
     let mut event = MeasurementEvent::new(run_id, EventKind::Scheduler, outcome, Utc::now());
     event.interface = (interface != "unassigned").then(|| interface.to_owned());
     event.error_kind = error_kind;
     event.scheduler_not_before_utc = retry_at;
     event.scheduler_action = Some(decision.0);
-    event.message = Some(decision.1);
+    event.scheduler_reason = Some(decision.1);
+    event.message = Some(decision.2);
     event
 }
 

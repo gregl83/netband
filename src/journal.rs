@@ -65,6 +65,7 @@ csv_event! { event;
     server_name => event.server_name,
 
     scheduler_action => event.scheduler_action,
+    scheduler_reason => event.scheduler_reason,
     trigger_reason => event.trigger_reason,
     scheduler_not_before_utc => event.scheduler_not_before_utc.map(crate::model::timestamp_text),
     provider_daily_starts => event.provider_daily_starts,

@@ -110,6 +110,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     deferred.provider_kind = Some(ProviderKind::Mlab);
     deferred.scheduler_not_before_utc = Some(timestamp(3));
     deferred.provider_daily_starts = Some(2);
+    deferred.scheduler_reason = Some(netband::model::SchedulerReason::ProviderCooldown);
     deferred.scheduler_action = Some(netband::model::SchedulerAction::Deferred);
     deferred.message = Some("provider cooldown active".into());
 
@@ -118,6 +119,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     suppressed.provider_id = Some("mlab".into());
     suppressed.provider_kind = Some(ProviderKind::Mlab);
     suppressed.provider_daily_starts = Some(4);
+    suppressed.scheduler_reason = Some(netband::model::SchedulerReason::DailyCap);
     suppressed.scheduler_action = Some(netband::model::SchedulerAction::Suppressed);
     suppressed.message = Some("daily maximum reached".into());
 
@@ -223,7 +225,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 64);
+    assert_eq!(partial_record.len(), 65);
     OpenOptions::new()
         .append(true)
         .open(&path)

@@ -1,13 +1,13 @@
 # CSV schema and outcomes
 
-Netband's v1 journal has 64 fields shared by CSV and JSONL. CSV is the authoritative
+Netband's v1 journal has 65 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
 a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
 ## Fields and encoding
 
 ```csv
-schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,trigger_reason,scheduler_not_before_utc,provider_daily_starts,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
+schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_daily_starts,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -86,6 +86,7 @@ Download and upload families have identical suffixes and ordering.
 | Field | Meaning |
 | --- | --- |
 | `scheduler_action` | Structured scheduling decision; values listed under Diagnostics |
+| `scheduler_reason` | Stable reason for the scheduling decision; populated on scheduler events only; values below |
 | `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
 | `scheduler_not_before_utc` | Deadline applied by this scheduler decision, including provider cooldown, minimum spacing or interface retry; other policy gates may still block work after this time; empty on other event kinds |
 | `provider_daily_starts` | Bandwidth starts reserved for this provider and UTC day, including failed or interrupted attempts; not a count of successful tests |
@@ -362,10 +363,36 @@ a reviewed copy while retaining the original journal as evidence.
 `os_error_code` is platform-specific; `message` is sanitized explanatory prose
 and is not a stable machine contract.
 
-Scheduler decisions use `scheduler_action` and optional `message`. Normal cap,
+Scheduler decisions use `scheduler_action` for what happened, `scheduler_reason`
+for why, and optional `message` for human detail. `trigger_reason` separately
+identifies the origin of a bandwidth opportunity (schedule, health, or manual).
+Consumers must not parse `message` to classify decisions. Normal cap,
 spacing, cooldown and health decisions leave `error_kind` and `os_error_code` empty.
 An actual interface resolution or clock error may additionally populate those fields.
 The same `message` column holds any human-readable failure explanation.
+
+When both expiry limits apply, `day_limit` takes precedence. Non-scheduler events
+leave `scheduler_reason` unavailable. Normal policy reasons do not populate error fields.
+
+| `scheduler_reason` | Meaning |
+| --- | --- |
+| `health_degraded` | Health degradation created or merged a trigger |
+| `health_recovered` | Health recovery cancelled a pending trigger |
+| `trigger_ttl_expired` | Pending trigger reached its lifetime |
+| `day_limit` | Deferred opportunity reached its day boundary |
+| `attempt_limit` | Deferred opportunity reached its retry limit |
+| `opportunity_ready` | An opportunity passed scheduler policy checks; this does not establish that admission reserved a start |
+| `provider_rate_limit` | A provider response caused a cooldown decision |
+| `clock_rollback` | Wall clock moved behind the last observed time |
+| `daily_cap` | Configured or provider daily cap blocked an opportunity |
+| `provider_cooldown` | An existing provider cooldown blocked an opportunity |
+| `minimum_spacing` | Minimum interval between reserved starts blocked an opportunity |
+| `interface_available` | An unavailable interface recovered |
+| `interface_unavailable` | Interface resolution failed during probing or selection |
+| `trigger_interface_missing` | The interface associated with a trigger is absent |
+| `trigger_interface_backoff` | The interface associated with a trigger is waiting for retry |
+| `trigger_interface_unavailable` | Resolution of the interface associated with a trigger failed |
+| `no_healthy_interface` | No eligible interface could be selected |
 
 | `scheduler_action` | Meaning |
 | --- | --- |

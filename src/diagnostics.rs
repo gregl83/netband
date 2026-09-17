@@ -54,6 +54,7 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 daily_bandwidth_starts = ?event.provider_daily_starts,
                 scheduler_not_before = ?event.scheduler_not_before_utc,
                 action = ?event.scheduler_action,
+                reason = ?event.scheduler_reason,
                 decision = event.message.as_deref().unwrap_or("-"),
                 "scheduler decision"
             ),

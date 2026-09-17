@@ -899,6 +899,10 @@ fn policy_decisions_are_structured_without_error_fields() {
         panic!("zero allowance must block");
     };
     assert_eq!(event.scheduler_action, Some(SchedulerAction::Suppressed));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap()["scheduler_reason"],
+        "daily_cap"
+    );
     assert_eq!(event.outcome, Outcome::Suppressed);
     assert!(event.message.as_deref().unwrap().contains("daily_cap"));
     assert!(event.error_kind.is_none());
@@ -950,6 +954,7 @@ fn request_deadline_and_scheduler_eligibility_have_independent_columns() {
     );
     assert!(request["scheduler_not_before_utc"].is_null());
     assert!(decision["request_retry_at_utc"].is_null());
+    assert_eq!(decision["scheduler_reason"], "provider_rate_limit");
     assert!(decision["error_kind"].is_null());
     assert!(decision["message"].is_string());
     assert_eq!(scheduler.snapshot().runs.len(), 0);
@@ -979,6 +984,43 @@ fn minimum_spacing_uses_scheduler_eligibility_without_a_provider_response() {
         netband::model::timestamp_text(now + TimeDelta::seconds(600))
     );
     assert!(json["request_retry_at_utc"].is_null());
+    assert_eq!(json["scheduler_reason"], "minimum_spacing");
     assert!(json["request_retry_after_ms"].is_null());
     assert!(json["error_kind"].is_null());
+}
+
+#[test]
+fn cooldown_reason_is_distinct_from_spacing_without_consuming_a_start() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 37).unwrap();
+    let mut report = rate_report(
+        RequestStage::Locate,
+        429,
+        Some(Duration::from_secs(300)),
+        false,
+    );
+    scheduler
+        .finish_attempt(
+            &support::id("session"),
+            now,
+            BandwidthOpportunity {
+                reason: TriggerReason::Manual,
+                scheduled_at_utc: now,
+                interface: None,
+            },
+            &mut report,
+        )
+        .unwrap();
+    let ManualDecision::Blocked(event) = scheduler
+        .preflight_manual(&support::id("session"), now)
+        .unwrap()
+    else {
+        panic!("cooldown must block");
+    };
+    let json = serde_json::to_value(event).unwrap();
+    assert_eq!(json["scheduler_action"], "deferred");
+    assert_eq!(json["scheduler_reason"], "provider_cooldown");
+    assert!(json["error_kind"].is_null());
+    assert_eq!(scheduler.snapshot().runs.len(), 0);
 }

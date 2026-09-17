@@ -259,7 +259,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 64);
+    assert_eq!(CSV_HEADER.split(',').count(), 65);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -329,6 +329,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         }
         if row["event_kind"] == "scheduler" {
             assert!(row["scheduler_action"].is_string());
+            assert!(row["scheduler_reason"].is_string());
             assert!(row["error_kind"].is_null());
             assert!(row["message"].is_string());
         }
@@ -401,7 +402,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 64);
+        assert_eq!(row.as_object().unwrap().len(), 65);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");

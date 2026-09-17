@@ -4,7 +4,7 @@
 It includes successful, timed-out and unsent pings; a loaded ping overlapping a
 bandwidth attempt; successful and partial bandwidth results; upload cancellation;
 Locate rate limiting; and scheduler deferral and suppression. These are illustrative
-records, not captured network measurements. Every record includes all 64 fields.
+records, not captured network measurements. Every record includes all 65 fields.
 
 The matching [CSV session fixture](../../tests/fixtures/v1-events.csv) contains the
 same 32 records in the same order. Tests keep both representations aligned and
@@ -19,7 +19,7 @@ back to that session through `parent_run_id`. Ping-round grouping uses `run_id`;
 retained directional measurements to any diagnostics from the same request.
 
 Lifecycle records carry no measurement values. Normal scheduler explanations use
-`message` and `scheduler_action`, leaving `error_kind` and `os_error_code` empty. Run finishes retain the
+`message`, `scheduler_action`, and `scheduler_reason`, leaving `error_kind` and `os_error_code` empty. Run finishes retain the
 operation outcome; the root session ends with orderly cancellation.
 
 The populated `connection_details.wifi` object illustrates what a future collector
