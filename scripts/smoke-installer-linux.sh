@@ -46,6 +46,13 @@ esac
 EOF
 chmod 0755 "$work/fake-bin/curl"
 
+cat >"$work/fake-bin/getconf" <<'EOF'
+#!/bin/sh
+[ "$1" = GNU_LIBC_VERSION ] || exit 1
+printf '%s\n' "${INSTALLER_TEST_LIBC:-glibc 2.35}"
+EOF
+chmod 0755 "$work/fake-bin/getconf"
+
 run_installer() {
   local version="$1"
   local expected_url="$2"
@@ -56,7 +63,7 @@ run_installer() {
     INSTALLER_ASSET="$asset" \
     NETBAND_VERSION="$version" \
     NETBAND_INSTALL_DIR="$destination" \
-    sh "$root/install.sh"
+    sh "$root/install.sh" || return $?
   cmp "$work/fixture/netband" "$destination/netband"
 }
 
@@ -85,6 +92,36 @@ fi
   sed '$d' "$root/install.sh" | sh
 )
 test ! -e "$work/install/truncated/netband"
+
+for runtime in 'glibc 2.34' 'musl 1.2.5' 'unknown' 'glibc 35' 'glibc 2.bad'; do
+  if INSTALLER_TEST_LIBC="$runtime" run_installer latest \
+    "https://github.com/gregl83/netband/releases/latest/download"; then
+    echo "error: installer accepted unsupported runtime: $runtime" >&2
+    exit 1
+  fi
+done
+run_installer latest "https://github.com/gregl83/netband/releases/latest/download"
+INSTALLER_TEST_LIBC='glibc 2.40' run_installer latest \
+  "https://github.com/gregl83/netband/releases/latest/download"
+
+# A valid checksum does not imply the executable can run. Keep an existing
+# destination intact and clean up the staged file when the startup check fails.
+printf '#!/bin/sh\nexit 127\n' >"$work/fixture/netband"
+tar -C "$work/fixture" -czf "$work/fixture/$asset" netband
+(cd "$work/fixture" && sha256sum "$asset" >"$asset.sha256")
+mkdir "$work/install/unusable"
+printf 'existing binary\n' >"$work/install/unusable/netband"
+if PATH="$work/fake-bin:$system_path" \
+  INSTALLER_FIXTURE_DIR="$work/fixture" \
+  INSTALLER_EXPECTED_URL="https://github.com/gregl83/netband/releases/latest/download" \
+  INSTALLER_ASSET="$asset" \
+  NETBAND_INSTALL_DIR="$work/install/unusable" \
+  sh "$root/install.sh"; then
+  echo "error: installer accepted an unusable executable" >&2
+  exit 1
+fi
+test "$(cat "$work/install/unusable/netband")" = 'existing binary'
+test "$(ls -A "$work/install/unusable")" = netband
 
 printf 'tampered' >>"$work/fixture/$asset"
 if PATH="$work/fake-bin:$system_path" \

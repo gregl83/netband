@@ -75,6 +75,27 @@ select_target() {
     esac
 }
 
+check_runtime() {
+    libc="$(getconf GNU_LIBC_VERSION 2>/dev/null)" || \
+        die "release binaries require glibc 2.35 or newer; cannot detect glibc"
+    case "$libc" in
+        'glibc '*) libc_version="${libc#glibc }" ;;
+        *) die "release binaries require glibc 2.35 or newer; found $libc" ;;
+    esac
+    case "$libc_version" in
+        *.*) ;;
+        *) die "unrecognized glibc version: $libc_version" ;;
+    esac
+    libc_major="${libc_version%%.*}"
+    libc_minor="${libc_version#*.}"
+    case "$libc_major:$libc_minor" in
+        *[!0-9:]* | :* | *:) die "unrecognized glibc version: $libc_version" ;;
+    esac
+    if [ "$libc_major" -lt 2 ] || { [ "$libc_major" -eq 2 ] && [ "$libc_minor" -lt 35 ]; }; then
+        die "release binaries require glibc 2.35 or newer; found $libc_version"
+    fi
+}
+
 download() {
     curl --fail --location --silent --show-error \
         --proto '=https' --proto-redir '=https' \
@@ -100,6 +121,8 @@ install_binary() {
     staged_binary="$(mktemp "$install_dir/.netband-install.XXXXXX")"
     cp "$work_dir/netband" "$staged_binary"
     chmod 0755 "$staged_binary"
+    "$staged_binary" --version >/dev/null || \
+        die "release binary cannot run here; check runtime libraries and install-directory execute permissions"
     mv -f "$staged_binary" "$install_dir/netband"
     staged_binary=""
 }
@@ -116,6 +139,7 @@ netband_install() {
     require_commands
     select_target
     select_release
+    check_runtime
 
     asset="netband-${target}.tar.gz"
     checksum_asset="${asset}.sha256"

@@ -110,7 +110,8 @@ jobs:
           mkdir extracted
           (cd dist && sha256sum --check "netband-${target}.tar.gz.sha256")
           tar -xzf "dist/netband-${target}.tar.gz" -C extracted
-          python3 scripts/linux_runtime.py "$target" extracted/netband | tee "runtime-${target}.json"
+          python3 scripts/linux_runtime.py "$target" extracted/netband >"runtime-${target}.json"
+          cat "runtime-${target}.json"
           bash scripts/smoke-runtime-linux.sh "$target" extracted/netband "$RELEASE_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -8,7 +8,9 @@ Neither path requires setting up a service.
 Release binaries support Linux x86_64 and aarch64 with glibc 2.35 or newer
 (see [runtime requirements](#runtime-requirements)). You need `curl`, `tar`, and
 `sha256sum`. The installer verifies the archive checksum and installs into
-`~/.local/bin` by default:
+`~/.local/bin` by default. It checks for glibc 2.35+ before downloading and runs
+`--version` on the staged binary before installation; a failed check leaves any
+existing binary untouched:
 
 ```sh
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \

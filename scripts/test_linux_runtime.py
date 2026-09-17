@@ -1,4 +1,10 @@
 """Regression checks for the release ELF compatibility gate."""
+from pathlib import Path
+import os
+import re
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 from linux_runtime import audit
@@ -43,6 +49,40 @@ class RuntimeTests(unittest.TestCase):
         result = self.check(machine="AArch64", target="aarch64-unknown-linux-gnu",
                             interpreter="/lib/ld-linux-aarch64.so.1")
         self.assertEqual(result['glibc_required'], "2.34")
+
+
+class WorkflowRuntimeTests(unittest.TestCase):
+    def test_runtime_audit_failure_stops_the_release_step(self):
+        self.run_step(audit_exit=1)
+
+    def test_successful_runtime_audit_reaches_smoke_test(self):
+        self.run_step(audit_exit=0)
+
+    def run_step(self, audit_exit):
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/cd.yml').read_text()
+        step = workflow.split('      - name: Check and smoke test the packaged runtime\n')[1]
+        body = re.search(r'        run: \|\n((?:          .*\n)+)', step).group(1)
+        body = textwrap.dedent(body).replace('${{ matrix.target }}', 'x86_64-unknown-linux-gnu')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'dist').mkdir()
+            fake = root / 'bin'
+            fake.mkdir()
+            for name, command in {
+                'python3': f'echo runtime-report; exit {audit_exit}',
+                'tar': 'exit 0',
+                'sha256sum': 'exit 0',
+                'bash': 'touch smoke-ran',
+            }.items():
+                executable = fake / name
+                executable.write_text(f'#!/bin/sh\n{command}\n')
+                executable.chmod(0o755)
+            # GitHub's unspecified Linux shell uses bash -e, without pipefail.
+            result = subprocess.run(['/bin/bash', '-e', '-c', body], cwd=root,
+                                    env=dict(os.environ, PATH=f'{fake}:{os.environ["PATH"]}',
+                                             RELEASE_VERSION='1.0.0'), capture_output=True, text=True)
+            self.assertEqual(result.returncode == 0, audit_exit == 0, result.stderr)
+            self.assertEqual((root / 'smoke-ran').exists(), audit_exit == 0)
 
 
 if __name__ == "__main__":
