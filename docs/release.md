@@ -13,6 +13,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo deny check
+python3 -m unittest discover -s scripts -p test_release.py
 bash scripts/smoke-installer-linux.sh
 bash scripts/smoke-readme-linux.sh
 bash scripts/smoke-release-linux.sh
@@ -58,21 +59,51 @@ Before publishing, check that README installation commands lead to binaries with
 advertised CLI and that linked reference docs match the release. Keep the source-build
 tag in [installation](install.md) aligned with the package version.
 
-The [CD workflow](../.github/workflows/cd.yml) starts when a GitHub release is
-published. The tag must be `v` followed by the package version in `Cargo.toml`.
-The workflow then:
+The [CD workflow](../.github/workflows/cd.yml) separates preparation from publication.
+The workflow must be present on the default branch to enable manual dispatch.
 
-1. Checks the tag/version, source quality, installer fixtures, dependency policy,
-   and crate packaging.
+### Prepare a draft
+
+In **Actions → CD → Run workflow**, select the release branch and enter the package
+version, such as `1.0.0`. Equivalently:
+
+```sh
+gh workflow run cd.yml --ref release/v1.0.0 -f version=1.0.0
+```
+
+The workflow captures the selected ref's commit when dispatched. Every checkout uses
+that exact commit, even if the branch advances. Preparation:
+
+1. Checks the version, formatting, lint, tests, installer fixtures, dependency policy,
+   and crate package.
 2. Builds GNU/Linux x86_64 and aarch64 binaries with Rust 1.98 on Ubuntu 24.04.
-3. Packages and attests the release assets, then uploads them to the GitHub release.
-4. Publishes the crate through the `crates-io` environment, unless that version
-   already exists in the registry.
+   Checksums and extracts each archive, then tests its executable's version, help,
+   and configuration (aarch64 runs under QEMU).
+3. Attests all seven assets and verifies their source commit and workflow identity.
+4. Creates `v1.0.0` at the validated commit and a **draft** release, uploads the assets,
+   then downloads and verifies them again.
 
-Because publication triggers the build, the release can be visible before its assets
-are available. Check workflow completion and both publication destinations before
-announcing availability. CD builds its binaries separately from CI; it does not run
-runtime smoke tests against the extracted release archives.
+A successful run leaves a public Git tag and an unpublished draft release. An existing
+tag must point to the same commit; preparation never moves it. A draft for that commit
+can be retried, replacing its assets while preserving release notes. A published
+release is rejected. Failed uploads can leave a partial draft: wait for a successful
+preparation run before publishing it.
+
+### Publish the prepared draft
+
+Review the successful preparation run, all seven assets, and the release notes, then
+publish the draft in GitHub's Releases page. Publishing triggers CD to verify the
+asset checksums and attestations against the released commit, then publish the crate
+through the `crates-io` environment. It does not rebuild or replace the binary assets.
+An already published crate version is skipped.
+
+Do not create a separate release or publish from automation using `GITHUB_TOKEN`;
+that token's release events do not start another workflow. Configure the `crates-io`
+environment and its `CARGO_REGISTRY_TOKEN` secret before publication.
+
+The binaries are available when the draft becomes public; crates.io publication
+follows. Confirm both destinations before announcing availability. These archive
+checks do not establish physical Raspberry Pi compatibility or a minimum glibc version.
 
 ## Release assets
 

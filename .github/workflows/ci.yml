@@ -26,6 +26,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo test --all-targets --all-features --locked
+      - run: python3 -m unittest discover -s scripts -p test_release.py
       - run: bash scripts/smoke-installer-linux.sh
       - run: bash scripts/smoke-readme-linux.sh
       - run: bash scripts/smoke-release-linux.sh
