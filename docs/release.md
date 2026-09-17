@@ -13,7 +13,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo deny check
-python3 -m unittest discover -s scripts -p test_release.py
+python3 -m unittest discover -s scripts -p 'test_*.py'
 bash scripts/smoke-installer-linux.sh
 bash scripts/smoke-readme-linux.sh
 bash scripts/smoke-release-linux.sh
@@ -76,9 +76,12 @@ that exact commit, even if the branch advances. Preparation:
 
 1. Checks the version, formatting, lint, tests, installer fixtures, dependency policy,
    and crate package.
-2. Builds GNU/Linux x86_64 and aarch64 binaries with Rust 1.98 on Ubuntu 24.04.
-   Checksums and extracts each archive, then tests its executable's version, help,
-   and configuration (aarch64 runs under QEMU).
+2. Builds GNU/Linux x86_64 and aarch64 binaries with Rust 1.98 on Ubuntu 22.04.
+   Checksums and extracts each archive, audits its ELF runtime requirements, then
+   tests version, help, and configuration in Ubuntu 22.04 containers with networking
+   disabled (aarch64 uses QEMU). glibc requirements above 2.35, an unexpected loader,
+   architecture, or shared library fail preparation. Each `runtime-<target>` Actions
+   artifact records the actual glibc symbol requirement and shared libraries.
 3. Attests all seven assets and verifies their source commit and workflow identity.
 4. Creates `v1.0.0` at the validated commit and a **draft** release, uploads the assets,
    then downloads and verifies them again.
@@ -103,7 +106,8 @@ environment and its `CARGO_REGISTRY_TOKEN` secret before publication.
 
 The binaries are available when the draft becomes public; crates.io publication
 follows. Confirm both destinations before announcing availability. These archive
-checks do not establish physical Raspberry Pi compatibility or a minimum glibc version.
+checks establish the [glibc 2.35 user-space baseline](install.md#runtime-requirements),
+not physical Raspberry Pi compatibility or a minimum kernel version.
 
 ## Release assets
 

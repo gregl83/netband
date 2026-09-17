@@ -19,7 +19,8 @@ Built for Linux, from your workstation to a Raspberry Pi.
 
 ## Install
 
-For Linux x86_64 and aarch64, install a checksum-verified release to `~/.local/bin`:
+For Linux x86_64 and aarch64 with glibc 2.35+ ([requirements](docs/install.md#runtime-requirements)),
+install a checksum-verified release to `~/.local/bin`:
 
 ```sh
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
