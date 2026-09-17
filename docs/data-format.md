@@ -1,13 +1,13 @@
 # CSV schema and outcomes
 
-Netband's v1 journal has 67 fields shared by CSV and JSONL. CSV is the authoritative
+Netband's v1 journal has 68 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
 a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
 ## Fields and encoding
 
 ```csv
-schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
+schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -39,7 +39,8 @@ Download and upload families have identical suffixes and ordering.
 | `event_kind` | `run_started`, `run_finished`, `ping_probe`, `bandwidth`, `request_failure`, or `scheduler` |
 | `event_sequence` | One-based journal emission order across a session and all its children; resets for each session |
 | `run_id` | UUID of the session, ping round, or bandwidth attempt owning this event |
-| `parent_run_id` | Parent session UUID on every child-run event; empty for session events |
+| `parent_run_id` | Immediate parent run UUID; empty on root events |
+| `root_run_id` | Topmost run UUID on every event; equals `run_id` on root events (currently sessions) |
 | `run_kind` | `session`, `ping_round`, or `bandwidth`, populated on every event |
 
 ### Timing
@@ -167,8 +168,8 @@ Download and upload families have identical suffixes and ordering.
 
 | Event kind | Record scope | Field context |
 | --- | --- | --- |
-| `run_started` | Start of a session or child run | Run identity, parent, kind, start timestamp; session starts also include command, version and PID; outcome is `started` |
-| `run_finished` | Completion or orderly termination of that run | Same run identity, parent and kind; start/finish timestamps, monotonic elapsed time, outcome and any command failure |
+| `run_started` | Start of a session or child run | Run identity, parent, root, kind, start timestamp; session starts also include command, version and PID; outcome is `started` |
+| `run_finished` | Completion or orderly termination of that run | Same run identity, parent, root and kind; start/finish timestamps, monotonic elapsed time, outcome and any command failure |
 | `ping_probe` | One attempt against one target | Target, sequence, packet counts, RTT, ICMP details, and any failure; load fields identify a concurrent bandwidth attempt |
 | `bandwidth` | One bandwidth attempt | Provider, logical server, trigger, accounting, and independently available download/upload measurements |
 | `request_failure` | One failed request or stage within a bandwidth attempt | Request URL, direction, stage, request ID, known endpoints, response details, and diagnostic |
@@ -184,11 +185,17 @@ may display derived loss; no redundant per-probe loss percentage is stored.
 
 Every measurement command creates a root session. Each ping round and bandwidth
 attempt has a distinct child run, including measurements from one-shot commands.
-Scheduler decisions belong to the session. `config check` emits no journal events.
+Scheduler decisions caused by a bandwidth attempt belong to that bandwidth run and
+precede its finish, including provider rate-limit decisions. General decisions such
+as health triggers, pre-run interface selection, and suppression by an existing
+cooldown belong to the session. `config check` emits no journal events.
 A child start is durably recorded before its measurement work begins, and a session
 start precedes every child start. Results precede their run's finish record.
 
-Join children to the session start using `parent_run_id = run_id`. Join probe events
+Group all events in a session by `root_run_id`; join it to the root start
+record’s `run_id`. Join immediate children to parents using `parent_run_id = run_id`.
+The current producers use one child level, so child parent and root IDs match.
+The coordinator preserves the same root through deeper nesting. Join probe events
 by `run_id` to group a ping round; ICMP `ping_sequence` wraps and is not a round identifier.
 Join request failures to their bandwidth result by `run_id`, and use `event_id` for
 deduplication. `load_run_id` separately links a probe to overlapping bandwidth work.

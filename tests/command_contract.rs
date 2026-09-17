@@ -158,12 +158,28 @@ async fn provider_failure_is_journaled_and_suppression_does_not_reconnect() {
     assert!(rows.iter().any(|row| row["event_kind"] == "bandwidth"
         && row["outcome"] == "rate_limited"
         && row["provider_daily_starts"] == "1"));
+    let bandwidth = rows
+        .iter()
+        .find(|row| row["event_kind"] == "bandwidth")
+        .unwrap();
+    let decision = rows
+        .iter()
+        .find(|row| row["scheduler_action"] == "rate_limit")
+        .unwrap();
+    assert_eq!(decision["run_id"], bandwidth["run_id"]);
+    assert_eq!(decision["parent_run_id"], bandwidth["parent_run_id"]);
+    assert_eq!(decision["root_run_id"], bandwidth["parent_run_id"]);
+    assert_eq!(decision["run_kind"], "bandwidth");
     let before = rows.len();
     let mut second = fixture.spawn();
     assert_eq!(second.wait().await.code(), Some(1));
     let rows = fixture.rows();
     assert_complete_hierarchy(&rows);
     assert_eq!(rows.len(), before + 3);
+    let blocked = &rows[before + 1];
+    assert_eq!(blocked["run_kind"], "session");
+    assert_eq!(blocked["root_run_id"], blocked["run_id"]);
+    assert!(blocked["parent_run_id"].is_empty());
     assert_eq!(rows.last().unwrap()["outcome"], "suppressed");
     assert!(
         tokio::time::timeout(Duration::from_millis(50), fixture.listener.accept())
@@ -330,12 +346,15 @@ fn assert_complete_hierarchy(rows: &[HashMap<String, String>]) {
     let mut active = HashMap::new();
     let mut ids = HashSet::new();
     let mut sequence = 0;
+    let mut root = None;
     for row in rows {
         assert!(ids.insert(&row["event_id"]));
         if row["event_kind"] == "run_started" && row["run_kind"] == "session" {
             assert!(active.is_empty());
             sequence = 0;
+            root = Some(&row["run_id"]);
         }
+        assert_eq!(Some(&row["root_run_id"]), root);
         sequence += 1;
         assert_eq!(row["event_sequence"], sequence.to_string());
         let run = &row["run_id"];

@@ -49,6 +49,10 @@ fn hierarchy_and_emission_order_survive_tied_and_reversed_clocks() {
     let mut ids = HashSet::new();
     for (index, event) in journal.iter().enumerate() {
         assert_eq!(event.event_sequence, Some(index as u64 + 1));
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["root_run_id"],
+            session.to_string()
+        );
         assert!(ids.insert(event.event_id));
         if let Some(parent) = event.parent_run_id {
             assert!(started.contains(&parent));
@@ -248,4 +252,51 @@ fn handled_error_finishes_active_children_before_the_session() {
                 .contains("persistence failed")
         );
     }
+}
+
+#[test]
+fn nested_runs_keep_the_root_and_finish_descendants_before_ancestors_on_error() {
+    let mut output = OutputCoordinator::new(Records::default(), ConsoleOff);
+    let root = RunId::new();
+    let child = RunId::new();
+    let nested = RunId::new();
+    output.start_session(root, "run").unwrap();
+    output.start_run(child, root, RunKind::Bandwidth).unwrap();
+    output.start_run(nested, child, RunKind::PingRound).unwrap();
+    output
+        .publish_batch(&[MeasurementEvent::new(
+            nested,
+            EventKind::PingProbe,
+            Outcome::Success,
+            Utc::now(),
+        )])
+        .unwrap();
+    output
+        .finish_session(root, Outcome::Error, Some("fixture failure"))
+        .unwrap();
+    let events = output.into_parts().0.0.into_inner();
+    for event in &events {
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["root_run_id"],
+            root.to_string()
+        );
+        assert_eq!(
+            event.parent_run_id,
+            if event.run_id == root {
+                None
+            } else if event.run_id == child {
+                Some(root)
+            } else {
+                Some(child)
+            }
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_kind == EventKind::RunFinished)
+            .map(|event| event.run_id)
+            .collect::<Vec<_>>(),
+        [nested, child, root]
+    );
 }

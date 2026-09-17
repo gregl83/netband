@@ -265,7 +265,7 @@ where
                     measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
                 if report.reservation_error.is_none() {
                     let scheduler_events =
-                        scheduler.finish_attempt(&session, Utc::now(), opportunity, &mut report)?;
+                        scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
                     report.events.extend(scheduler_events);
                 }
                 coordinator.publish_batch(&report.events)?;

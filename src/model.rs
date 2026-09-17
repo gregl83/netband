@@ -200,6 +200,7 @@ pub struct MeasurementEvent {
     pub event_sequence: Option<u64>,
     pub run_id: RunId,
     pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
     pub run_kind: RunKind,
 
     // Timing.
@@ -299,13 +300,15 @@ impl MeasurementEvent {
         outcome: Outcome,
         finished_at_utc: DateTime<Utc>,
     ) -> Self {
+        let run_id = run_id.into();
         Self {
             schema_version: SCHEMA_VERSION,
             event_id: EventId::new(),
             event_kind,
             event_sequence: None,
-            run_id: run_id.into(),
+            run_id,
             parent_run_id: None,
+            root_run_id: run_id,
             run_kind: match event_kind {
                 EventKind::PingProbe => RunKind::PingRound,
                 EventKind::Bandwidth | EventKind::RequestFailure => RunKind::Bandwidth,

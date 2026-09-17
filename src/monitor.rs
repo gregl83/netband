@@ -434,7 +434,7 @@ where
                     let reservation_error = report.reservation_error.clone();
                     if reservation_error.is_none() {
                         let events = scheduler.finish_attempt(
-                            &config.run_id,
+                            &bandwidth_run_id,
                             Utc::now(),
                             opportunity,
                             &mut report,
@@ -731,7 +731,7 @@ where
             let reservation_error = report.reservation_error.clone();
             if reservation_error.is_none() {
                 let events = scheduler.finish_attempt(
-                    &config.run_id,
+                    &bandwidth_run_id,
                     Utc::now(),
                     opportunity,
                     &mut report,

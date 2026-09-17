@@ -227,7 +227,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 67);
+    assert_eq!(partial_record.len(), 68);
     OpenOptions::new()
         .append(true)
         .open(&path)

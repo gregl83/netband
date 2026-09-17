@@ -43,6 +43,7 @@ csv_event! { event;
     event_sequence => event.event_sequence,
     run_id => event.run_id,
     parent_run_id => event.parent_run_id,
+    root_run_id => event.root_run_id,
     run_kind => event.run_kind,
 
     scheduled_at_utc => event.scheduled_at_utc.map(crate::model::timestamp_text),
@@ -353,6 +354,7 @@ impl<W: Write> JournalSink for JournalWriter<W> {
 }
 
 struct ActiveRun {
+    root: RunId,
     parent: Option<RunId>,
     kind: RunKind,
     started_at: DateTime<Utc>,
@@ -397,6 +399,7 @@ where
             event.event_sequence = Some(self.sequence);
             if let Some(run) = self.runs.get(&event.run_id) {
                 event.parent_run_id = run.parent;
+                event.root_run_id = run.root;
                 event.run_kind = run.kind;
             }
         }
@@ -447,11 +450,13 @@ where
                 "run is already active",
             )));
         }
+        let root = parent.map_or(id, |parent| self.runs[&parent].root);
         let started_at = Utc::now();
         let started = tokio::time::Instant::now();
         let mut event =
             MeasurementEvent::new(id, EventKind::RunStarted, Outcome::Started, started_at);
         event.parent_run_id = parent;
+        event.root_run_id = root;
         event.run_kind = kind;
         event.started_at_utc = Some(started_at);
         event.finished_at_utc = None;
@@ -464,6 +469,7 @@ where
         self.runs.insert(
             id,
             ActiveRun {
+                root,
                 parent,
                 kind,
                 started_at,
@@ -507,13 +513,12 @@ where
         error: Option<&str>,
     ) -> Result<(), JournalError> {
         if error.is_some() {
-            let children: Vec<_> = self
-                .runs
-                .iter()
-                .filter(|(_, run)| run.parent == Some(id))
-                .map(|(id, _)| *id)
-                .collect();
-            for child in children {
+            while let Some(child) = self.runs.iter().find_map(|(&child, run)| {
+                (child != id
+                    && run.root == id
+                    && !self.runs.values().any(|run| run.parent == Some(child)))
+                .then_some(child)
+            }) {
                 self.finish_run(child, Outcome::Error, error)?;
             }
         }

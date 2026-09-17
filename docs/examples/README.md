@@ -4,7 +4,7 @@
 It includes successful, timed-out and unsent pings; a loaded ping overlapping a
 bandwidth attempt; successful and partial bandwidth results; upload cancellation;
 Locate rate limiting; and scheduler deferral and suppression. These are illustrative
-records, not captured network measurements. Every record includes all 67 fields.
+records, not captured network measurements. Every record includes all 68 fields.
 
 The matching [CSV session fixture](../../tests/fixtures/v1-events.csv) contains the
 same 32 records in the same order. Tests keep both representations aligned and
@@ -14,7 +14,9 @@ CSV escaping and diagnostic redaction; it is not a complete session.
 
 Follow `event_sequence` for emission order. The root session start records command,
 version and PID. Child starts precede their results, and every child record points
-back to that session through `parent_run_id`. Ping-round grouping uses `run_id`;
+back to that session through `parent_run_id`. Every record shares its `root_run_id`.
+The rate-limit scheduler decision belongs to the affected bandwidth run and appears
+before its finish; general scheduler decisions belong to the session. Ping-round grouping uses `run_id`;
 `load_run_id` separately identifies concurrent bandwidth work. Request IDs join
 retained directional measurements to any diagnostics from the same request.
 

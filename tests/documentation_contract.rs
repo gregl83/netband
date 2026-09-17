@@ -259,7 +259,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 67);
+    assert_eq!(CSV_HEADER.split(',').count(), 68);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -301,6 +301,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     let mut active = std::collections::BTreeMap::new();
     for (index, row) in example_rows.iter().enumerate() {
         assert_eq!(row["event_sequence"], index + 1);
+        assert_eq!(row["root_run_id"], example_rows[0]["run_id"]);
         let run = row["run_id"].as_str().unwrap();
         let parent = row["parent_run_id"].as_str();
         if let Some(parent) = parent {
@@ -314,6 +315,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
             "run_id",
             "event_id",
             "parent_run_id",
+            "root_run_id",
             "load_run_id",
             "request_id",
             "download_request_id",
@@ -330,6 +332,14 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         if row["event_kind"] == "scheduler" {
             assert!(row["scheduler_action"].is_string());
             assert!(row["scheduler_reason"].is_string());
+            assert_eq!(
+                row["run_kind"],
+                if row["scheduler_action"] == "rate_limit" {
+                    "bandwidth"
+                } else {
+                    "session"
+                }
+            );
             assert!(row["error_kind"].is_null());
             assert!(row["message"].is_string());
         }
@@ -402,7 +412,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 67);
+        assert_eq!(row.as_object().unwrap().len(), 68);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");
