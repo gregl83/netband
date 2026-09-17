@@ -52,6 +52,29 @@ pub struct ResolvedConfig {
 pub enum OutputTarget {
     File(PathBuf),
     Directory(PathBuf),
+    /// A fresh one-shot CSV in an automatically created directory.
+    AutomaticFile(PathBuf),
+    /// Rotating output in an automatically created directory.
+    AutomaticDirectory(PathBuf),
+}
+
+impl OutputTarget {
+    pub fn rotates(&self) -> bool {
+        matches!(self, Self::Directory(_) | Self::AutomaticDirectory(_))
+    }
+
+    pub fn is_automatic(&self) -> bool {
+        matches!(self, Self::AutomaticFile(_) | Self::AutomaticDirectory(_))
+    }
+
+    pub fn directory(&self) -> &Path {
+        match self {
+            Self::File(path) => path.parent().unwrap_or(Path::new(".")),
+            Self::Directory(path) | Self::AutomaticFile(path) | Self::AutomaticDirectory(path) => {
+                path
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -268,14 +291,15 @@ pub fn resolve(cli: &Cli, context: &ResolveContext) -> Result<ResolvedConfig, Co
         cli.options.output_dir.as_ref(),
         file.output.as_ref(),
         file.output_dir.as_ref(),
-        &context.current_dir,
+        context,
+        command,
     )?;
     let rotate_max_bytes = cli.options.rotate_max_bytes.or(file.rotate_max_bytes);
     if let Some(limit) = rotate_max_bytes {
         if limit == 0 {
             return Err(error("rotate_max_bytes must be positive"));
         }
-        if matches!(output, OutputTarget::File(_)) {
+        if !output.rotates() {
             return Err(error("rotate_max_bytes requires directory output"));
         }
     }
@@ -756,8 +780,10 @@ fn resolve_output(
     cli_dir: Option<&PathBuf>,
     file_file: Option<&PathBuf>,
     file_dir: Option<&PathBuf>,
-    current_dir: &Path,
+    context: &ResolveContext,
+    command: CommandKind,
 ) -> Result<OutputTarget, ConfigError> {
+    let current_dir = &context.current_dir;
     if cli_file.is_none() && cli_dir.is_none() && file_file.is_some() && file_dir.is_some() {
         return Err(error("config cannot set both output and output_dir"));
     }
@@ -779,7 +805,15 @@ fn resolve_output(
             current_dir,
         )));
     }
-    Ok(OutputTarget::Directory(current_dir.to_path_buf()))
+    let journals = make_absolute(context.state_dir.join("journals"), current_dir);
+    Ok(match command {
+        CommandKind::OncePing | CommandKind::OnceBandwidth => {
+            OutputTarget::AutomaticFile(journals.join("once"))
+        }
+        CommandKind::Run | CommandKind::ConfigCheck => {
+            OutputTarget::AutomaticDirectory(journals.join("run"))
+        }
+    })
 }
 
 fn make_absolute(path: PathBuf, current_dir: &Path) -> PathBuf {
@@ -854,12 +888,18 @@ fn valid_dns_name(name: &str) -> bool {
 pub fn validate_environment(config: &ResolvedConfig) -> Result<(), ConfigError> {
     resolve_configured(&config.interfaces).map_err(|source| error(source.to_string()))?;
 
-    let directory = match &config.output {
-        OutputTarget::File(path) => path
-            .parent()
-            .ok_or_else(|| error(format!("output file has no parent: {}", path.display())))?,
-        OutputTarget::Directory(path) => path.as_path(),
-    };
+    let mut directory = config.output.directory();
+    if config.output.is_automatic() {
+        // Validate the nearest existing ancestor without creating application state.
+        while !directory
+            .try_exists()
+            .map_err(|source| error(source.to_string()))?
+        {
+            directory = directory
+                .parent()
+                .ok_or_else(|| error("output has no existing ancestor"))?;
+        }
+    }
     validate_directory("output", directory)?;
 
     if let ProviderConfig::Direct(direct) = &config.bandwidth.provider
@@ -901,7 +941,10 @@ impl ResolvedConfig {
         };
         let output = match &self.output {
             OutputTarget::File(path) => format!("file:{}", path.display()),
-            OutputTarget::Directory(path) => format!("directory:{}", path.display()),
+            OutputTarget::Directory(path) | OutputTarget::AutomaticDirectory(path) => {
+                format!("directory:{}", path.display())
+            }
+            OutputTarget::AutomaticFile(path) => format!("unique-file-in:{}", path.display()),
         };
         let _ = writeln!(summary, "configuration=valid");
         let _ = writeln!(summary, "command={}", command_name(self.command));
@@ -917,7 +960,7 @@ impl ResolvedConfig {
             }
         );
         let _ = writeln!(summary, "output={output}");
-        if matches!(self.output, OutputTarget::Directory(_)) {
+        if self.output.rotates() {
             let _ = writeln!(summary, "rotation=daily-utc");
             let _ = writeln!(
                 summary,

@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/netband.svg)](https://crates.io/crates/netband)
 [![Apache 2.0 licensed](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-<p align="center"><img src="assets/netband.svg" alt="Netband network pulse logo" width="180" /></p>
+<p align="center"><img src="assets/netband.svg" alt="Netband network pulse logo" width="250" /></p>
 
 # netband
 

@@ -209,7 +209,18 @@ impl JournalWriter<File> {
     ) -> Result<(Self, PathBuf), JournalError> {
         match output {
             OutputTarget::File(path) => Self::open_explicit(path),
-            OutputTarget::Directory(directory) => Self::create_timestamped(directory, started_at),
+            OutputTarget::Directory(directory) | OutputTarget::AutomaticDirectory(directory) => {
+                Self::create_timestamped(directory, started_at)
+            }
+            OutputTarget::AutomaticFile(directory) => {
+                std::fs::create_dir_all(directory)?;
+                let path = directory.join(format!(
+                    "netband-{}-{}.csv",
+                    started_at.format("%Y%m%dT%H%M%S%.3fZ"),
+                    uuid::Uuid::new_v4()
+                ));
+                Self::create_new(path)
+            }
         }
     }
 
@@ -242,7 +253,10 @@ impl JournalWriter<File> {
         started_at: DateTime<Utc>,
     ) -> Result<(Self, PathBuf), JournalError> {
         let filename = format!("netband-{}.csv", started_at.format("%Y%m%dT%H%M%S%.3fZ"));
-        let path = directory.join(filename);
+        Self::create_new(directory.join(filename))
+    }
+
+    fn create_new(path: PathBuf) -> Result<(Self, PathBuf), JournalError> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)

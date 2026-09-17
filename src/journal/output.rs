@@ -40,17 +40,19 @@ impl Journal {
         max_bytes: Option<u64>,
         now: DateTime<Utc>,
     ) -> Result<Self, JournalError> {
-        if max_bytes == Some(0) || (max_bytes.is_some() && matches!(target, OutputTarget::File(_)))
-        {
+        if max_bytes == Some(0) || (max_bytes.is_some() && !target.rotates()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "positive rotate_max_bytes requires directory output",
             )
             .into());
         }
+        if target.is_automatic() {
+            fs::create_dir_all(target.directory())?;
+        }
         let directory = match target {
-            OutputTarget::File(_) => None,
-            OutputTarget::Directory(path) => {
+            OutputTarget::File(_) | OutputTarget::AutomaticFile(_) => None,
+            OutputTarget::Directory(path) | OutputTarget::AutomaticDirectory(path) => {
                 let lock_path = path.join(LOCK);
                 regular_or_missing(&lock_path)?;
                 let lock = OpenOptions::new()
@@ -75,7 +77,14 @@ impl Journal {
             None => JournalWriter::open_at(target, now)?,
         };
         let bytes = journal.writer.get_ref().metadata()?.len();
-        tracing::info!(path = %path.display(), "measurement journal opened");
+        if target.rotates() {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "Results directory: {}",
+                target.directory().display()
+            );
+        }
+        report_path(&path);
         Ok(Self {
             journal,
             path,
@@ -131,7 +140,7 @@ impl Journal {
             directory.date = directory.date.max(now.date_naive());
             self.bytes = self.journal.writer.get_ref().metadata()?.len();
             self.has_events = false;
-            tracing::info!(path = %self.path.display(), "measurement journal rotated");
+            report_path(&self.path);
         }
         step(Step::BatchWrite)?;
         let mut file = self.journal.writer.get_ref();
@@ -320,3 +329,7 @@ fn step(_step: Step) -> Result<(), JournalError> {
 
 #[cfg(test)]
 mod tests;
+
+fn report_path(path: &Path) {
+    let _ = writeln!(io::stderr().lock(), "Writing results to {}", path.display());
+}

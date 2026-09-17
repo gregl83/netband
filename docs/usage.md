@@ -45,7 +45,21 @@ do not share a budget. See [scheduling](scheduling.md) and
 
 ## Where results go
 
-By default, CSV segments are written to the current directory. To choose a fixed file:
+By default, `once` creates a unique timestamped CSV in
+`~/.local/state/netband/journals/once/`; `run` creates rotating segments in
+`~/.local/state/netband/journals/run/`. `$XDG_STATE_HOME` overrides `~/.local/state`.
+Netband creates these directories when measurement output opens and prints the full
+CSV path to stderr, even with `--console off` or `--verbosity error`. Directory
+output also reports its directory at startup and each new CSV on rotation.
+`config check` reports the default `run` destination without creating files.
+
+Repeated commands preserve earlier results; there is no automatic retention cleanup.
+One-shot files use direct file locks with no directory control files. Monitoring
+keeps its lock and recovery marker in `journals/run/`. A quick ping can run alongside
+monitoring, but bandwidth commands sharing scheduler state remain mutually exclusive.
+Existing files in your working directory are not moved or removed.
+
+To choose a fixed file in your current directory:
 
 ```sh
 netband --output netband.csv once ping

@@ -690,7 +690,7 @@ fn rotating_output_defaults_precedence_and_validation() {
     let defaults = resolve(&parse(&["netband", "run"]), &ctx).unwrap();
     assert_eq!(
         defaults.output,
-        OutputTarget::Directory(dir.path().to_owned())
+        OutputTarget::AutomaticDirectory(dir.path().join("state/journals/run"))
     );
     assert_eq!(defaults.rotate_max_bytes, None);
     assert!(defaults.summary().contains("rotation=daily-utc"));

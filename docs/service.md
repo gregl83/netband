@@ -91,7 +91,8 @@ sudo journalctl -u netband.service -n 100 --no-pager
 sudo journalctl -u netband.service -b
 ```
 
-The operational log reports each new segment path. `.netband-active` in the measurement
+Stderr reports the output directory at startup and each new segment path, regardless
+of log verbosity. `.netband-active` in the measurement
 directory records the current CSV basename. Following one CSV with `tail -f` does not
 switch to new segments; use a [CSV reader](data-format.md#rotating-directory-output)
 across the directory for analysis. Press `Ctrl-C` to stop following logs, or `q` to exit

@@ -362,6 +362,8 @@ async fn rotating_monitor_drains_inflight_round_and_reports_final_segment() {
     let cli = Cli::try_parse_from([
         "netband",
         "--no-bandwidth",
+        "--output-dir",
+        root.path().to_str().unwrap(),
         "--rotate-max-bytes",
         "1",
         "--ping-target",
@@ -436,6 +438,8 @@ async fn rotation_failure_stops_monitor_and_preserves_original_error() {
         &Cli::try_parse_from([
             "netband",
             "--no-bandwidth",
+            "--output-dir",
+            root.path().to_str().unwrap(),
             "--rotate-max-bytes",
             "1",
             "--ping-target",

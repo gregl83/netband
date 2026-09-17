@@ -24,9 +24,10 @@ switch to a fixed file. Sizes are integer bytes, not strings such as `64MiB`.
 
 Directory output rotates before the first nonempty batch on a later UTC date, or
 before the next batch would exceed `rotate_max_bytes`. A batch stays together, so a
-segment may exceed the limit by one batch. The default has daily rotation but no size
-trigger; the service example adds a 64 MiB threshold. Files are never auto-deleted.
-Use one output directory per running process. Directories must already exist.
+segment may exceed the limit by one batch. The `run` default has daily rotation but
+no size trigger; the service example adds a 64 MiB threshold. Files are never
+auto-deleted. Use one rotating output directory per running process. Explicit
+directories must already exist; default storage is created automatically.
 See [CSV rotation and recovery](data-format.md#rotating-directory-output).
 
 ## CLI options and defaults
@@ -45,7 +46,7 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
 | `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
 | `--output FILE` | `output` | Unset; when selected, append to a single CSV without rotation |
-| `--output-dir DIR` | `output_dir` | Current directory; create CSV segments and rotate daily at UTC midnight |
+| `--output-dir DIR` | `output_dir` | Explicit rotating directory; defaults use application state storage (see below) |
 | `--rotate-max-bytes BYTES` | `rotate_max_bytes` | Unset; optional positive soft size limit for directory output, including the header |
 | `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
 | `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
@@ -75,6 +76,19 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 
 `run`, `once ping`, `once bandwidth`, and `config check` are subcommands, not TOML
 values. CLI help is authoritative for spelling: `netband --help`.
+
+## Default result storage
+
+Without `output` or `output_dir`, journals live under the platform state directory
+listed below: `journals/once/` for unique one-shot CSVs and `journals/run/` for rotating
+continuous output. `--state-file` changes scheduler storage only, not journal paths.
+Default journal directories are created when measurements start; `config check`
+validates the nearest existing ancestor and reports the `run` destination without
+creating anything. Explicit output directories must already exist.
+
+One-shot defaults do not rotate. To use `--rotate-max-bytes` with `once`, explicitly
+select `--output-dir`. CLI output settings override TOML as before. Each opened CSV
+path is printed to stderr regardless of console mode or log verbosity.
 
 ## Scheduler state
 

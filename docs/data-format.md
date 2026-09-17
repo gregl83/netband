@@ -513,10 +513,28 @@ fails without changing the file. The OS releases the lock when the process exits
 including after a crash. Fixed-file output needs no separate lock file. On Linux the
 lock is advisory: readers can inspect the CSV, and unrelated writers can ignore it.
 
+## Automatic one-shot output
+
+Without an explicit output destination, `once` creates a CSV named
+`netband-YYYYMMDDTHHMMSS.sssZ-<uuid>.csv` under `journals/once/` in the
+[platform state directory](configuration.md#scheduler-state). Creation is exclusive;
+concurrent or repeated invocations never append to or overwrite another result.
+These files do not rotate or need a directory lock or active marker. The CSV itself
+is locked for the invocation and completed batches are flushed and synced.
+
+After interruption, earlier CSVs remain untouched. An unfinished run has no terminal
+lifecycle record; a crash may leave an incomplete final CSV row. Use explicit
+`--output FILE` to reopen a file with the existing trailing-record recovery rules.
+Historical one-shot files are not automatically scanned, repaired, or deleted.
+
+The absolute CSV path is printed to stderr at startup; directory output also reports
+its directory and reports each new CSV path on rotation. Stdout remains the selected
+human/JSONL/off presentation. Existing working-directory journals are not migrated.
+
 ## Rotating directory output
 
 `--output FILE` appends to one CSV across restarts and never rotates.
-`--output-dir DIR` (or the current directory when neither option is supplied) creates
+`--output-dir DIR` (or the default `journals/run/` for `run`) creates
 segments named `netband-YYYYMMDDTHHMMSS.sssZ.csv`. A numeric suffix resolves collisions
 without overwriting files. Every startup creates a fresh segment.
 
