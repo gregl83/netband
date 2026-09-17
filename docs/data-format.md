@@ -93,9 +93,14 @@ Download and upload families have identical suffixes and ordering.
 
 | Field | Meaning |
 | --- | --- |
-| `provider_id` | Persisted provider identity (`mlab` or hashed direct endpoint identity) |
+| `provider_id` | Stable opaque provider identity (16 lowercase hexadecimal characters); independent of `provider_kind` |
 | `provider_kind` | `mlab` or `direct` |
 | `server_name` | Logical measurement-server identity: M-Lab machine name, or direct TLS name/download hostname; not necessarily the requested host |
+
+All M-Lab servers and Locate URLs share one provider ID for caps and cooldowns.
+Direct IDs derive from normalized download/upload endpoints and the optional TLS
+server name; query tokens do not change identity. IDs persist across runs and are
+used as scheduler accounting keys.
 
 ### Scheduling and accounting
 

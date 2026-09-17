@@ -69,8 +69,8 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
         direct.bandwidth.provider,
         ProviderConfig::Direct(_)
     ));
-    assert_eq!(mlab.bandwidth.provider_id, "mlab");
-    assert!(direct.bandwidth.provider_id.starts_with("direct:"));
+    assert_eq!(mlab.bandwidth.provider_id, "6ae7f3b72d6430cf");
+    assert_eq!(direct.bandwidth.provider_id.len(), 16);
     assert_ne!(mlab.bandwidth.provider_id, direct.bandwidth.provider_id);
     assert!(direct_text.contains(".invalid"));
     assert!(!direct_text.contains("access_token"));

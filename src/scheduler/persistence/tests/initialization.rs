@@ -15,7 +15,7 @@ fn new_state_has_a_checkpoint_and_empty_accounting_before_first_start() {
     .unwrap();
     assert_eq!(checkpoint.sequence, 1);
     assert!(scheduler.snapshot().runs.is_empty());
-    assert!(log.states[0].providers["mlab"].runs.is_empty());
+    assert!(log.states[0].providers["6ae7f3b72d6430cf"].runs.is_empty());
     scheduler.flush().unwrap();
     drop(scheduler);
     let mut scheduler = open(&root).unwrap();

@@ -39,7 +39,7 @@ fn mlab() -> BandwidthConfig {
                 .unwrap(),
             policy_accepted: true,
         }),
-        provider_id: "mlab".into(),
+        provider_id: "6ae7f3b72d6430cf".into(),
         automatic_enabled: true,
         force_limits: false,
         daily_max: 4,
@@ -209,7 +209,7 @@ fn force_overrides_direct_limits_but_not_the_mlab_hard_cap() {
     let direct_root = TempDir::new().unwrap();
     let direct_path = state_path(&direct_root);
     let now = at(30, 1, 0, 0);
-    let direct_config = direct("direct:forced", 1, Duration::from_secs(60));
+    let direct_config = direct("38c8632dfc3b9f59", 1, Duration::from_secs(60));
     let mut scheduler = Scheduler::open_seeded(&direct_path, &direct_config, now, 81).unwrap();
     scheduler.reserve_run(now).unwrap();
     drop(scheduler);
@@ -603,7 +603,7 @@ fn provider_state_is_independent_and_policy_changes_preserve_used_runs() {
     mlab_scheduler.reserve_run(now).unwrap();
     drop(mlab_scheduler);
 
-    let direct_config = direct("direct:canonical", 8, Duration::from_secs(90 * 60));
+    let direct_config = direct("0deeb8fa1dbbee4c", 8, Duration::from_secs(90 * 60));
     let mut direct_scheduler = Scheduler::open_seeded(&path, &direct_config, now, 43).unwrap();
     assert!(direct_scheduler.snapshot().runs.is_empty());
     direct_scheduler.reserve_run(now).unwrap();
@@ -615,13 +615,13 @@ fn provider_state_is_independent_and_policy_changes_preserve_used_runs() {
         .runs
         .len();
     assert_eq!(mlab_runs, 1);
-    let lowered = direct("direct:canonical", 1, Duration::from_secs(2 * 60 * 60));
+    let lowered = direct("0deeb8fa1dbbee4c", 1, Duration::from_secs(2 * 60 * 60));
     let lowered = Scheduler::open_seeded(&path, &lowered, now, 100).unwrap();
     assert_eq!(lowered.snapshot().runs.len(), 1);
     assert!(lowered.snapshot().slots.is_empty());
     drop(lowered);
 
-    let disabled = direct("direct:canonical", 0, Duration::from_secs(2 * 60 * 60));
+    let disabled = direct("0deeb8fa1dbbee4c", 0, Duration::from_secs(2 * 60 * 60));
     let mut disabled = Scheduler::open_seeded(&path, &disabled, now, 101).unwrap();
     assert!(disabled.snapshot().slots.is_empty());
     assert!(matches!(
@@ -714,7 +714,7 @@ fn five_consecutive_discovery_limits_expire_the_deferred_opportunity() {
 fn deterministic_multi_day_simulation_never_exceeds_provider_caps() {
     let root = TempDir::new().unwrap();
     let path = state_path(&root);
-    let config = direct("direct:simulation", 12, Duration::from_secs(70 * 60));
+    let config = direct("32e4bc02a7ccf34d", 12, Duration::from_secs(70 * 60));
     for day in 28..=31 {
         let start = at(day, 0, 0, 0);
         let mut scheduler = Scheduler::open_seeded(&path, &config, start, 53).unwrap();
