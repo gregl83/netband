@@ -3,6 +3,9 @@
 For a first measurement, start with [quick tests](usage.md). This page is the full
 reference for customizing targets, interfaces, providers, and output.
 
+[Options](#cli-options-and-defaults) · [Result storage](#default-result-storage) ·
+[Scheduler state](#scheduler-state) · [M-Lab](#m-lab-provider) · [Direct servers](#direct-provider)
+
 Netband reads one optional TOML file, then applies CLI overrides. Scalar CLI values
 replace TOML values. Repeated `--interface` and `--ping-target` values replace, rather
 than extend, their TOML lists. Relative paths are resolved from the current directory.
@@ -34,22 +37,34 @@ See [CSV rotation and recovery](data-format.md#rotating-directory-output).
 
 Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 
+### General and output
+
 | CLI option | TOML key | Default / behavior |
 | --- | --- | --- |
 | `--config FILE` | n/a | No file; load the named TOML before CLI overrides |
 | `--console auto\|human\|jsonl\|off` | `console` | `auto` for `run`/`config check`; `human` for `once`; `auto` is human on a TTY and off otherwise |
 | `--verbosity error\|warn\|info\|debug\|trace` | `verbosity` | `info` |
-| `--interface NAME` (repeatable) | `interfaces` | Empty; use the default route |
-| `--ping-target IP` (repeatable) | `ping.targets` | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` |
-| `--ping-interval DURATION` | `ping.interval` | `5s` |
-| `--ping-timeout DURATION` | `ping.timeout` | `2s` per probe |
-| `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
-| `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
 | `--output FILE` | `output` | Unset; when selected, append to a single CSV without rotation |
 | `--output-dir DIR` | `output_dir` | Explicit rotating directory; defaults use application state storage (see below) |
 | `--rotate-max-bytes BYTES` | `rotate_max_bytes` | Unset; optional positive soft size limit for directory output, including the header |
 | `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
 | `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
+
+### Ping and interfaces
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
+| `--interface NAME` (repeatable) | `interfaces` | Empty; use the default route |
+| `--ping-target IP` (repeatable) | `ping.targets` | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` |
+| `--ping-interval DURATION` | `ping.interval` | `5s` |
+| `--ping-timeout DURATION` | `ping.timeout` | `2s` per probe |
+
+### Bandwidth and providers
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
+| `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
+| `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
 | `--ndt-provider mlab\|direct` | `bandwidth.provider` | `mlab` |
 | `--mlab-locate-url URL` | `bandwidth.mlab.locate_url` | M-Lab Locate v2 NDT7 URL; override is intended for testing |
 | `--ndt-target HOST[:PORT]` | `bandwidth.direct.target` | None; direct provider only; generates standard NDT7 paths |
@@ -58,6 +73,12 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--ndt-tls-server-name DNS_NAME` | `bandwidth.direct.tls_server_name` | None; TLS identity for an IP connection |
 | `--ndt-ca-cert FILE` | `bandwidth.direct.ca_cert` | System/WebPKI roots only; add the named private CA bundle |
 | `--allow-insecure-ndt` | `bandwidth.direct.allow_insecure` | False; required for plain `ws://` on a trusted private network |
+| `--accept-mlab-policy` | `bandwidth.accept_mlab_policy` | False; explicit M-Lab AUP/privacy acknowledgement |
+
+### Scheduling and health triggers
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
 | `--bandwidth-daily-max COUNT` | `bandwidth.daily_max` | `4`; `0` disables bandwidth; M-Lab rejects values above 4 |
 | `--bandwidth-min-spacing DURATION` | `bandwidth.min_spacing` | `36m`; direct minimum is at least timeout + shutdown margin and 60s |
 | `--bandwidth-slot-jitter-pct PERCENT` | `bandwidth.slot_jitter_pct` | `50`, range 0-100 |
@@ -72,7 +93,6 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--pending-trigger-ttl DURATION` | `bandwidth.trigger.pending_ttl` | `30m` |
 | `--cooldown-initial DURATION` | `bandwidth.cooldown.initial` | `60s` |
 | `--cooldown-max DURATION` | `bandwidth.cooldown.max` | `16m` |
-| `--accept-mlab-policy` | `bandwidth.accept_mlab_policy` | False; explicit M-Lab AUP/privacy acknowledgement |
 
 `run`, `once ping`, `once bandwidth`, and `config check` are subcommands, not TOML
 values. CLI help is authoritative for spelling: `netband --help`.

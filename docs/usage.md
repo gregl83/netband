@@ -3,10 +3,19 @@
 [Install Netband](install.md), then choose a one-shot command. Each prints human-readable
 results, saves a CSV journal, and exits. No TOML file or service is required.
 
+[Quick tests](#one-ping-round) · [Find results](#where-results-go) ·
+[Scripts](#output-channels) · [Monitoring](#continuous-monitoring) ·
+[Troubleshooting](#configure-or-troubleshoot)
+
 ## One ping round
 
 ```sh
 netband once ping
+```
+
+To select targets instead:
+
+```sh
 netband --ping-target 1.1.1.1 --ping-target 9.9.9.9 once ping
 ```
 
@@ -33,8 +42,7 @@ if the attempt is interrupted. See [measurement semantics](data-format.md#timing
 Manual tests share provider accounting with continuous monitoring. A start is
 reserved before the first NDT7 connection. Netband enforces a four-start UTC daily
 cap for M-Lab, persisted in scheduler state. A failed discovery before admission
-does not consume a start.
-A suppressed command can finish without sending test traffic; inspect its journal
+does not consume a start. A suppressed command can finish without sending test traffic; inspect its journal
 record or stderr explanation.
 
 For an authorized manual diagnostic, `once bandwidth --force` bypasses configured
@@ -45,25 +53,25 @@ do not share a budget. See [scheduling](scheduling.md) and
 
 ## Where results go
 
-By default, `once` creates a unique timestamped CSV in
-`~/.local/state/netband/journals/once/`; `run` creates rotating segments in
-`~/.local/state/netband/journals/run/`. `$XDG_STATE_HOME` overrides `~/.local/state`.
-Netband creates these directories when measurement output opens and prints the full
-CSV path to stderr, even with `--console off` or `--verbosity error`. Directory
-output also reports its directory at startup and each new CSV on rotation.
-`config check` reports the default `run` destination without creating files.
+Netband prints the absolute CSV path to stderr when it opens the file.
 
-Repeated commands preserve earlier results; there is no automatic retention cleanup.
-One-shot files use direct file locks with no directory control files. Monitoring
-keeps its lock and recovery marker in `journals/run/`. A quick ping can run alongside
-monitoring, but bandwidth commands sharing scheduler state remain mutually exclusive.
-Existing files in your working directory are not moved or removed.
+| Command | Default directory | Behavior |
+| --- | --- | --- |
+| `once` | `~/.local/state/netband/journals/once/` | A new timestamped CSV for each invocation |
+| `run` | `~/.local/state/netband/journals/run/` | A new segment at startup, then daily rotation |
 
-To choose a fixed file in your current directory:
+`$XDG_STATE_HOME` overrides `~/.local/state`. Default directories are created as
+needed. Earlier results are preserved; files are not automatically deleted.
+To save in your current directory instead:
 
 ```sh
 netband --output netband.csv once ping
 ```
+
+Paths remain visible with `--console off` or `--verbosity error`. Directory output
+also reports its directory at startup and each new CSV on rotation. `config check`
+shows the resolved `run` destination without creating files. See
+[storage and recovery](data-format.md#journal-storage) for locking and interrupted runs.
 
 The CSV includes lifecycle and diagnostic records as well as measurements. Filter
 `event_kind=ping_probe` or `event_kind=bandwidth` when extracting results; the first
@@ -71,15 +79,18 @@ rows are run starts. See [parsing examples](data-format.md#reading-examples).
 
 ## Output channels
 
-| Command/mode | Measurement CSV | stdout presentation | Operational stderr |
-| --- | --- | --- | --- |
-| `run` default (`auto`) | Authoritative | Human on a TTY; off when redirected | Logs |
-| `once ...` default (`human`) | Authoritative | Concise human result | Logs |
-| `--console human` | Authoritative | Concise human result | Logs |
-| `--console jsonl` | Authoritative | Versioned JSON Lines | Logs |
-| `--console off` | Authoritative | Disabled | Logs |
-| systemd example | Authoritative | Explicitly disabled | journald |
-| `config check` | None | Resolved configuration as `key=value`, regardless of console mode | Errors |
+Measurements always go to CSV. Stderr carries result paths and operational logs;
+stdout follows the selected presentation mode:
+
+| Command/mode | stdout |
+| --- | --- |
+| `run` default (`auto`) | Human on a terminal; off when redirected |
+| `once ...` default (`human`) | Concise human results |
+| `--console human` | Concise human results |
+| `--console jsonl` | Versioned JSON Lines |
+| `--console off` | Disabled |
+| systemd example | Disabled; stderr goes to journald |
+| `config check` | Resolved `key=value` configuration; no measurement CSV |
 
 CSV is the source of truth. Human and JSONL stdout are independent, best-effort live
 views. JSONL uses `schema_version=1`, but records may be dropped or the stream may stop
@@ -108,13 +119,13 @@ netband --output netband.csv --console jsonl once ping >events.jsonl 2>netband.l
 Start with pings only, then add bandwidth once the provider policies are accepted:
 
 ```sh
-netband --output netband.csv --no-bandwidth run
+netband --no-bandwidth run
 # Alternative: scheduled and health-triggered bandwidth, with concurrent pings.
-netband --output netband.csv --accept-mlab-policy run
+netband --accept-mlab-policy run
 ```
 
 These are alternatives; stop the first command with `Ctrl-C` before starting the second.
-For longer runs, use rotating output:
+Default `run` output already rotates daily. To choose a directory and add a size limit:
 
 ```sh
 mkdir -p measurements
@@ -127,6 +138,14 @@ together; segments remain until you archive or remove them. See
 [systemd operation](service.md).
 
 ## Configure or troubleshoot
+
+| What you see | What to do |
+| --- | --- |
+| No console output after redirecting `run` | Select `--console human` or `--console jsonl`; `auto` disables redirected stdout |
+| A second command reports locked scheduler state | Stop the bandwidth-enabled monitor before a manual bandwidth test; a quick ping can run alongside it |
+| No CSV in your working directory | Use the path printed to stderr, or choose `--output results.csv` |
+| Bandwidth is deferred or suppressed | Check stderr or scheduler records for the [cap, spacing, or cooldown](scheduling.md) |
+
 
 CLI values override TOML. Copy [the example configuration](../examples/netband.toml),
 adjust its paths, and validate without sending probes:

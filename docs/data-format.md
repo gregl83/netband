@@ -3,12 +3,26 @@
 Netband's v1 journal has 69 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
 a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
+JSONL is a best-effort live view; use CSV when completeness matters.
+
+Start with [reading examples](#reading-examples) or the [example session](examples/README.md).
+For measurement rows, filter `event_kind` to `ping_probe` or `bandwidth`; lifecycle
+and diagnostic records are also present.
+
+[Fields](#fields-and-encoding) · [Relationships](#event-context-and-relationships) ·
+[Timing and rates](#timing-and-throughput) · [Diagnostics](#diagnostics) ·
+[Outcomes](#outcomes) · [Storage and recovery](#journal-storage)
 
 ## Fields and encoding
+
+<details>
+<summary>Complete CSV header (69 fields)</summary>
 
 ```csv
 schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_id,run_kind,scheduled_at_utc,requested_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
+
+</details>
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
 UTC with millisecond precision. Durations and RTTs are milliseconds. Throughput is
@@ -591,9 +605,12 @@ Use an independent CSV implementation when ingesting journals. For example:
 ```sh
 python3 - <<'PY'
 import csv
+from collections import Counter
+
 with open("netband.csv", newline="", encoding="utf-8") as stream:
-    rows = list(csv.DictReader(stream))
-assert rows and "ping_probe" in {r["event_kind"] for r in rows}
-print(f"parsed {len(rows)} rows with {len(rows[0])} fields")
+    counts = Counter(row["event_kind"] for row in csv.DictReader(stream))
+print(f"Ping results: {counts['ping_probe']}")
+print(f"Bandwidth results: {counts['bandwidth']}")
+print(f"Total journal records: {sum(counts.values())}")
 PY
 ```

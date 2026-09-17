@@ -4,6 +4,12 @@ The example service runs Netband in the foreground under systemd as a non-root d
 user. systemd owns `/var/lib/netband`, stdout is disabled, and operational stderr goes
 to journald. Measurements remain exclusively in the configured CSV segments.
 
+For interactive use, start with [quick tests](usage.md).
+
+[Install](#install) · [Find measurements](#measurements-and-logs) ·
+[ICMP permissions](#icmp-permissions) · [Exit codes](#exit-codes) ·
+[Troubleshooting](#troubleshooting) · [State recovery](#state-recovery)
+
 ## Install
 
 Install a checksum-verified Linux x86_64 or aarch64 binary from the latest GitHub

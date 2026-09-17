@@ -1,5 +1,13 @@
 # Scheduling, health, cooldowns, and fairness
 
+A bandwidth test can be scheduled, requested by degraded ping health, or started
+manually with `once bandwidth`. Each uses the same provider allowance. A request is
+not a guaranteed start: spacing, cooldowns, and daily caps can delay or suppress it.
+For commands, see [quick tests and monitoring](usage.md).
+
+[Scheduled tests](#planned-opportunities) · [Health triggers](#ping-health-trigger) ·
+[Rate limits](#rate-limits) · [Multiple interfaces](#multiple-interfaces)
+
 Netband maintains one persisted schedule per canonical provider ID. The cap is shared
 by processes, commands, and interfaces using that state file. Independent state files
 and hosts do not coordinate allowances. A reservation is recorded

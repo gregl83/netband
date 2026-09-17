@@ -7,6 +7,8 @@ Choose the next guide for what you want to do:
 | --- | --- |
 | Install a binary or build from source | [Installation](install.md) |
 | Run a single test or use JSONL in a script | [Quick tests and output](usage.md) |
+| Find saved CSVs or choose where to write them | [Result locations](usage.md#where-results-go) |
+| Diagnose missing output, permission errors, or blocked tests | [Troubleshooting](usage.md#configure-or-troubleshoot) |
 | Change targets, interfaces, providers, or defaults | [Configuration and providers](configuration.md) |
 | Leave Netband running unattended | [Service operation](service.md) |
 | Understand automatic tests, limits, or deferrals | [Scheduling](scheduling.md) |
