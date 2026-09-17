@@ -167,6 +167,7 @@ pub enum RequestStage {
     WebsocketHandshake,
     Download,
     Upload,
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

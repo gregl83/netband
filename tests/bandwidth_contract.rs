@@ -574,7 +574,7 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
     );
     assert!(
         report.events.iter().any(|event| {
-            event.request_stage == Some(RequestStage::Upload)
+            serde_json::to_value(event).unwrap()["request_stage"] == "cleanup"
                 && event.error_kind == Some(ErrorKind::UploadFailed)
                 && event.outcome == Outcome::Error
                 && event.os_error_code.is_none()
@@ -676,7 +676,12 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
         assert!(bandwidth.download_mbps.unwrap() > 0.0);
         assert!(bandwidth.upload_mbps.unwrap() > 0.0);
         let terminal = &report.events[report.events.len() - 2];
-        assert_eq!(terminal.request_stage, Some(RequestStage::Upload));
+        assert_eq!(
+            serde_json::to_value(terminal).unwrap()["request_stage"],
+            "cleanup"
+        );
+        assert_eq!(terminal.request_id, bandwidth.upload_request_id);
+        assert_eq!(terminal.request_direction, Some(RequestDirection::Upload));
         assert_eq!(terminal.outcome, outcome);
         let _ = release_tx.send(());
         server.await.unwrap();

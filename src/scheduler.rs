@@ -1200,5 +1200,6 @@ fn stage_text(stage: RequestStage) -> &'static str {
         RequestStage::WebsocketHandshake => "websocket_handshake",
         RequestStage::Download => "download",
         RequestStage::Upload => "upload",
+        RequestStage::Cleanup => "cleanup",
     }
 }

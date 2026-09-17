@@ -2,7 +2,7 @@
 
 [console.jsonl](console.jsonl) is a synthetic session showing all six event kinds.
 It includes successful, timed-out and unsent pings; a loaded ping overlapping a
-bandwidth attempt; successful and partial bandwidth results; upload cancellation;
+bandwidth attempt; successful and partial bandwidth results; upload cleanup cancellation with retained rates;
 Locate rate limiting; and scheduler deferral and suppression. These are illustrative
 records, not captured network measurements. Every record includes all 69 fields.
 
@@ -49,3 +49,7 @@ discovery has a false flag and no count. Request failures carry no accounting sn
 `scheduled_at_utc` records planned execution only; manual bandwidth summaries leave
 it empty. `requested_at_utc` records the original bandwidth request separately.
 Periodic pings retain planned ticker times; one-shot pings have no planned time.
+
+The cancelled cleanup example uses `request_stage=cleanup` and
+`request_direction=upload`, sharing its request ID with the retained upload result.
+Its diagnostic duration covers cleanup only; the upload rate uses its active window.

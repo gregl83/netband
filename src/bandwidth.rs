@@ -734,6 +734,10 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         local_ip,
     } = connected;
     progress.begin_stage(RequestStage::Upload);
+    let upload_started = (
+        progress.active.started_at_utc,
+        progress.stage_started_monotonic,
+    );
     report_phase(phase, LoadPhase::Upload);
     let UploadTransfer {
         bytes,
@@ -741,6 +745,10 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         metrics,
         error,
     } = transfer_upload(socket, |bytes, elapsed, metrics| {
+        // Later TCP metric updates reuse this callback without restarting cleanup timing.
+        if progress.active.stage != RequestStage::Cleanup {
+            progress.begin_stage(RequestStage::Cleanup);
+        }
         progress.upload = (bytes > 0).then_some(DirectionMeasurement {
             request_id: progress.active.request_id,
             bytes,
@@ -759,7 +767,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         };
         progress.record_failure(stream_failure(
             candidate,
-            RequestStage::Upload,
+            progress.active.stage,
             remote_ip,
             local_ip,
             error.to_string(),
@@ -768,6 +776,10 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     }
     if bytes == 0 {
         if progress.failures.len() == failures_before {
+            // No measurement bytes is a transfer failure, even after a clean close.
+            progress.active.stage = RequestStage::Upload;
+            progress.active.started_at_utc = upload_started.0;
+            progress.stage_started_monotonic = upload_started.1;
             progress.record_failure(stream_failure(
                 candidate,
                 RequestStage::Upload,
@@ -1319,13 +1331,13 @@ fn stream_failure(
         outcome: Outcome::Error,
         error_kind: match stage {
             RequestStage::Download => ErrorKind::DownloadFailed,
-            RequestStage::Upload => ErrorKind::UploadFailed,
+            RequestStage::Upload | RequestStage::Cleanup => ErrorKind::UploadFailed,
             _ => ErrorKind::Io,
         },
         message,
         server_name: Some(candidate.logical_server.clone()),
         request_url: Some(match stage {
-            RequestStage::Upload => candidate.upload_url.to_string(),
+            RequestStage::Upload | RequestStage::Cleanup => candidate.upload_url.to_string(),
             _ => candidate.download_url.to_string(),
         }),
         local_ip: Some(local_ip),
@@ -1564,6 +1576,7 @@ mod tests {
             RequestStage::WebsocketHandshake,
             RequestStage::Download,
             RequestStage::Upload,
+            RequestStage::Cleanup,
         ] {
             let before = Utc::now();
             progress.begin_stage(stage);

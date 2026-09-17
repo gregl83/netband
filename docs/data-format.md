@@ -121,7 +121,7 @@ Download and upload families have identical suffixes and ordering.
 | --- | --- |
 | `request_id` | Opaque string identifying the failed request attempt across stages; use equality for correlation |
 | `request_direction` | `download` or `upload` on NDT7 request failures, including setup, transfer, and cleanup; null/empty for shared discovery or admission failures and all other event kinds |
-| `request_stage` | `locate`, `dns`, `connect`, `tls`, `websocket_handshake`, `download`, or `upload` |
+| `request_stage` | `locate`, `dns`, `connect`, `tls`, `websocket_handshake`, `download`, `upload`, or `cleanup` |
 | `request_url` | Sanitized endpoint URL on request-failure events, including scheme, host, port and path; credentials/fragments removed and query redacted; empty on bandwidth summaries |
 | `request_local_ip` | Local address of a failed request when known; empty on other event kinds |
 | `request_remote_ip` | Actual remote address of a failed request when known; empty on other event kinds |
@@ -232,6 +232,15 @@ Use `request_direction` together with `request_stage` for failure attribution. F
 before DNS and retained through timeout/cancellation and cleanup; it does not depend
 on URL path naming or whether a measurement was retained. Shared Locate discovery
 and pre-connection admission failures leave direction unavailable/not applicable.
+`upload` identifies active payload transfer. `cleanup` identifies the subsequent
+close/drain phase, currently emitted with `request_direction=upload`. It begins when
+the active window ends or the peer sends Close. The request ID and endpoint context
+stay unchanged. Cleanup failures use that phase's own start timestamp and monotonic
+elapsed duration; later server metrics do not restart its clock. Errors during active
+transfer remain `upload`; an upload with no measurement bytes is also a transfer
+failure even if the connection closes cleanly. Cleanup's stage does not change the
+retained measurement, reservation, overall outcome, or concurrent `load_phase`.
+
 Do not infer direction from diagnostic prose or count each request as a bandwidth test.
 Rate availability and diagnostics must be assessed independently of overall outcome.
 
