@@ -207,6 +207,8 @@ pub struct MeasurementEvent {
     #[serde(serialize_with = "serialize_optional_timestamp")]
     pub scheduled_at_utc: Option<DateTime<Utc>>,
     #[serde(serialize_with = "serialize_optional_timestamp")]
+    pub requested_at_utc: Option<DateTime<Utc>>,
+    #[serde(serialize_with = "serialize_optional_timestamp")]
     pub started_at_utc: Option<DateTime<Utc>>,
     #[serde(serialize_with = "serialize_optional_timestamp")]
     pub finished_at_utc: Option<DateTime<Utc>>,
@@ -315,6 +317,7 @@ impl MeasurementEvent {
                 _ => RunKind::Session,
             },
             scheduled_at_utc: None,
+            requested_at_utc: None,
             started_at_utc: None,
             finished_at_utc: Some(finished_at_utc),
             elapsed_ms: None,

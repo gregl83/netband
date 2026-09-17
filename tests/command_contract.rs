@@ -162,6 +162,8 @@ async fn provider_failure_is_journaled_and_suppression_does_not_reconnect() {
         .iter()
         .find(|row| row["event_kind"] == "bandwidth")
         .unwrap();
+    assert!(bandwidth["scheduled_at_utc"].is_empty());
+    assert!(!bandwidth["requested_at_utc"].is_empty());
     let decision = rows
         .iter()
         .find(|row| row["scheduler_action"] == "rate_limit")

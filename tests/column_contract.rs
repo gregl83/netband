@@ -5,7 +5,7 @@ use serde::de::{IgnoredAny, MapAccess, Visitor};
 
 const FAMILIES: &[&str] = &[
     "schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_id,run_kind",
-    "scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms",
+    "scheduled_at_utc,requested_at_utc,started_at_utc,finished_at_utc,elapsed_ms",
     "outcome,message",
     "command,netband_version,process_id",
     "interface,connection_details",
@@ -38,7 +38,7 @@ impl<'de> Visitor<'de> for Keys {
 #[test]
 fn csv_and_json_use_the_same_complete_family_order() {
     let expected = FAMILIES.join(",");
-    assert_eq!(expected.split(',').count(), 68);
+    assert_eq!(expected.split(',').count(), 69);
     assert_eq!(CSV_HEADER, expected);
     let event = MeasurementEvent::new(
         RunId::new(),

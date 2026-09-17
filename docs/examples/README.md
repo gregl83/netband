@@ -4,7 +4,7 @@
 It includes successful, timed-out and unsent pings; a loaded ping overlapping a
 bandwidth attempt; successful and partial bandwidth results; upload cancellation;
 Locate rate limiting; and scheduler deferral and suppression. These are illustrative
-records, not captured network measurements. Every record includes all 68 fields.
+records, not captured network measurements. Every record includes all 69 fields.
 
 The matching [CSV session fixture](../../tests/fixtures/v1-events.csv) contains the
 same 32 records in the same order. Tests keep both representations aligned and
@@ -43,3 +43,7 @@ occupy separate columns even when their timestamps happen to match.
 Reservation accounting appears on bandwidth summaries and provider scheduler decisions.
 Bandwidth summaries retain the admission date/count and reservation flag; failed
 discovery has a false flag and no count. Request failures carry no accounting snapshot.
+
+`scheduled_at_utc` records planned execution only; manual bandwidth summaries leave
+it empty. `requested_at_utc` records the original bandwidth request separately.
+Periodic pings retain planned ticker times; one-shot pings have no planned time.

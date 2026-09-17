@@ -100,10 +100,11 @@ fn round(targets: Vec<IpAddr>) -> PingRoundRequest {
         round_number: 0,
         targets,
         timeout: Duration::from_secs(2),
-        scheduled_at_utc: Utc
-            .with_ymd_and_hms(2026, 8, 30, 12, 0, 0)
-            .single()
-            .unwrap(),
+        scheduled_at_utc: Some(
+            Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0)
+                .single()
+                .unwrap(),
+        ),
         identifier: 42,
         load_phase: None,
         load_run_id: None,
@@ -347,7 +348,9 @@ async fn one_shot_cli_pipeline_records_all_rows_and_separates_console_modes() {
     let (jsonl, jsonl_csv, _) = execute_mode(ConsoleMode::Jsonl).await;
     assert_eq!(jsonl.lines().count(), 6);
     for line in jsonl.lines() {
-        serde_json::from_str::<serde_json::Value>(line).unwrap();
+        let event = serde_json::from_str::<serde_json::Value>(line).unwrap();
+        assert!(event["scheduled_at_utc"].is_null());
+        assert!(event["requested_at_utc"].is_null());
     }
     assert!(jsonl.contains("\"event_kind\":\"ping_probe\""));
     assert!(jsonl.contains("\"error_kind\":\"icmp_timeout\""));

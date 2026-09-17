@@ -52,7 +52,7 @@ with pathlib.Path(sys.argv[2]).open(newline="", encoding="utf-8") as stream:
 assert rows
 kinds = {row["event_kind"] for row in rows}
 assert {"run_started", "run_finished", "ping_probe", "bandwidth", "request_failure", "scheduler"} == kinds
-assert len(rows[0]) == 68
+assert len(rows[0]) == 69
 for row in rows:
     assert row["schema_version"] == "1"
     if row["connection_details"]:

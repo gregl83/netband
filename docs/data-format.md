@@ -1,13 +1,13 @@
 # CSV schema and outcomes
 
-Netband's v1 journal has 68 fields shared by CSV and JSONL. CSV is the authoritative
+Netband's v1 journal has 69 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
 a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
 ## Fields and encoding
 
 ```csv
-schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
+schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_id,run_kind,scheduled_at_utc,requested_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -47,7 +47,8 @@ Download and upload families have identical suffixes and ordering.
 
 | Field | Meaning |
 | --- | --- |
-| `scheduled_at_utc` | Planned slot time for scheduled bandwidth, trigger/opportunity creation time for triggered/manual bandwidth, or ping-round dispatch time; see timing semantics below |
+| `scheduled_at_utc` | Intended execution time: original bandwidth slot or periodic ping tick; empty without a plan |
+| `requested_at_utc` | Original bandwidth request creation time, retained through deferral/retry; populated on bandwidth summaries, empty on other event kinds |
 | `started_at_utc` | Operation start time; request failures use stage start, lifecycle records use run start |
 | `finished_at_utc` | Event completion time; empty on `run_started` |
 | `elapsed_ms` | Monotonic elapsed time in milliseconds: full ping/bandwidth attempt or failed request stage; populated on those events even without a measurement, also populated on `run_finished`; empty on `run_started` and scheduler events |
@@ -271,16 +272,28 @@ state remains authoritative for enforcing limits.
 
 ## Timing and throughput
 
-`scheduled_at_utc` records the opportunity's origin, whose meaning depends on context:
+`scheduled_at_utc` has one meaning: intended execution time. Scheduled bandwidth
+retains the original slot through deferred retries. Periodic ping records the actual
+ticker deadline mapped to UTC using a fixed wall/monotonic anchor at monitor startup;
+delayed dispatch does not move that timestamp. One-shot ping and unscheduled manual
+or health-triggered bandwidth have no planned time and leave this field unavailable.
+Request-failure rows may carry their bandwidth attempt's planned slot, not a planned
+start for the individual request stage. Lifecycle records leave it unavailable.
 
-- Scheduled bandwidth: the planned slot time.
-- Health-triggered bandwidth: the triggering opportunity's creation time.
-- Manual bandwidth: the manual opportunity's creation time.
-- Ping: the round's dispatch time, not the nominal ticker deadline.
+`requested_at_utc` records when a bandwidth request arose: when the scheduler handles
+a due slot, when health degradation creates a pending request, or when a manual
+command requests a test. Deferral and retries preserve that original timestamp,
+including across restart. A health trigger merged into an existing deferred request
+retains the existing request's timing, including any planned slot. Only bandwidth
+summaries carry request time; join request failures by `run_id` to obtain it.
+Low-level measurements made without scheduler/command request context leave it empty.
 
-It is unavailable on lifecycle/scheduler rows and on measurement failures that were
-not annotated by completed scheduler handling. It is not a universal scheduling-delay
-baseline. `started_at_utc` and `finished_at_utc` retain actual operation boundaries.
+For bandwidth summaries, start minus scheduled time measures lateness against the
+original plan; start minus request time measures time since the request arose,
+including earlier attempts if retried. For periodic ping, start minus scheduled time
+measures lateness against its tick. No separate dispatch timestamp is recorded.
+UTC differences are subject to clock adjustments; use monotonic `elapsed_ms` for
+execution duration. `started_at_utc` and `finished_at_utc` retain actual boundaries.
 
 `request_retry_after_ms` and `request_retry_at_utc` preserve a response's delay and
 absolute deadline. `scheduler_not_before_utc` records the deadline applied by the

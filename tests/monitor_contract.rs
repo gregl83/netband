@@ -161,6 +161,16 @@ async fn immediate_start_and_regular_ticks_cover_one_logical_hour() {
     assert_eq!(journal.batches.load(Ordering::SeqCst), 721 * 3 + 2);
     let events = journal.events.lock().unwrap();
     assert_eq!(events.len(), 721 * 3 + 2);
+    let probes = events
+        .iter()
+        .filter(|event| event.event_kind == netband::model::EventKind::PingProbe)
+        .collect::<Vec<_>>();
+    for pair in probes.windows(2) {
+        assert_eq!(
+            pair[1].scheduled_at_utc.unwrap() - pair[0].scheduled_at_utc.unwrap(),
+            chrono::TimeDelta::seconds(5)
+        );
+    }
     let mut active = HashSet::new();
     for (index, event) in events.iter().enumerate() {
         assert_eq!(event.event_sequence, Some(index as u64 + 1));
@@ -538,4 +548,40 @@ async fn failed_session_start_prevents_any_probe() {
         Err(MonitorError::Journal(_))
     ));
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_tick_retains_its_planned_time() {
+    let transport = Arc::new(FakeTransport::new(Duration::ZERO, ResultMode::Success));
+    let journal = RecordingJournal::default();
+    let mut coordinator = OutputCoordinator::new(journal.clone(), ConsoleOff);
+    let (shutdown_tx, shutdown) = cancellation_channel();
+    let probe_transport = Arc::clone(&transport);
+    let task = tokio::spawn(async move {
+        monitor_ping(
+            probe_transport,
+            settings(Duration::from_secs(5), 1),
+            &mut coordinator,
+            shutdown,
+        )
+        .await
+    });
+    wait_for_calls(&transport.calls, 1).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(7)).await;
+    wait_for_calls(&transport.calls, 2).await;
+    shutdown_tx.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    let events = journal.events.lock().unwrap();
+    let probes = events
+        .iter()
+        .filter(|event| event.event_kind == netband::model::EventKind::PingProbe)
+        .collect::<Vec<_>>();
+    assert_eq!(probes.len(), 2);
+    assert_eq!(
+        probes[1].scheduled_at_utc.unwrap() - probes[0].scheduled_at_utc.unwrap(),
+        chrono::TimeDelta::seconds(5)
+    );
 }

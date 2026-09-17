@@ -325,8 +325,7 @@ where
         .map(|name| InterfaceRuntime::new(name, config.health))
         .collect::<Vec<_>>();
     let mut fairness = FairInterfaceSelector::new(&resolved.interfaces);
-    let mut ticker = tokio::time::interval_at(Instant::now(), config.interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ticker = PingTicker::new(config.interval);
     let mut active: Option<(usize, JoinHandle<Result<PingRoundReport, PingRoundError>>)> = None;
     let mut next_interface = 0_usize;
     let mut next_round = 0_u64;
@@ -431,6 +430,7 @@ where
                     .await?;
                     fairness.record_attempt(&interface);
                     stats.bandwidth_attempts += 1;
+                    opportunity.apply_timing(&mut report);
                     let reservation_error = report.reservation_error.clone();
                     if reservation_error.is_none() {
                         let events = scheduler.finish_attempt(
@@ -474,7 +474,7 @@ where
                     break;
                 }
             }
-            _ = ticker.tick() => {
+            scheduled = ticker.tick() => {
                 let index = next_interface;
                 next_interface = (next_interface + 1) % interfaces.len();
                 let runtime = &mut interfaces[index];
@@ -501,7 +501,7 @@ where
                         let transport = factory.create(&runtime.name, &config.targets);
                         active = Some((
                             index,
-                            start_round(transport, &config, coordinator, next_round, None, None)?,
+                            start_round(transport, &config, coordinator, next_round, scheduled, None, None)?,
                         ));
                         stats.rounds_started += 1;
                         next_round = next_round.wrapping_add(1);
@@ -567,13 +567,13 @@ where
         return Ok(stats);
     }
 
-    let mut ticker = tokio::time::interval_at(Instant::now() + config.interval, config.interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ticker = PingTicker::new(config.interval);
     let mut active = Some(start_round(
         Arc::clone(&transport),
         &config,
         coordinator,
         0,
+        ticker.tick().await,
         None,
         None,
     )?);
@@ -611,8 +611,8 @@ where
                         break;
                     }
                 }
-                _ = ticker.tick() => {
-                    active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, None, None)?);
+                scheduled = ticker.tick() => {
+                    active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, scheduled, None, None)?);
                     stats.rounds_started += 1;
                     next_round = next_round.wrapping_add(1);
                 }
@@ -665,8 +665,7 @@ where
 {
     let mut stats = MonitorStats::default();
     let mut health = HealthWindow::new(config.health);
-    let mut ticker = tokio::time::interval_at(Instant::now(), config.interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ticker = PingTicker::new(config.interval);
     let mut active: Option<JoinHandle<Result<PingRoundReport, PingRoundError>>> = None;
     let mut next_round = 0_u64;
     let mut latest_round_has_success = false;
@@ -728,6 +727,7 @@ where
             )
             .await?;
             stats.bandwidth_attempts += 1;
+            opportunity.apply_timing(&mut report);
             let reservation_error = report.reservation_error.clone();
             if reservation_error.is_none() {
                 let events = scheduler.finish_attempt(
@@ -752,8 +752,8 @@ where
                     break;
                 }
             }
-            _ = ticker.tick() => {
-                active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, None, None)?);
+            scheduled = ticker.tick() => {
+                active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, scheduled, None, None)?);
                 stats.rounds_started += 1;
                 next_round = next_round.wrapping_add(1);
             }
@@ -949,7 +949,7 @@ async fn measure_bandwidth_while_monitoring<J, C>(
     scheduler: &mut Scheduler,
     coordinator: &mut OutputCoordinator<J, C>,
     shutdown: watch::Receiver<bool>,
-    ticker: &mut tokio::time::Interval,
+    ticker: &mut PingTicker,
     next_round: &mut u64,
     stats: &mut MonitorStats,
 ) -> Result<BandwidthReport, MonitorError>
@@ -997,13 +997,14 @@ where
             tokio::select! {
                 biased;
                 report = &mut bandwidth => return Ok(report),
-                _ = ticker.tick() => {
+                scheduled = ticker.tick() => {
                     let phase = *phase_receiver.borrow();
                     active_ping = Some(start_round(
                         Arc::clone(&transport),
                         ping,
                         coordinator,
                         *next_round,
+                        scheduled,
                         Some(phase),
                         Some(bandwidth_run_id),
                     )?);
@@ -1038,11 +1039,38 @@ where
     Ok(())
 }
 
+// Map monotonic tick deadlines to UTC from a fixed anchor, including delayed polls.
+struct PingTicker {
+    interval: tokio::time::Interval,
+    anchor: Instant,
+    anchor_utc: DateTime<Utc>,
+}
+
+impl PingTicker {
+    fn new(period: Duration) -> Self {
+        let anchor = Instant::now();
+        let anchor_utc = Utc::now();
+        let mut interval = tokio::time::interval_at(anchor, period);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        Self {
+            interval,
+            anchor,
+            anchor_utc,
+        }
+    }
+
+    async fn tick(&mut self) -> DateTime<Utc> {
+        let deadline = self.interval.tick().await;
+        self.anchor_utc + chrono_duration(deadline.duration_since(self.anchor))
+    }
+}
+
 fn start_round<T: PingTransport + ?Sized, J: JournalSink, C: crate::console::ConsoleSink>(
     transport: Arc<T>,
     config: &PingMonitorConfig,
     coordinator: &mut OutputCoordinator<J, C>,
     round_number: u64,
+    scheduled_at: DateTime<Utc>,
     load_phase: Option<LoadPhase>,
     load_run_id: Option<&RunId>,
 ) -> Result<JoinHandle<Result<PingRoundReport, PingRoundError>>, MonitorError> {
@@ -1052,7 +1080,7 @@ fn start_round<T: PingTransport + ?Sized, J: JournalSink, C: crate::console::Con
         round_number,
         targets: config.targets.clone(),
         timeout: config.timeout,
-        scheduled_at_utc: Utc::now(),
+        scheduled_at_utc: Some(scheduled_at),
         identifier: config.identifier,
         load_phase,
         load_run_id: load_run_id.copied(),

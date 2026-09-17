@@ -259,7 +259,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 68);
+    assert_eq!(CSV_HEADER.split(',').count(), 69);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -412,7 +412,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 68);
+        assert_eq!(row.as_object().unwrap().len(), 69);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");
@@ -550,7 +550,8 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
             trigger_at,
             netband::scheduler::BandwidthOpportunity {
                 reason: TriggerReason::Scheduled,
-                scheduled_at_utc: trigger_at,
+                scheduled_at_utc: Some(trigger_at),
+                requested_at_utc: trigger_at,
                 interface: None,
             },
             &mut report,

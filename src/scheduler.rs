@@ -82,6 +82,7 @@ struct ProviderState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DeferredOpportunity {
+    scheduled_at_utc: Option<DateTime<Utc>>,
     reason: TriggerReason,
     #[serde(default)]
     interface: Option<String>,
@@ -158,8 +159,21 @@ pub struct SchedulerPoll {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BandwidthOpportunity {
     pub reason: TriggerReason,
-    pub scheduled_at_utc: DateTime<Utc>,
+    pub scheduled_at_utc: Option<DateTime<Utc>>,
+    pub requested_at_utc: DateTime<Utc>,
     pub interface: Option<String>,
+}
+
+impl BandwidthOpportunity {
+    pub(crate) fn apply_timing(&self, report: &mut BandwidthReport) {
+        for event in &mut report.events {
+            event.trigger_reason = Some(self.reason);
+            event.scheduled_at_utc = self.scheduled_at_utc;
+            if event.event_kind == EventKind::Bandwidth {
+                event.requested_at_utc = Some(self.requested_at_utc);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -438,7 +452,8 @@ impl Scheduler {
                 return Ok(SchedulerPoll {
                     opportunity: Some(BandwidthOpportunity {
                         reason: deferred.reason,
-                        scheduled_at_utc: deferred.created_at_utc,
+                        scheduled_at_utc: deferred.scheduled_at_utc,
+                        requested_at_utc: deferred.created_at_utc,
                         interface: deferred.interface,
                     }),
                     events,
@@ -459,17 +474,12 @@ impl Scheduler {
         let pending_interface = pending
             .as_ref()
             .and_then(|(key, _)| interface_from_key(key).map(str::to_owned));
-        let scheduled_at = pending
-            .as_ref()
-            .map(|(_, trigger)| trigger.created_at_utc)
-            .or(due_slot);
-
-        let Some(scheduled_at) = scheduled_at else {
+        if pending.is_none() && due_slot.is_none() {
             return Ok(SchedulerPoll {
                 opportunity: None,
                 events,
             });
-        };
+        }
         let reason = reason.unwrap_or(TriggerReason::Scheduled);
         if let Some(blocked) = self.block_reason(now) {
             if due_slot.is_some() {
@@ -527,7 +537,10 @@ impl Scheduler {
         Ok(SchedulerPoll {
             opportunity: Some(BandwidthOpportunity {
                 reason,
-                scheduled_at_utc: scheduled_at,
+                scheduled_at_utc: if pending.is_none() { due_slot } else { None },
+                requested_at_utc: pending
+                    .as_ref()
+                    .map_or(now, |(_, trigger)| trigger.created_at_utc),
                 interface: pending_interface,
             }),
             events,
@@ -616,7 +629,8 @@ impl Scheduler {
                         .then_some(DeferredOpportunity {
                             reason: opportunity.reason,
                             interface: opportunity.interface.clone(),
-                            created_at_utc: opportunity.scheduled_at_utc,
+                            created_at_utc: opportunity.requested_at_utc,
+                            scheduled_at_utc: opportunity.scheduled_at_utc,
                             expires_at_utc: day_deadline,
                             rate_limit_attempts: attempts,
                         });
@@ -690,10 +704,7 @@ impl Scheduler {
             self.persist()?;
         }
 
-        for event in &mut report.events {
-            event.trigger_reason = Some(opportunity.reason);
-            event.scheduled_at_utc = Some(opportunity.scheduled_at_utc);
-        }
+        opportunity.apply_timing(report);
         Ok(events)
     }
 

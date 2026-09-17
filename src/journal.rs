@@ -47,6 +47,7 @@ csv_event! { event;
     run_kind => event.run_kind,
 
     scheduled_at_utc => event.scheduled_at_utc.map(crate::model::timestamp_text),
+    requested_at_utc => event.requested_at_utc.map(crate::model::timestamp_text),
     started_at_utc => event.started_at_utc.map(crate::model::timestamp_text),
     finished_at_utc => event.finished_at_utc.map(crate::model::timestamp_text),
     elapsed_ms => event.elapsed_ms,

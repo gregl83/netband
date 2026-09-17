@@ -113,7 +113,8 @@ fn record_cooldown(scheduler: &mut Scheduler, time: DateTime<Utc>, seconds: Opti
             time,
             BandwidthOpportunity {
                 reason: TriggerReason::Scheduled,
-                scheduled_at_utc: time,
+                scheduled_at_utc: Some(time),
+                requested_at_utc: time,
                 interface: None,
             },
             &mut report,

@@ -86,7 +86,7 @@ pub struct PingRoundRequest {
     pub round_number: u64,
     pub targets: Vec<IpAddr>,
     pub timeout: Duration,
-    pub scheduled_at_utc: DateTime<Utc>,
+    pub scheduled_at_utc: Option<DateTime<Utc>>,
     pub identifier: u16,
     pub load_phase: Option<LoadPhase>,
     pub load_run_id: Option<RunId>,
@@ -257,7 +257,7 @@ where
         round_number: 0,
         targets: config.ping.targets.clone(),
         timeout: config.ping.timeout,
-        scheduled_at_utc: scheduled_at,
+        scheduled_at_utc: None,
         identifier,
         load_phase: None,
         load_run_id: None,
@@ -321,7 +321,7 @@ struct TargetMeasurement {
 
 struct MeasurementContext {
     run_id: RunId,
-    scheduled_at: DateTime<Utc>,
+    scheduled_at: Option<DateTime<Utc>>,
     load_phase: Option<LoadPhase>,
     load_run_id: Option<RunId>,
 }
@@ -406,7 +406,7 @@ fn apply_common(
     target: &str,
     sequence: u16,
 ) {
-    event.scheduled_at_utc = Some(context.scheduled_at);
+    event.scheduled_at_utc = context.scheduled_at;
     event.started_at_utc = Some(started_at);
     event.interface.clone_from(&binding.interface);
     event.ping_local_ip = binding.local_ip;

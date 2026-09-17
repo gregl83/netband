@@ -257,12 +257,14 @@ where
             ManualDecision::Allowed => {
                 let opportunity = BandwidthOpportunity {
                     reason: TriggerReason::Manual,
-                    scheduled_at_utc: started_at,
+                    scheduled_at_utc: None,
+                    requested_at_utc: started_at,
                     interface: config.interfaces.first().cloned(),
                 };
                 coordinator.start_run(run_id, session, RunKind::Bandwidth)?;
                 let mut report =
                     measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
+                opportunity.apply_timing(&mut report);
                 if report.reservation_error.is_none() {
                     let scheduler_events =
                         scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
