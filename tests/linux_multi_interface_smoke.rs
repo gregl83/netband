@@ -291,8 +291,14 @@ fn read_probe_rows(path: &Path) -> Result<Vec<ProbeRow>, String> {
                 .get(field("interface"))
                 .unwrap_or_default()
                 .to_owned(),
-            local_ip: record.get(field("local_ip")).unwrap_or_default().to_owned(),
-            target: record.get(field("target")).unwrap_or_default().to_owned(),
+            local_ip: record
+                .get(field("ping_local_ip"))
+                .unwrap_or_default()
+                .to_owned(),
+            target: record
+                .get(field("ping_target_ip"))
+                .unwrap_or_default()
+                .to_owned(),
             outcome: record.get(field("outcome")).unwrap_or_default().to_owned(),
             started_at: record
                 .get(field("started_at_utc"))

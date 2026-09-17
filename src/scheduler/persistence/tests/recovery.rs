@@ -11,7 +11,9 @@ fn stale_backup_replays_reservations_and_spacing_idempotently() {
         assert_eq!(recovered.snapshot().runs, vec![now()]);
         assert_eq!(recovered.snapshot().last_started_at_utc, Some(now()));
         assert!(matches!(
-            recovered.preflight_manual("test", now()).unwrap(),
+            recovered
+                .preflight_manual(&crate::model::RunId::new(), now())
+                .unwrap(),
             ManualDecision::Blocked(_)
         ));
     }
@@ -90,16 +92,15 @@ fn record_cooldown(scheduler: &mut Scheduler, time: DateTime<Utc>, seconds: Opti
     use crate::model::{EventKind, MeasurementEvent, Outcome, RequestStage, TriggerReason};
     use crate::scheduler::BandwidthOpportunity;
     let mut event = MeasurementEvent::new(
-        "test",
-        "retry",
+        crate::model::RunId::new(),
         EventKind::RequestFailure,
         Outcome::RateLimited,
         time,
     );
     event.request_stage = Some(RequestStage::Locate);
-    event.http_status = Some(429);
-    event.retry_after_ms = seconds.map(|seconds| seconds * 1000);
-    event.rate_limit_until_utc = seconds.map(|seconds| time + TimeDelta::seconds(seconds as i64));
+    event.request_http_status = Some(429);
+    event.request_retry_after_ms = seconds.map(|seconds| seconds * 1000);
+    event.request_retry_at_utc = seconds.map(|seconds| time + TimeDelta::seconds(seconds as i64));
     let mut report = BandwidthReport {
         events: vec![event],
         outcome: Outcome::RateLimited,
@@ -108,7 +109,7 @@ fn record_cooldown(scheduler: &mut Scheduler, time: DateTime<Utc>, seconds: Opti
     };
     scheduler
         .finish_attempt(
-            "test",
+            &crate::model::RunId::new(),
             time,
             BandwidthOpportunity {
                 reason: TriggerReason::Scheduled,
@@ -147,14 +148,18 @@ fn stale_backup_preserves_provider_cooldown_across_midnight_and_restart() {
                 Scheduler::open_seeded(path(&root), &config(&root), time, 7).unwrap();
             assert_eq!(recovered.snapshot().cooldown_until_utc, Some(deadline));
             assert!(matches!(
-                recovered.preflight_manual("test", time).unwrap(),
+                recovered
+                    .preflight_manual(&crate::model::RunId::new(), time)
+                    .unwrap(),
                 ManualDecision::Blocked(_)
             ));
         }
         let mut recovered =
             Scheduler::open_seeded(path(&root), &config(&root), deadline, 7).unwrap();
         assert!(matches!(
-            recovered.preflight_manual("test", deadline).unwrap(),
+            recovered
+                .preflight_manual(&crate::model::RunId::new(), deadline)
+                .unwrap(),
             ManualDecision::Allowed
         ));
     }

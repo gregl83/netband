@@ -263,7 +263,7 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
     let timestamp = event.finished_at_utc.map(timestamp_text)?;
     let interface = event.interface.as_deref().unwrap_or("default-route");
     let reason = event
-        .error_message
+        .message
         .as_deref()
         .map(|message| format!(" reason=\"{}\"", quote_human(message)))
         .unwrap_or_default();
@@ -271,16 +271,27 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
         format!(
             " load_phase={} load_run_id={}",
             load_phase_name(phase),
-            event.load_run_id.as_deref().unwrap_or("-")
+            event
+                .load_run_id
+                .map_or_else(|| "-".to_owned(), |id| id.to_string())
         )
     });
     match event.event_kind {
         EventKind::PingProbe => Some(format!(
             "{timestamp} ping interface={interface} target={} outcome={} rtt_ms={} loss_pct={}{}{}\n",
-            event.target.as_deref().unwrap_or("-"),
+            event.ping_target_ip.as_deref().unwrap_or("-"),
             outcome_name(event.outcome),
-            decimal_or_dash(event.rtt_ms),
-            decimal_or_dash(event.packet_loss_pct),
+            decimal_or_dash(event.ping_rtt_ms),
+            decimal_or_dash(
+                event
+                    .ping_packets_sent
+                    .zip(event.ping_packets_received)
+                    .and_then(|(sent, received)| {
+                        (sent > 0).then(|| {
+                            100.0 * (f64::from(sent) - f64::from(received)) / f64::from(sent)
+                        })
+                    })
+            ),
             load,
             reason,
         )),
@@ -297,7 +308,10 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
             decimal_or_dash(event.upload_mbps),
             reason,
         )),
-        EventKind::RequestFailure | EventKind::Scheduler => None,
+        EventKind::RequestFailure
+        | EventKind::Scheduler
+        | EventKind::RunStarted
+        | EventKind::RunFinished => None,
     }
 }
 
@@ -322,6 +336,7 @@ fn decimal_or_dash(value: Option<f64>) -> String {
 
 fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
+        Outcome::Started => "started",
         Outcome::Success => "success",
         Outcome::Partial => "partial",
         Outcome::Timeout => "timeout",

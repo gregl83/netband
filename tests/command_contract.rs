@@ -148,6 +148,7 @@ async fn provider_failure_is_journaled_and_suppression_does_not_reconnect() {
     drop(socket);
     assert_eq!(child.wait().await.code(), Some(1));
     let rows = fixture.rows();
+    assert_complete_hierarchy(&rows);
     assert_eq!(
         rows.iter()
             .filter(|row| row["event_kind"] == "bandwidth")
@@ -156,12 +157,13 @@ async fn provider_failure_is_journaled_and_suppression_does_not_reconnect() {
     );
     assert!(rows.iter().any(|row| row["event_kind"] == "bandwidth"
         && row["outcome"] == "rate_limited"
-        && row["daily_bandwidth_starts"] == "1"));
+        && row["provider_daily_starts"] == "1"));
     let before = rows.len();
     let mut second = fixture.spawn();
     assert_eq!(second.wait().await.code(), Some(1));
     let rows = fixture.rows();
-    assert_eq!(rows.len(), before + 1);
+    assert_complete_hierarchy(&rows);
+    assert_eq!(rows.len(), before + 3);
     assert_eq!(rows.last().unwrap()["outcome"], "suppressed");
     assert!(
         tokio::time::timeout(Duration::from_millis(50), fixture.listener.accept())
@@ -218,6 +220,7 @@ async fn successful_command_writes_one_terminal_result_and_returns_zero() {
     .expect("command must complete both transfer stages");
     assert_eq!(child.wait().await.code(), Some(0));
     let rows = fixture.rows();
+    assert_complete_hierarchy(&rows);
     let bandwidth: Vec<_> = rows
         .iter()
         .filter(|row| row["event_kind"] == "bandwidth")
@@ -261,6 +264,7 @@ async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership()
         child.signal(signal);
         assert_eq!(child.wait().await.code(), Some(0));
         let rows = fixture.rows();
+        assert_complete_hierarchy(&rows);
         assert_eq!(
             rows.iter()
                 .filter(|row| row["event_kind"] == "bandwidth")
@@ -269,7 +273,7 @@ async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership()
         );
         assert!(rows.iter().any(|row| row["event_kind"] == "bandwidth"
             && row["outcome"] == "cancelled"
-            && row["daily_bandwidth_starts"] == "1"));
+            && row["provider_daily_starts"] == "1"));
         let output = fixture.root.path().join("results.csv");
         let (_journal, _) =
             JournalWriter::open_at(&OutputTarget::File(output), chrono::Utc::now()).unwrap();
@@ -287,4 +291,66 @@ async fn interrupt_and_terminate_flush_cancelled_results_and_release_ownership()
         lock.try_lock()
             .expect("scheduler ownership must be released");
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn starts_are_durable_before_network_work_and_kill_leaves_runs_unfinished() {
+    let fixture = CommandFixture::new().await;
+    let mut child = fixture.spawn();
+    let _socket = fixture.accept_request().await;
+    let starts = fixture.rows();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0]["event_kind"], "run_started");
+    assert_eq!(starts[0]["run_kind"], "session");
+    assert_eq!(starts[0]["command"], "once bandwidth");
+    assert!(starts[0]["parent_run_id"].is_empty());
+    assert_eq!(starts[1]["event_kind"], "run_started");
+    assert_eq!(starts[1]["run_kind"], "bandwidth");
+    assert_eq!(starts[1]["parent_run_id"], starts[0]["run_id"]);
+    assert_ne!(starts[1]["run_id"], starts[0]["run_id"]);
+    for (index, row) in starts.iter().enumerate() {
+        assert_eq!(row["event_sequence"], (index + 1).to_string());
+        for field in ["run_id", "event_id"] {
+            assert_eq!(
+                uuid::Uuid::parse_str(&row[field])
+                    .unwrap()
+                    .get_version_num(),
+                4
+            );
+        }
+    }
+    child.signal("-KILL");
+    assert!(!child.wait().await.success());
+    assert_eq!(fixture.rows(), starts);
+}
+
+fn assert_complete_hierarchy(rows: &[HashMap<String, String>]) {
+    use std::collections::HashSet;
+    let mut active = HashMap::new();
+    let mut ids = HashSet::new();
+    let mut sequence = 0;
+    for row in rows {
+        assert!(ids.insert(&row["event_id"]));
+        if row["event_kind"] == "run_started" && row["run_kind"] == "session" {
+            assert!(active.is_empty());
+            sequence = 0;
+        }
+        sequence += 1;
+        assert_eq!(row["event_sequence"], sequence.to_string());
+        let run = &row["run_id"];
+        let parent = &row["parent_run_id"];
+        if !parent.is_empty() {
+            assert!(active.contains_key(parent));
+        }
+        if row["event_kind"] == "run_started" {
+            assert!(active.insert(run, (&row["run_kind"], parent)).is_none());
+        }
+        assert_eq!(active.get(run), Some(&(&row["run_kind"], parent)));
+        if row["event_kind"] == "run_finished" {
+            assert!(!active.values().any(|(_, parent)| *parent == run));
+            active.remove(run);
+        }
+    }
+    assert!(active.is_empty());
 }

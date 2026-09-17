@@ -4,11 +4,10 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::{Sink, Stream, StreamExt};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -29,7 +28,7 @@ use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
 use crate::journal::{Journal, JournalError, OutputCoordinator};
 use crate::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestDirection,
-    RequestStage, TriggerReason,
+    RequestId, RequestStage, RunId, RunKind, TriggerReason,
 };
 use crate::provider::{
     EndpointCandidate, FailureDisposition, RequestFailure, RetryAfter,
@@ -92,6 +91,7 @@ pub struct TcpMetrics {
 
 #[derive(Debug, Clone)]
 pub struct DirectionMeasurement {
+    pub request_id: RequestId,
     pub bytes: u64,
     pub elapsed: Duration,
     pub remote_ip: IpAddr,
@@ -113,7 +113,7 @@ struct AttemptProgress {
 
 impl AttemptProgress {
     fn new(stage: RequestStage) -> Self {
-        let active = RequestFailure::simple(stage, ErrorKind::Internal, "", None, 1);
+        let active = RequestFailure::simple(stage, ErrorKind::Internal, "", None, RequestId::new());
         Self {
             started_monotonic: active.finished_monotonic,
             stage_started_monotonic: active.finished_monotonic,
@@ -138,6 +138,7 @@ impl AttemptProgress {
             .finished_monotonic
             .saturating_duration_since(self.stage_started_monotonic);
         failure.direction = self.active.direction;
+        failure.request_id = self.active.request_id;
         if failure.server_name.is_none() {
             failure.server_name.clone_from(&self.active.server_name);
         }
@@ -236,12 +237,8 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let started_at = Utc::now();
-    let run_number = next_run_number();
-    let run_id = format!(
-        "{}-{}-{run_number}",
-        started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        std::process::id()
-    );
+    let session = RunId::new();
+    let run_id = RunId::new();
     let journal = Journal::open_at(&config.output, config.rotate_max_bytes, started_at)?;
     let console = Console::spawn(
         config.console,
@@ -250,33 +247,55 @@ where
         trace_console_diagnostic,
     );
     let mut scheduler = Scheduler::open(&config.state_file, &config.bandwidth, started_at)?;
-    let mut report = match scheduler.preflight_manual(&run_id, started_at)? {
-        ManualDecision::Allowed => {
-            let opportunity = BandwidthOpportunity {
-                reason: TriggerReason::Manual,
-                scheduled_at_utc: started_at,
-                interface: config.interfaces.first().cloned(),
-            };
-            let mut report =
-                measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
-            if report.reservation_error.is_none() {
-                let scheduler_events =
-                    scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
-                report.events.extend(scheduler_events);
-            }
-            report
-        }
-        ManualDecision::Blocked(event) => BandwidthReport {
-            events: vec![*event],
-            outcome: Outcome::Suppressed,
-            reserved: false,
-            reservation_error: None,
-        },
-    };
-    scheduler.flush()?;
-    let reservation_error = report.reservation_error.take();
     let mut coordinator = OutputCoordinator::new(journal, console);
-    let publish_result = coordinator.publish_batch(&report.events);
+    let result = async {
+        coordinator.start_session(session, "once bandwidth")?;
+        let mut report = match scheduler.preflight_manual(&session, started_at)? {
+            ManualDecision::Allowed => {
+                let opportunity = BandwidthOpportunity {
+                    reason: TriggerReason::Manual,
+                    scheduled_at_utc: started_at,
+                    interface: config.interfaces.first().cloned(),
+                };
+                coordinator.start_run(run_id, session, RunKind::Bandwidth)?;
+                let mut report =
+                    measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
+                if report.reservation_error.is_none() {
+                    let scheduler_events =
+                        scheduler.finish_attempt(&session, Utc::now(), opportunity, &mut report)?;
+                    report.events.extend(scheduler_events);
+                }
+                coordinator.publish_batch(&report.events)?;
+                coordinator.finish_run(run_id, report.outcome, None)?;
+                report
+            }
+            ManualDecision::Blocked(event) => {
+                let report = BandwidthReport {
+                    events: vec![*event],
+                    outcome: Outcome::Suppressed,
+                    reserved: false,
+                    reservation_error: None,
+                };
+                coordinator.publish_batch(&report.events)?;
+                report
+            }
+        };
+        scheduler.flush()?;
+        if let Some(message) = report.reservation_error.take() {
+            return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
+                message,
+            )));
+        }
+        Ok::<_, BandwidthCommandError>(report)
+    }
+    .await;
+    let finish_result = coordinator.finish_session(
+        session,
+        result
+            .as_ref()
+            .map_or(Outcome::Error, |report| report.outcome),
+        result.as_ref().err().map(ToString::to_string).as_deref(),
+    );
     let flush_result = coordinator.flush();
     let (journal, console) = coordinator.into_parts();
     let output_path = journal.path().to_owned();
@@ -285,13 +304,9 @@ where
     }
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    publish_result?;
+    let report = result?;
+    finish_result?;
     flush_result?;
-    if let Some(message) = reservation_error {
-        return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
-            message,
-        )));
-    }
     Ok(BandwidthExecution {
         output_path,
         report,
@@ -301,7 +316,7 @@ where
 
 pub async fn measure_bandwidth(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
 ) -> BandwidthReport {
     let mut reservation = UntrackedReservation;
@@ -318,7 +333,7 @@ pub async fn measure_bandwidth(
 
 pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     reservation: &mut G,
 ) -> BandwidthReport {
@@ -335,7 +350,7 @@ pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
 
 pub async fn measure_bandwidth_with_gate_and_phase<G: ReservationGate>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     reservation: &mut G,
     phase: watch::Sender<LoadPhase>,
@@ -354,7 +369,7 @@ pub async fn measure_bandwidth_with_gate_and_phase<G: ReservationGate>(
 
 pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
 ) -> BandwidthReport {
@@ -372,7 +387,7 @@ pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
 
 pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -395,7 +410,7 @@ pub async fn measure_bandwidth_with_network_and_gate<
     G: ReservationGate,
 >(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -419,7 +434,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
     G: ReservationGate,
 >(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     mut shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -439,7 +454,14 @@ async fn measure_bandwidth_with_network_and_gate_observed<
     let mut reservation_error = None;
     let result = {
         let attempt = async {
-            let resolution = resolve_endpoints(&config.bandwidth, interface).await;
+            let mut resolution = resolve_endpoints(&config.bandwidth, interface).await;
+            for failure in resolution
+                .failures
+                .iter_mut()
+                .chain(resolution.terminal.iter_mut())
+            {
+                failure.request_id = progress.active.request_id;
+            }
             progress.failures.extend(resolution.failures);
             if let Some(terminal) = resolution.terminal {
                 let outcome = terminal.outcome;
@@ -455,7 +477,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
                         ErrorKind::Internal,
                         format!("cannot persist bandwidth reservation: {message}"),
                         None,
-                        1,
+                        RequestId::new(),
                     );
                     failure.outcome = Outcome::Error;
                     progress.record_failure(failure);
@@ -520,7 +542,7 @@ fn apply_admission(
     {
         report.reserved = true;
         for event in &mut report.events {
-            event.daily_bandwidth_starts = Some(daily_bandwidth_starts);
+            event.provider_daily_starts = Some(daily_bandwidth_starts);
         }
     }
     report
@@ -658,6 +680,7 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
         ));
     }
     Some(DirectionMeasurement {
+        request_id: progress.active.request_id,
         bytes,
         elapsed,
         remote_ip,
@@ -703,6 +726,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         error,
     } = transfer_upload(socket, |bytes, elapsed, metrics| {
         progress.upload = (bytes > 0).then_some(DirectionMeasurement {
+            request_id: progress.active.request_id,
             bytes,
             elapsed,
             metrics,
@@ -740,6 +764,7 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
         return None;
     }
     Some(DirectionMeasurement {
+        request_id: progress.active.request_id,
         bytes,
         elapsed,
         remote_ip,
@@ -913,13 +938,13 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     resolver: &R,
     progress: &mut AttemptProgress,
 ) -> Result<ConnectedSocket, ()> {
-    let attempt = 1;
+    let request_id = RequestId::new();
     progress.active = RequestFailure::simple(
         RequestStage::Dns,
         ErrorKind::Internal,
         "",
         Some(url.to_string()),
-        attempt,
+        request_id,
     );
     progress.stage_started_monotonic = progress.active.finished_monotonic;
     progress.active.direction = Some(direction);
@@ -932,7 +957,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 ErrorKind::Dns,
                 "NDT7 URL has no host",
                 Some(url.to_string()),
-                attempt,
+                request_id,
             ));
             return Err(());
         }
@@ -946,15 +971,19 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                 ErrorKind::Dns,
                 message,
                 Some(url.to_string()),
-                attempt,
+                request_id,
             ));
             return Err(());
         }
     };
     for (address_index, remote) in addresses.into_iter().enumerate() {
-        let request_attempt = attempt + address_index as u32;
+        let request_id = if address_index == 0 {
+            request_id
+        } else {
+            RequestId::new()
+        };
         progress.begin_stage(RequestStage::Connect);
-        progress.active.attempt = request_attempt;
+        progress.active.request_id = request_id;
         progress.active.remote_ip = Some(remote.ip());
         progress.active.local_ip = None;
         let tcp = match connector.connect(remote, interface).await {
@@ -965,7 +994,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     ErrorKind::Connect,
                     format!("TCP connect failed: {error}"),
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 );
                 failure.remote_ip = Some(remote.ip());
                 failure.os_error_code = error.raw_os_error();
@@ -993,7 +1022,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     ErrorKind::Tls,
                     message,
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 );
                 failure.local_ip = Some(local_ip);
                 failure.remote_ip = Some(remote.ip());
@@ -1010,7 +1039,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     ErrorKind::WebsocketHandshake,
                     message,
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 ));
                 return Err(());
             }
@@ -1030,7 +1059,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                         url,
                         remote.ip(),
                         local_ip,
-                        request_attempt,
+                        &request_id,
                         None,
                         "server did not select the NDT7 WebSocket subprotocol".to_owned(),
                     ));
@@ -1060,7 +1089,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     url,
                     remote.ip(),
                     local_ip,
-                    request_attempt,
+                    &request_id,
                     Some((status, retry_after)),
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
                 );
@@ -1075,7 +1104,7 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     url,
                     remote.ip(),
                     local_ip,
-                    request_attempt,
+                    &request_id,
                     None,
                     format!("WebSocket handshake failed: {error}"),
                 ));
@@ -1212,7 +1241,7 @@ fn handshake_failure(
     url: &Url,
     remote_ip: IpAddr,
     local_ip: IpAddr,
-    attempt: u32,
+    request_id: &RequestId,
     response: Option<(u16, Option<RetryAfter>)>,
     message: String,
 ) -> RequestFailure {
@@ -1234,7 +1263,7 @@ fn handshake_failure(
         local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code: None,
-        attempt,
+        request_id: request_id.to_owned(),
         http_status,
         retry_after: retry_after.flatten(),
         disposition,
@@ -1286,7 +1315,7 @@ fn stream_failure(
         local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code,
-        attempt: 1,
+        request_id: RequestId::new(),
         http_status: None,
         retry_after: None,
         disposition: FailureDisposition::Terminal,
@@ -1304,7 +1333,7 @@ struct ReportInput<'a> {
     elapsed: Duration,
     started_at_utc: DateTime<Utc>,
     finished_at_utc: DateTime<Utc>,
-    run_id: &'a str,
+    run_id: &'a RunId,
     interface: Option<&'a str>,
     provider_id: &'a str,
     provider_kind: ProviderKind,
@@ -1333,25 +1362,9 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     let now = finished_at_utc;
     let mut events = failures
         .iter()
-        .enumerate()
-        .map(|(index, failure)| {
-            failure_event(
-                run_id,
-                index,
-                interface,
-                provider_id,
-                provider_kind,
-                failure,
-            )
-        })
+        .map(|failure| failure_event(run_id, interface, provider_id, provider_kind, failure))
         .collect::<Vec<_>>();
-    let mut bandwidth = MeasurementEvent::new(
-        run_id,
-        format!("{run_id}:bandwidth"),
-        EventKind::Bandwidth,
-        outcome,
-        now,
-    );
+    let mut bandwidth = MeasurementEvent::new(run_id, EventKind::Bandwidth, outcome, now);
     bandwidth.started_at_utc = Some(started_at_utc);
     bandwidth.interface = interface.map(str::to_owned);
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
@@ -1364,14 +1377,16 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     bandwidth.upload_mbps = upload
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
+    bandwidth.download_request_id = download.as_ref().map(|measurement| measurement.request_id);
+    bandwidth.upload_request_id = upload.as_ref().map(|measurement| measurement.request_id);
     bandwidth.download_bytes = download.as_ref().map(|measurement| measurement.bytes);
     bandwidth.upload_bytes = upload.as_ref().map(|measurement| measurement.bytes);
-    bandwidth.download_duration_ms = download
+    bandwidth.download_measurement_duration_ms = download
         .as_ref()
         .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
     bandwidth.download_local_ip = download.as_ref().map(|measurement| measurement.local_ip);
     bandwidth.download_remote_ip = download.as_ref().map(|measurement| measurement.remote_ip);
-    bandwidth.upload_duration_ms = upload
+    bandwidth.upload_measurement_duration_ms = upload
         .as_ref()
         .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
     bandwidth.upload_local_ip = upload.as_ref().map(|measurement| measurement.local_ip);
@@ -1385,15 +1400,15 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         .as_ref()
         .map(|measurement| measurement.metrics)
         .unwrap_or_default();
-    bandwidth.download_tcp_min_rtt_ms = download_metrics.min_rtt_ms;
-    bandwidth.download_tcp_rtt_ms = download_metrics.rtt_ms;
-    bandwidth.download_tcp_retransmitted_bytes = download_metrics.retransmitted_bytes;
-    bandwidth.upload_tcp_min_rtt_ms = upload_metrics.min_rtt_ms;
-    bandwidth.upload_tcp_rtt_ms = upload_metrics.rtt_ms;
-    bandwidth.upload_tcp_retransmitted_bytes = upload_metrics.retransmitted_bytes;
+    bandwidth.download_server_tcp_min_rtt_ms = download_metrics.min_rtt_ms;
+    bandwidth.download_server_tcp_rtt_ms = download_metrics.rtt_ms;
+    bandwidth.download_server_tcp_retransmitted_bytes = download_metrics.retransmitted_bytes;
+    bandwidth.upload_server_tcp_min_rtt_ms = upload_metrics.min_rtt_ms;
+    bandwidth.upload_server_tcp_rtt_ms = upload_metrics.rtt_ms;
+    bandwidth.upload_server_tcp_retransmitted_bytes = upload_metrics.retransmitted_bytes;
     if outcome != Outcome::Success {
         bandwidth.error_kind = failures.last().map(|failure| failure.error_kind);
-        bandwidth.error_message = failures.last().map(|failure| failure.message.clone());
+        bandwidth.message = failures.last().map(|failure| failure.message.clone());
     }
     events.push(bandwidth);
     BandwidthReport {
@@ -1405,8 +1420,7 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
 }
 
 fn failure_event(
-    run_id: &str,
-    index: usize,
+    run_id: &RunId,
     interface: Option<&str>,
     provider_id: &str,
     provider_kind: ProviderKind,
@@ -1414,7 +1428,6 @@ fn failure_event(
 ) -> MeasurementEvent {
     let mut event = MeasurementEvent::new(
         run_id,
-        format!("{run_id}:request-failure:{index}"),
         EventKind::RequestFailure,
         failure.outcome,
         failure.finished_at_utc,
@@ -1426,19 +1439,19 @@ fn failure_event(
     event.provider_kind = Some(provider_kind);
     event.server_name.clone_from(&failure.server_name);
     event.request_url.clone_from(&failure.request_url);
-    event.local_ip = failure.local_ip;
-    event.remote_ip = failure.remote_ip;
+    event.request_local_ip = failure.local_ip;
+    event.request_remote_ip = failure.remote_ip;
     event.request_direction = failure.direction;
     event.request_stage = Some(failure.stage);
-    event.request_attempt = Some(failure.attempt);
-    event.http_status = failure.http_status;
-    event.retry_after_ms = failure
+    event.request_id = Some(failure.request_id);
+    event.request_http_status = failure.http_status;
+    event.request_retry_after_ms = failure
         .retry_after
         .and_then(|retry| u64::try_from(retry.delay.as_millis()).ok());
-    event.rate_limit_until_utc = failure.retry_after.map(|retry| retry.deadline);
+    event.request_retry_at_utc = failure.retry_after.map(|retry| retry.deadline);
     event.error_kind = Some(failure.error_kind);
     event.os_error_code = failure.os_error_code;
-    event.error_message = Some(failure.message.clone());
+    event.message = Some(failure.message.clone());
     event
 }
 
@@ -1515,6 +1528,8 @@ mod tests {
         use super::*;
         let mut progress = AttemptProgress::new(RequestStage::Locate);
         let attempt_start = progress.started_at_utc;
+        progress.active.request_id = RequestId::new();
+        let request_id = progress.active.request_id;
         for stage in [
             RequestStage::Locate,
             RequestStage::Dns,
@@ -1530,7 +1545,8 @@ mod tests {
             assert!(before <= stage_start && stage_start <= Utc::now());
             assert_eq!(progress.started_at_utc, attempt_start);
             tokio::time::advance(Duration::from_secs(2)).await;
-            let failure = RequestFailure::simple(stage, ErrorKind::Io, "fixture", None, 1);
+            let failure =
+                RequestFailure::simple(stage, ErrorKind::Io, "fixture", None, RequestId::new());
             let failure_finish = failure.finished_at_utc;
             tokio::time::advance(Duration::from_secs(3)).await;
             progress.record_failure(failure);
@@ -1538,6 +1554,7 @@ mod tests {
             assert_eq!(recorded.started_at_utc, stage_start);
             assert_eq!(recorded.finished_at_utc, failure_finish);
             assert_eq!(recorded.elapsed, Duration::from_secs(2));
+            assert_eq!(recorded.request_id, request_id);
             for outcome in [Outcome::Timeout, Outcome::Cancelled] {
                 // A clock adjustment must not clamp or reconstruct observed termination.
                 let finish = stage_start - chrono::Duration::seconds(1);
@@ -1553,6 +1570,7 @@ mod tests {
                 assert_eq!(failure.started_at_utc, stage_start);
                 assert_eq!(failure.finished_at_utc, finish);
                 assert_eq!(failure.elapsed, Duration::from_secs(5));
+                assert_eq!(failure.request_id, request_id);
             }
         }
     }
@@ -1562,6 +1580,7 @@ mod tests {
         use super::*;
         let start = DateTime::from_timestamp(1_000, 0).unwrap();
         let direction = |bytes, seconds| DirectionMeasurement {
+            request_id: RequestId::new(),
             bytes,
             elapsed: Duration::from_secs(seconds),
             remote_ip: if seconds == 10 {
@@ -1596,7 +1615,7 @@ mod tests {
                     ErrorKind::Connect,
                     "fixture",
                     None,
-                    1,
+                    RequestId::new(),
                 );
                 failure.started_at_utc = start + chrono::Duration::seconds(1);
                 failure.finished_at_utc = start + chrono::Duration::seconds(2);
@@ -1605,7 +1624,7 @@ mod tests {
                     elapsed: Duration::from_secs(23),
                     started_at_utc: start,
                     finished_at_utc: finish,
-                    run_id: "timing",
+                    run_id: &crate::model::RunId::new(),
                     interface: None,
                     provider_id: "direct",
                     provider_kind: ProviderKind::Direct,
@@ -1618,9 +1637,9 @@ mod tests {
                 let request = &report.events[0];
                 assert_eq!(request.started_at_utc, Some(failure.started_at_utc));
                 assert_eq!(request.finished_at_utc, Some(failure.finished_at_utc));
-                assert_eq!(request.retry_after_ms, Some(60_000));
+                assert_eq!(request.request_retry_after_ms, Some(60_000));
                 assert_eq!(
-                    request.rate_limit_until_utc,
+                    request.request_retry_at_utc,
                     Some(start + chrono::Duration::seconds(62))
                 );
                 let event = &report.events[1];
@@ -1630,8 +1649,14 @@ mod tests {
                 assert_eq!(event.upload_mbps, upload.then_some(3.2));
                 assert_eq!(event.download_bytes, download.then_some(1_000_000));
                 assert_eq!(event.upload_bytes, upload.then_some(2_000_000));
-                assert_eq!(event.download_duration_ms, download.then_some(10_000.0));
-                assert_eq!(event.upload_duration_ms, upload.then_some(5_000.0));
+                assert_eq!(
+                    event.download_measurement_duration_ms,
+                    download.then_some(10_000.0)
+                );
+                assert_eq!(
+                    event.upload_measurement_duration_ms,
+                    upload.then_some(5_000.0)
+                );
                 assert_eq!(
                     event.download_local_ip,
                     download.then(|| "192.0.2.2".parse().unwrap())
@@ -1648,8 +1673,8 @@ mod tests {
                     event.upload_remote_ip,
                     upload.then(|| "198.51.100.1".parse().unwrap())
                 );
-                assert_eq!(event.local_ip, None);
-                assert_eq!(event.remote_ip, None);
+                assert_eq!(event.ping_local_ip, None);
+                assert_eq!(event.request_remote_ip, None);
                 let mut writer = crate::journal::JournalWriter::from_writer(Vec::new()).unwrap();
                 writer.append_batch(std::slice::from_ref(event)).unwrap();
                 let encoded = writer.into_inner().unwrap();
@@ -1673,8 +1698,16 @@ mod tests {
                     }
                 }
                 for (rate, bytes, duration) in [
-                    ("download_mbps", "download_bytes", "download_duration_ms"),
-                    ("upload_mbps", "upload_bytes", "upload_duration_ms"),
+                    (
+                        "download_mbps",
+                        "download_bytes",
+                        "download_measurement_duration_ms",
+                    ),
+                    (
+                        "upload_mbps",
+                        "upload_bytes",
+                        "upload_measurement_duration_ms",
+                    ),
                 ] {
                     if let Some(value) = json[rate].as_f64() {
                         let calculated = 8.0 * json[bytes].as_f64().unwrap()
@@ -1705,19 +1738,25 @@ mod tests {
                 ErrorKind::HttpStatus,
                 "fixture",
                 None,
-                1,
+                RequestId::new(),
             );
             failure.finished_at_utc = received;
             failure.retry_after = header.and_then(|value| parse_retry_after_value(value, received));
             let retry = failure.retry_after;
-            let event = failure_event("retry", 0, None, "direct", ProviderKind::Direct, &failure);
+            let event = failure_event(
+                &RunId::new(),
+                None,
+                "direct",
+                ProviderKind::Direct,
+                &failure,
+            );
             assert_eq!(event.finished_at_utc, Some(received));
             assert_eq!(
-                event.rate_limit_until_utc,
+                event.request_retry_at_utc,
                 retry.map(|value| value.deadline)
             );
             assert_eq!(
-                event.retry_after_ms,
+                event.request_retry_after_ms,
                 retry.and_then(|value| u64::try_from(value.delay.as_millis()).ok())
             );
         }
@@ -1728,6 +1767,7 @@ mod tests {
         use super::*;
         let now = Utc::now();
         let measurement = |mask: u8, upload| DirectionMeasurement {
+            request_id: RequestId::new(),
             bytes: 1_000_000,
             elapsed: Duration::from_secs(1),
             remote_ip: "192.0.2.1".parse().unwrap(),
@@ -1755,7 +1795,7 @@ mod tests {
                     elapsed: Duration::from_secs(23),
                     started_at_utc: now,
                     finished_at_utc: now,
-                    run_id: "tcp",
+                    run_id: &crate::model::RunId::new(),
                     interface: None,
                     provider_id: "direct",
                     provider_kind: ProviderKind::Direct,
@@ -1766,15 +1806,18 @@ mod tests {
                     outcome: Outcome::Partial,
                 });
                 let event = report.events.last().unwrap();
-                assert_eq!(event.download_tcp_min_rtt_ms, down.min_rtt_ms);
-                assert_eq!(event.download_tcp_rtt_ms, down.rtt_ms);
+                assert_eq!(event.download_server_tcp_min_rtt_ms, down.min_rtt_ms);
+                assert_eq!(event.download_server_tcp_rtt_ms, down.rtt_ms);
                 assert_eq!(
-                    event.download_tcp_retransmitted_bytes,
+                    event.download_server_tcp_retransmitted_bytes,
                     down.retransmitted_bytes
                 );
-                assert_eq!(event.upload_tcp_min_rtt_ms, up.min_rtt_ms);
-                assert_eq!(event.upload_tcp_rtt_ms, up.rtt_ms);
-                assert_eq!(event.upload_tcp_retransmitted_bytes, up.retransmitted_bytes);
+                assert_eq!(event.upload_server_tcp_min_rtt_ms, up.min_rtt_ms);
+                assert_eq!(event.upload_server_tcp_rtt_ms, up.rtt_ms);
+                assert_eq!(
+                    event.upload_server_tcp_retransmitted_bytes,
+                    up.retransmitted_bytes
+                );
                 assert_eq!(event.download_mbps, (download_mask < 8).then_some(8.0));
                 assert_eq!(event.upload_mbps, (upload_mask < 8).then_some(8.0));
             }
@@ -1977,11 +2020,6 @@ async fn cancellation_requested(shutdown: &mut watch::Receiver<bool>) {
 
 fn trace_console_diagnostic(diagnostic: ConsoleDiagnostic) {
     tracing::warn!(?diagnostic, "bandwidth console diagnostic");
-}
-
-fn next_run_number() -> u64 {
-    static RUN_NUMBER: AtomicU64 = AtomicU64::new(1);
-    RUN_NUMBER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug, Deserialize)]

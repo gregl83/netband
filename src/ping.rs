@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::io::AsyncWrite;
 
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
 use crate::journal::{Journal, JournalError, OutputCoordinator};
-use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome};
+use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -82,14 +82,14 @@ pub struct ProbeAttemptResult {
 
 #[derive(Debug, Clone)]
 pub struct PingRoundRequest {
-    pub run_id: String,
+    pub run_id: RunId,
     pub round_number: u64,
     pub targets: Vec<IpAddr>,
     pub timeout: Duration,
     pub scheduled_at_utc: DateTime<Utc>,
     pub identifier: u16,
     pub load_phase: Option<LoadPhase>,
-    pub load_run_id: Option<String>,
+    pub load_run_id: Option<RunId>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +100,16 @@ pub struct PingRoundReport {
 }
 
 impl PingRoundReport {
+    pub fn outcome(&self) -> Outcome {
+        if self.failed_targets == 0 {
+            Outcome::Success
+        } else if self.successful_targets > 0 {
+            Outcome::Partial
+        } else {
+            Outcome::Error
+        }
+    }
+
     pub fn exit_status(&self) -> PingExitStatus {
         if self.failed_targets == 0 {
             PingExitStatus::Success
@@ -166,11 +176,10 @@ where
             .wrapping_add(index as u64) as u16;
         let transport = Arc::clone(&transport);
         let context = MeasurementContext {
-            run_id: request.run_id.clone(),
-            round_number: request.round_number,
+            run_id: request.run_id,
             scheduled_at: request.scheduled_at_utc,
             load_phase: request.load_phase,
-            load_run_id: request.load_run_id.clone(),
+            load_run_id: request.load_run_id,
         };
         let probe_request = ProbeRequest {
             target,
@@ -213,7 +222,7 @@ where
     })
 }
 
-fn validate_round_request(request: &PingRoundRequest) -> Result<(), PingRoundError> {
+pub(crate) fn validate_round_request(request: &PingRoundRequest) -> Result<(), PingRoundError> {
     if request.targets.is_empty() {
         return Err(PingRoundError::NoTargets);
     }
@@ -240,7 +249,8 @@ where
 {
     let scheduled_at = Utc::now();
     let run_number = next_run_number();
-    let run_id = run_id(scheduled_at, run_number);
+    let session = RunId::new();
+    let run_id = RunId::new();
     let identifier = (u64::from(std::process::id()) ^ run_number) as u16;
     let round_request = PingRoundRequest {
         run_id,
@@ -260,11 +270,19 @@ where
         CONSOLE_CAPACITY,
         trace_console_diagnostic,
     );
-    let report = measure_round(transport, round_request).await?;
-    let exit_status = report.exit_status();
-
     let mut coordinator = OutputCoordinator::new(journal, console);
-    let publish_result = coordinator.publish_batch(&report.events);
+    let result = async {
+        coordinator.start_session(session, "once ping")?;
+        coordinator.start_run(run_id, session, RunKind::PingRound)?;
+        let report = measure_round(transport, round_request).await?;
+        let outcome = report.outcome();
+        coordinator.publish_batch(&report.events)?;
+        coordinator.finish_run(run_id, outcome, None)?;
+        coordinator.finish_run(session, outcome, None)?;
+        Ok::<_, PingCommandError>(report.exit_status())
+    }
+    .await;
+
     let flush_result = coordinator.flush();
     let (journal, console) = coordinator.into_parts();
     let output_path = journal.path().to_owned();
@@ -273,7 +291,7 @@ where
     }
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    publish_result?;
+    let exit_status = result?;
     flush_result?;
 
     Ok(PingExecution {
@@ -302,11 +320,10 @@ struct TargetMeasurement {
 }
 
 struct MeasurementContext {
-    run_id: String,
-    round_number: u64,
+    run_id: RunId,
     scheduled_at: DateTime<Utc>,
     load_phase: Option<LoadPhase>,
-    load_run_id: Option<String>,
+    load_run_id: Option<RunId>,
 }
 
 async fn measure_target<T: PingTransport + ?Sized>(
@@ -342,31 +359,21 @@ fn build_measurement(
         .result
         .and_then(|reply| validate_reply(&request, reply));
     let success = validated.is_ok();
-    let (outcome, rtt, icmp_type, icmp_code, error_kind, os_error_code, error_message) =
-        match validated {
-            Ok(reply) => (
-                Outcome::Success,
-                Some(reply.rtt),
-                Some(reply.icmp_type),
-                Some(reply.icmp_code),
-                None,
-                None,
-                None,
-            ),
-            Err(failure) => failure_fields(failure, request.timeout),
-        };
+    let (outcome, rtt, icmp_type, icmp_code, error_kind, os_error_code, message) = match validated {
+        Ok(reply) => (
+            Outcome::Success,
+            Some(reply.rtt),
+            Some(reply.icmp_type),
+            Some(reply.icmp_code),
+            None,
+            None,
+            None,
+        ),
+        Err(failure) => failure_fields(failure, request.timeout),
+    };
 
     let target = request.target.to_string();
-    let mut probe = MeasurementEvent::new(
-        run_id,
-        format!(
-            "{run_id}:ping-round:{}:ping-probe:{}",
-            context.round_number, request.sequence
-        ),
-        EventKind::PingProbe,
-        outcome,
-        finished_at,
-    );
+    let mut probe = MeasurementEvent::new(run_id, EventKind::PingProbe, outcome, finished_at);
     apply_common(
         &mut probe,
         context,
@@ -376,15 +383,14 @@ fn build_measurement(
         request.sequence,
     );
     probe.elapsed_ms = Some(duration.as_secs_f64() * 1_000.0);
-    probe.rtt_ms = rtt.map(|value| value.as_secs_f64() * 1_000.0);
-    probe.icmp_type = icmp_type;
-    probe.icmp_code = icmp_code;
+    probe.ping_rtt_ms = rtt.map(|value| value.as_secs_f64() * 1_000.0);
+    probe.ping_icmp_type = icmp_type;
+    probe.ping_icmp_code = icmp_code;
     probe.os_error_code = os_error_code;
     probe.error_kind = error_kind;
-    probe.error_message = error_message;
-    probe.packets_sent = Some(u32::from(attempt.sent));
-    probe.packets_received = Some(u32::from(success));
-    probe.packet_loss_pct = attempt.sent.then_some(if success { 0.0 } else { 100.0 });
+    probe.message = message;
+    probe.ping_packets_sent = Some(u32::from(attempt.sent));
+    probe.ping_packets_received = Some(u32::from(success));
 
     TargetMeasurement {
         event: probe,
@@ -403,11 +409,11 @@ fn apply_common(
     event.scheduled_at_utc = Some(context.scheduled_at);
     event.started_at_utc = Some(started_at);
     event.interface.clone_from(&binding.interface);
-    event.local_ip = binding.local_ip;
+    event.ping_local_ip = binding.local_ip;
     event.load_phase = context.load_phase;
-    event.load_run_id.clone_from(&context.load_run_id);
-    event.target = Some(target.to_owned());
-    event.sequence = Some(sequence);
+    event.load_run_id = context.load_run_id;
+    event.ping_target_ip = Some(target.to_owned());
+    event.ping_sequence = Some(sequence);
 }
 
 fn validate_reply(request: &ProbeRequest, reply: ProbeReply) -> Result<ProbeReply, ProbeFailure> {
@@ -546,11 +552,10 @@ fn internal_failure(
 ) -> TargetMeasurement {
     let now = Utc::now();
     let context = MeasurementContext {
-        run_id: request.run_id.clone(),
-        round_number: request.round_number,
+        run_id: request.run_id,
         scheduled_at: request.scheduled_at_utc,
         load_phase: request.load_phase,
-        load_run_id: request.load_run_id.clone(),
+        load_run_id: request.load_run_id,
     };
     build_measurement(
         &context,
@@ -574,14 +579,6 @@ fn internal_failure(
 fn next_run_number() -> u64 {
     static RUN_NUMBER: AtomicU64 = AtomicU64::new(1);
     RUN_NUMBER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn run_id(started_at: DateTime<Utc>, run_number: u64) -> String {
-    format!(
-        "{}-{}-{run_number}",
-        started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        std::process::id()
-    )
 }
 
 #[derive(Clone)]

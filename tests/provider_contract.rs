@@ -1,3 +1,4 @@
+mod support;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,6 +31,24 @@ fn checked_in_locate_fixture_keeps_secure_pairs_and_reports_missing_urls() {
     assert!(resolution.terminal.is_none());
     assert_eq!(resolution.candidates.len(), 1);
     assert_eq!(resolution.failures.len(), 1);
+    // The invalid second candidate belongs to the original discovery request.
+    assert!(!resolution.failures[0].request_id.to_string().is_empty());
+    let other = parse_locate_candidates(body, "mlab", &locate);
+    assert_ne!(
+        resolution.failures[0].request_id,
+        other.failures[0].request_id
+    );
+    let invalid = br#"{"results":[{"machine":"one","urls":{}},{"machine":"two","urls":{}}]}"#;
+    let invalid = parse_locate_candidates(invalid, "mlab", &locate);
+    assert_eq!(invalid.failures.len(), 2);
+    assert_eq!(
+        invalid.failures[0].request_id,
+        invalid.failures[1].request_id
+    );
+    assert_eq!(
+        invalid.failures[0].request_id,
+        invalid.terminal.unwrap().request_id
+    );
     assert!(resolution.failures[0].direction.is_none());
     assert!(resolution.failures[0].server_name.is_some());
     assert_eq!(
@@ -280,7 +299,7 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
             Duration::from_millis(if cancel { 5000 } else { 500 });
         let (shutdown_tx, shutdown) = cancellation_channel();
         let task = tokio::spawn(async move {
-            measure_bandwidth(&config, "locate-interrupted", shutdown).await
+            measure_bandwidth(&config, &support::id("locate-interrupted"), shutdown).await
         });
         tokio::time::timeout(Duration::from_secs(2), ready_rx)
             .await
@@ -320,7 +339,7 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
             report
                 .events
                 .iter()
-                .all(|event| event.daily_bandwidth_starts.is_none())
+                .all(|event| event.provider_daily_starts.is_none())
         );
         tokio::time::timeout(Duration::from_secs(1), server)
             .await
@@ -346,17 +365,17 @@ async fn locate_reports_preserve_absolute_dates_and_invalid_header_absence() {
         let dir = tempdir().unwrap();
         let config = mlab_config(dir.path(), &base);
         let (_sender, shutdown) = cancellation_channel();
-        let report = measure_bandwidth(&config, "retry-date", shutdown).await;
+        let report = measure_bandwidth(&config, &support::id("retry-date"), shutdown).await;
         server.await.unwrap();
         let failure = &report.events[0];
         let received = failure.finished_at_utc.unwrap();
         let expected = netband::provider::parse_retry_after_value(header, received);
         assert_eq!(
-            failure.rate_limit_until_utc,
+            failure.request_retry_at_utc,
             expected.map(|retry| retry.deadline)
         );
         assert_eq!(
-            failure.retry_after_ms,
+            failure.request_retry_after_ms,
             expected.map(|retry| retry.delay.as_millis() as u64)
         );
         assert_eq!(failure.outcome, Outcome::RateLimited);

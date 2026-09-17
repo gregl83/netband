@@ -94,7 +94,7 @@ impl HealthWindow {
             .map(|event| HealthSample {
                 successful: event.outcome == Outcome::Success,
                 rtt_ms: (event.outcome == Outcome::Success)
-                    .then_some(event.rtt_ms)
+                    .then_some(event.ping_rtt_ms)
                     .flatten(),
             })
             .collect();

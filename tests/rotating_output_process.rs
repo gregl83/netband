@@ -1,3 +1,4 @@
+mod support;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -23,13 +24,13 @@ fn directory_ownership_and_abrupt_exit_recovery_work_across_processes() {
             return;
         }
         let mut journal = Journal::open_at(&target, None, Utc::now()).unwrap();
-        let event = MeasurementEvent::new(
-            "process",
-            "acknowledged",
+        let mut event = MeasurementEvent::new(
+            support::id::<netband::model::RunId>("process"),
             EventKind::PingProbe,
             Outcome::Success,
             Utc::now(),
         );
+        event.event_id = support::id("acknowledged");
         journal.append_batch(&[event]).unwrap();
         let mut file = OpenOptions::new()
             .append(true)
@@ -72,5 +73,8 @@ fn directory_ownership_and_abrupt_exit_recovery_work_across_processes() {
     let mut reader = csv::Reader::from_path(&interrupted).unwrap();
     let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(&records[0][2], "acknowledged");
+    assert_eq!(
+        records[0][1],
+        support::id::<netband::model::EventId>("acknowledged").to_string()
+    );
 }

@@ -1,3 +1,4 @@
+mod support;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -20,36 +21,41 @@ fn timestamp(second: u32) -> chrono::DateTime<Utc> {
 }
 
 fn event(kind: EventKind, outcome: Outcome, id: &str) -> MeasurementEvent {
-    MeasurementEvent::new("run-1", id, kind, outcome, timestamp(2))
+    let mut event = MeasurementEvent::new(
+        support::id::<netband::model::RunId>("run-1"),
+        kind,
+        outcome,
+        timestamp(2),
+    );
+    event.event_id = support::id(id);
+    event
 }
 
-fn fixture_events() -> Vec<MeasurementEvent> {
+fn serialization_edge_events() -> Vec<MeasurementEvent> {
     let mut ping_failure = event(EventKind::PingProbe, Outcome::Timeout, "event-1");
     ping_failure.scheduled_at_utc = Some(timestamp(0));
     ping_failure.started_at_utc = Some(timestamp(0));
     ping_failure.interface = Some("eth0".into());
-    ping_failure.local_ip = Some("192.0.2.10".parse().unwrap());
+    ping_failure.ping_local_ip = Some("192.0.2.10".parse().unwrap());
     ping_failure.load_phase = Some(LoadPhase::Download);
-    ping_failure.load_run_id = Some("run-1".into());
-    ping_failure.target = Some("1.1.1.1".into());
-    ping_failure.sequence = Some(7);
+    ping_failure.load_run_id = Some(support::id("run-1"));
+    ping_failure.ping_target_ip = Some("1.1.1.1".into());
+    ping_failure.ping_sequence = Some(7);
     ping_failure.elapsed_ms = Some(2_000.125);
-    ping_failure.packets_sent = Some(1);
-    ping_failure.packets_received = Some(0);
-    ping_failure.packet_loss_pct = Some(100.0);
-    ping_failure.icmp_type = Some(3);
-    ping_failure.icmp_code = Some(1);
+    ping_failure.ping_packets_sent = Some(1);
+    ping_failure.ping_packets_received = Some(0);
+    ping_failure.ping_icmp_type = Some(3);
+    ping_failure.ping_icmp_code = Some(1);
     ping_failure.os_error_code = Some(10060);
     ping_failure.error_kind = Some(ErrorKind::IcmpTimeout);
-    ping_failure.error_message = Some("réseau, timeout\nsecond line".into());
+    ping_failure.message = Some("réseau, timeout\nsecond line".into());
 
     let mut ping_success = event(EventKind::PingProbe, Outcome::Success, "event-2");
     ping_success.interface = Some("eth0".into());
-    ping_success.target = Some("8.8.8.8".into());
-    ping_success.rtt_ms = Some(12.5);
-    ping_success.packets_sent = Some(1);
-    ping_success.packets_received = Some(1);
-    ping_success.packet_loss_pct = Some(0.0);
+    ping_success.ping_target_ip = Some("8.8.8.8".into());
+    ping_success.ping_rtt_ms = Some(12.5);
+    ping_success.ping_packets_sent = Some(1);
+    ping_success.ping_packets_received = Some(1);
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial, "event-3");
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
@@ -60,15 +66,16 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     bandwidth.download_remote_ip = Some("203.0.113.20".parse().unwrap());
     bandwidth.started_at_utc = Some(timestamp(0) - chrono::TimeDelta::seconds(10));
     bandwidth.elapsed_ms = Some(12_000.0);
-    bandwidth.download_duration_ms = Some(10_500.0);
+    bandwidth.download_measurement_duration_ms = Some(10_500.0);
     bandwidth.download_local_ip = Some("192.0.2.10".parse().unwrap());
+    bandwidth.download_request_id = Some(support::id("fixture-download"));
     bandwidth.download_mbps = Some(94.06231542857143);
     bandwidth.download_bytes = Some(123_456_789);
-    bandwidth.download_tcp_min_rtt_ms = Some(1.2);
-    bandwidth.download_tcp_rtt_ms = Some(2.5);
-    bandwidth.download_tcp_retransmitted_bytes = Some(7);
+    bandwidth.download_server_tcp_min_rtt_ms = Some(1.2);
+    bandwidth.download_server_tcp_rtt_ms = Some(2.5);
+    bandwidth.download_server_tcp_retransmitted_bytes = Some(7);
     bandwidth.error_kind = Some(ErrorKind::UploadFailed);
-    bandwidth.error_message = Some("upload stream closed".into());
+    bandwidth.message = Some("upload stream closed".into());
 
     let mut locate = event(EventKind::RequestFailure, Outcome::RateLimited, "event-4");
     locate.provider_id = Some("mlab".into());
@@ -77,12 +84,12 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     locate.started_at_utc = Some(timestamp(0));
     locate.elapsed_ms = Some(2_000.0);
     locate.request_stage = Some(RequestStage::Locate);
-    locate.request_attempt = Some(2);
-    locate.http_status = Some(429);
-    locate.retry_after_ms = Some(60_000);
-    locate.rate_limit_until_utc = Some(timestamp(3));
+    locate.request_id = Some(support::id("fixture-locate"));
+    locate.request_http_status = Some(429);
+    locate.request_retry_after_ms = Some(60_000);
+    locate.request_retry_at_utc = Some(timestamp(3));
     locate.error_kind = Some(ErrorKind::HttpStatus);
-    locate.error_message = Some("capacity unavailable".into());
+    locate.message = Some("capacity unavailable".into());
 
     let mut websocket = event(EventKind::RequestFailure, Outcome::Error, "event-5");
     websocket.provider_id = Some("direct:abc".into());
@@ -92,27 +99,27 @@ fn fixture_events() -> Vec<MeasurementEvent> {
     websocket.started_at_utc = Some(timestamp(0));
     websocket.elapsed_ms = Some(2_000.0);
     websocket.request_stage = Some(RequestStage::WebsocketHandshake);
-    websocket.request_attempt = Some(1);
-    websocket.http_status = Some(503);
+    websocket.request_id = Some(support::id("fixture-websocket"));
+    websocket.request_http_status = Some(503);
     websocket.error_kind = Some(ErrorKind::WebsocketHandshake);
-    websocket.error_message = Some("upstream unavailable".into());
+    websocket.message = Some("upstream unavailable".into());
 
     let mut deferred = event(EventKind::Scheduler, Outcome::Deferred, "event-6");
     deferred.trigger_reason = Some(TriggerReason::PingLoss);
     deferred.provider_id = Some("mlab".into());
     deferred.provider_kind = Some(ProviderKind::Mlab);
-    deferred.rate_limit_until_utc = Some(timestamp(3));
-    deferred.daily_bandwidth_starts = Some(2);
-    deferred.error_kind = Some(ErrorKind::ProviderCooldown);
-    deferred.error_message = Some("provider cooldown active".into());
+    deferred.scheduler_not_before_utc = Some(timestamp(3));
+    deferred.provider_daily_starts = Some(2);
+    deferred.scheduler_action = Some(netband::model::SchedulerAction::Deferred);
+    deferred.message = Some("provider cooldown active".into());
 
     let mut suppressed = event(EventKind::Scheduler, Outcome::Suppressed, "event-7");
     suppressed.trigger_reason = Some(TriggerReason::Scheduled);
     suppressed.provider_id = Some("mlab".into());
     suppressed.provider_kind = Some(ProviderKind::Mlab);
-    suppressed.daily_bandwidth_starts = Some(4);
-    suppressed.error_kind = Some(ErrorKind::DailyCap);
-    suppressed.error_message = Some("daily maximum reached".into());
+    suppressed.provider_daily_starts = Some(4);
+    suppressed.scheduler_action = Some(netband::model::SchedulerAction::Suppressed);
+    suppressed.message = Some("daily maximum reached".into());
 
     vec![
         ping_failure,
@@ -126,13 +133,13 @@ fn fixture_events() -> Vec<MeasurementEvent> {
 }
 
 #[test]
-fn fixture_events_produce_byte_stable_v1_csv() {
+fn serialization_edges_produce_byte_stable_v1_csv() {
     let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
-    journal.append_batch(&fixture_events()).unwrap();
+    journal.append_batch(&serialization_edge_events()).unwrap();
     let bytes = journal.into_inner().unwrap();
     let text = String::from_utf8(bytes).unwrap();
 
-    let expected = include_str!("fixtures/v1-events.csv")
+    let expected = include_str!("fixtures/serialization-edge-events.csv")
         .replace('\n', "\r\n")
         .replace("{{LF}}", "\n");
     assert_eq!(text, expected);
@@ -149,11 +156,15 @@ fn explicit_files_append_with_one_header_and_reject_mismatch() {
 
     let (mut first, opened_path) = JournalWriter::open_at(&output, timestamp(0)).unwrap();
     assert_eq!(opened_path, path);
-    first.append_batch(&[fixture_events()[0].clone()]).unwrap();
+    first
+        .append_batch(&[serialization_edge_events()[0].clone()])
+        .unwrap();
     drop(first);
 
     let (mut second, _) = JournalWriter::open_at(&output, timestamp(1)).unwrap();
-    second.append_batch(&[fixture_events()[1].clone()]).unwrap();
+    second
+        .append_batch(&[serialization_edge_events()[1].clone()])
+        .unwrap();
     drop(second);
 
     let contents = fs::read_to_string(&path).unwrap();
@@ -173,7 +184,7 @@ fn explicit_files_append_with_one_header_and_reject_mismatch() {
     let (mut journal, _) =
         JournalWriter::open_at(&OutputTarget::File(bare_header.clone()), timestamp(0)).unwrap();
     journal
-        .append_batch(&[fixture_events()[1].clone()])
+        .append_batch(&[serialization_edge_events()[1].clone()])
         .unwrap();
     drop(journal);
     let contents = fs::read_to_string(bare_header).unwrap();
@@ -188,14 +199,15 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
 
     let (mut journal, _) = JournalWriter::open_at(&output, timestamp(0)).unwrap();
     journal
-        .append_batch(&[fixture_events()[0].clone()])
+        .append_batch(&[serialization_edge_events()[0].clone()])
         .unwrap();
     drop(journal);
     let complete = fs::read(&path).unwrap();
 
     let mut staged = JournalWriter::from_writer(Vec::new()).unwrap();
-    let mut partial_event = fixture_events()[4].clone();
-    partial_event.error_message = Some("quoted, trailing value".into());
+    let mut partial_event = serialization_edge_events()[4].clone();
+    partial_event.message = Some("quoted, trailing value".into());
+    partial_event.os_error_code = Some(12345);
     staged.append_batch(&[partial_event]).unwrap();
     let staged = staged.into_inner().unwrap();
     let row_start = staged
@@ -203,7 +215,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .position(|window| window == b"\r\n")
         .unwrap()
         + 2;
-    let partial = &staged[row_start..staged.len() - 8];
+    let partial = &staged[row_start..staged.len() - 3];
     let partial_record = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_reader(partial)
@@ -211,7 +223,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 54);
+    assert_eq!(partial_record.len(), 64);
     OpenOptions::new()
         .append(true)
         .open(&path)
@@ -221,7 +233,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
 
     let (mut recovered, _) = JournalWriter::open_at(&output, timestamp(1)).unwrap();
     recovered
-        .append_batch(&[fixture_events()[1].clone()])
+        .append_batch(&[serialization_edge_events()[1].clone()])
         .unwrap();
     drop(recovered);
 
@@ -265,7 +277,7 @@ fn output_lock_rejects_competing_writers_and_releases_on_drop() {
         } else {
             OutputTarget::File(dir.path().join("locked.csv"))
         };
-        let events = fixture_events();
+        let events = serialization_edge_events();
         let (mut first, path) = JournalWriter::open_at(&output, timestamp(0)).unwrap();
         first.append_batch(&events[..1]).unwrap();
         let before = fs::read(&path).unwrap();
@@ -347,7 +359,9 @@ fn coordinator_flushes_journal_before_console_and_stops_on_failure() {
         },
         TraceConsole(Arc::clone(&trace)),
     );
-    coordinator.publish_batch(&fixture_events()[..2]).unwrap();
+    coordinator
+        .publish_batch(&serialization_edge_events()[..2])
+        .unwrap();
     assert_eq!(*trace.lock().unwrap(), ["journal", "console", "console"]);
 
     trace.lock().unwrap().clear();
@@ -358,7 +372,11 @@ fn coordinator_flushes_journal_before_console_and_stops_on_failure() {
         },
         TraceConsole(Arc::clone(&trace)),
     );
-    assert!(failing.publish_batch(&fixture_events()[..1]).is_err());
+    assert!(
+        failing
+            .publish_batch(&serialization_edge_events()[..1])
+            .is_err()
+    );
     assert_eq!(*trace.lock().unwrap(), ["journal"]);
 }
 
@@ -385,7 +403,7 @@ fn fixed_file_empty_batches_and_date_changes_preserve_exact_bytes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("fixed.csv");
     let target = OutputTarget::File(path.clone());
-    let events = fixture_events();
+    let events = serialization_edge_events();
     for (day, event) in events.iter().enumerate() {
         let (mut journal, opened) =
             JournalWriter::open_at(&target, timestamp(0) + chrono::TimeDelta::days(day as i64))
@@ -408,11 +426,14 @@ fn complete_invalid_utf8_record_fails_without_modifying_the_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invalid.csv");
     let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
-    journal.append_batch(&fixture_events()[..1]).unwrap();
+    journal
+        .append_batch(&serialization_edge_events()[..1])
+        .unwrap();
     let mut bytes = journal.into_inner().unwrap();
+    let id = support::id::<netband::model::EventId>("event-1").to_string();
     let position = bytes
-        .windows(7)
-        .position(|value| value == b"event-1")
+        .windows(id.len())
+        .position(|value| value == id.as_bytes())
         .unwrap();
     bytes[position] = 0xff;
     fs::write(&path, &bytes).unwrap();

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::config::{BandwidthConfig, DirectConfig, MlabConfig, ProviderConfig};
-use crate::model::{ErrorKind, Outcome, ProviderKind, RequestDirection, RequestStage};
+use crate::model::{ErrorKind, Outcome, ProviderKind, RequestDirection, RequestId, RequestStage};
 
 pub const USER_AGENT: &str = concat!("netband/", env!("CARGO_PKG_VERSION"));
 const DOWNLOAD_KEY: &str = "wss:///ndt/v7/download";
@@ -50,7 +50,7 @@ pub struct RequestFailure {
     pub local_ip: Option<IpAddr>,
     pub remote_ip: Option<IpAddr>,
     pub os_error_code: Option<i32>,
-    pub attempt: u32,
+    pub request_id: RequestId,
     pub http_status: Option<u16>,
     pub retry_after: Option<RetryAfter>,
     pub disposition: FailureDisposition,
@@ -62,7 +62,7 @@ impl RequestFailure {
         error_kind: ErrorKind,
         message: impl Into<String>,
         request_url: Option<String>,
-        attempt: u32,
+        request_id: impl Into<RequestId>,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -80,7 +80,7 @@ impl RequestFailure {
             local_ip: None,
             remote_ip: None,
             os_error_code: None,
-            attempt,
+            request_id: request_id.into(),
             http_status: None,
             retry_after: None,
             disposition: FailureDisposition::Terminal,
@@ -99,6 +99,7 @@ pub async fn resolve_endpoints(
     config: &BandwidthConfig,
     interface: Option<&str>,
 ) -> EndpointResolution {
+    let request_id = RequestId::new();
     let started_at = Utc::now();
     let started_monotonic = tokio::time::Instant::now();
     let mut resolution = match &config.provider {
@@ -114,7 +115,7 @@ pub async fn resolve_endpoints(
                 ErrorKind::PermissionDenied,
                 "M-Lab bandwidth requires explicit policy acceptance",
                 Some(mlab.locate_url.to_string()),
-                0,
+                RequestId::new(),
             )),
         },
     };
@@ -123,6 +124,7 @@ pub async fn resolve_endpoints(
         .iter_mut()
         .chain(resolution.terminal.iter_mut())
     {
+        failure.request_id = request_id;
         failure.started_at_utc = started_at;
         failure.elapsed = failure
             .finished_monotonic
@@ -172,7 +174,7 @@ async fn resolve_mlab(
                 ErrorKind::Connect,
                 message,
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -184,7 +186,7 @@ async fn resolve_mlab(
                 ErrorKind::Connect,
                 format!("cannot configure Locate client: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -206,7 +208,7 @@ async fn resolve_mlab(
                 kind,
                 format!("Locate request failed: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -249,7 +251,7 @@ async fn resolve_mlab(
             local_ip: None,
             remote_ip: None,
             os_error_code: None,
-            attempt: 1,
+            request_id: RequestId::new(),
             http_status: Some(status.as_u16()),
             retry_after,
             disposition: FailureDisposition::ProviderWide,
@@ -264,7 +266,7 @@ async fn resolve_mlab(
                 ErrorKind::Protocol,
                 format!("cannot read Locate response: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -284,19 +286,19 @@ pub fn parse_locate_candidates(
                 ErrorKind::Protocol,
                 format!("invalid Locate response: {error}"),
                 Some(locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
+    let request_id = RequestId::new();
     let mut candidates = Vec::new();
     let mut failures = Vec::new();
-    for (index, result) in body.results.into_iter().enumerate() {
-        let attempt = index as u32 + 1;
+    for result in body.results {
         let Some(download) = result.urls.get(DOWNLOAD_KEY) else {
             failures.push(missing_url_failure(
                 &result.machine,
                 DOWNLOAD_KEY,
-                attempt,
+                request_id,
                 locate_url,
             ));
             continue;
@@ -305,7 +307,7 @@ pub fn parse_locate_candidates(
             failures.push(missing_url_failure(
                 &result.machine,
                 UPLOAD_KEY,
-                attempt,
+                request_id,
                 locate_url,
             ));
             continue;
@@ -320,7 +322,7 @@ pub fn parse_locate_candidates(
                 ErrorKind::Protocol,
                 "Locate candidate has invalid or insecure NDT7 URLs",
                 Some(locate_url.to_string()),
-                attempt,
+                request_id,
             );
             failure.server_name = Some(result.machine);
             failures.push(failure);
@@ -343,7 +345,7 @@ pub fn parse_locate_candidates(
             ErrorKind::Protocol,
             "Locate returned no usable secure NDT7 targets",
             Some(locate_url.to_string()),
-            1,
+            request_id,
         )
     });
     EndpointResolution {
@@ -353,13 +355,18 @@ pub fn parse_locate_candidates(
     }
 }
 
-fn missing_url_failure(machine: &str, key: &str, attempt: u32, locate_url: &Url) -> RequestFailure {
+fn missing_url_failure(
+    machine: &str,
+    key: &str,
+    request_id: impl Into<RequestId>,
+    locate_url: &Url,
+) -> RequestFailure {
     let mut failure = RequestFailure::simple(
         RequestStage::Locate,
         ErrorKind::Protocol,
         format!("Locate candidate is missing {key}"),
         Some(locate_url.to_string()),
-        attempt,
+        request_id,
     );
     failure.server_name = Some(machine.to_owned());
     failure.disposition = FailureDisposition::TryNextTarget;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::io::AsyncWrite;
 use tokio::sync::watch;
@@ -17,21 +17,21 @@ use crate::console::{Console, ConsoleStats};
 use crate::health::{DegradationReason, HealthConfig, HealthDecision, HealthWindow};
 use crate::interfaces::{FairInterfaceSelector, InterfaceResolver, SystemInterfaceResolver};
 use crate::journal::{Journal, JournalError, JournalSink, OutputCoordinator};
+use crate::model::{
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind, SchedulerAction,
+};
 use crate::ping::{
     PingRoundError, PingRoundReport, PingRoundRequest, PingTransport, SurgePingTransport,
     measure_round,
 };
 use crate::scheduler::{BandwidthOpportunity, Scheduler, SchedulerError};
-use crate::{
-    model::ErrorKind, model::EventKind, model::LoadPhase, model::MeasurementEvent, model::Outcome,
-};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct PingMonitorConfig {
-    pub run_id: String,
+    pub run_id: RunId,
     pub targets: Vec<IpAddr>,
     pub interval: Duration,
     pub timeout: Duration,
@@ -99,11 +99,7 @@ where
     let started_at = Utc::now();
     let run_number = next_monitor_number();
     let settings = PingMonitorConfig {
-        run_id: format!(
-            "{}-{}-{run_number}",
-            started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-            std::process::id()
-        ),
+        run_id: RunId::new(),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
         timeout: config.ping.timeout,
@@ -182,11 +178,7 @@ where
     let started_at = Utc::now();
     let run_number = next_monitor_number();
     let settings = PingMonitorConfig {
-        run_id: format!(
-            "{}-{}-{run_number}",
-            started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-            std::process::id()
-        ),
+        run_id: RunId::new(),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
         timeout: config.ping.timeout,
@@ -284,6 +276,36 @@ pub async fn monitor_multi_interface<R, F, J, C>(
     resolver: &R,
     factory: &F,
     config: PingMonitorConfig,
+    scheduler: Option<Scheduler>,
+    coordinator: &mut OutputCoordinator<J, C>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<MonitorStats, MonitorError>
+where
+    R: InterfaceResolver,
+    F: PingTransportFactory,
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let session = config.run_id;
+    coordinator.start_session(session, "run")?;
+    let result = monitor_multi_interface_inner(
+        resolved,
+        resolver,
+        factory,
+        config,
+        scheduler,
+        coordinator,
+        shutdown,
+    )
+    .await;
+    finish_monitor(session, result, coordinator)
+}
+
+async fn monitor_multi_interface_inner<R, F, J, C>(
+    resolved: &ResolvedConfig,
+    resolver: &R,
+    factory: &F,
+    config: PingMonitorConfig,
     mut scheduler: Option<Scheduler>,
     coordinator: &mut OutputCoordinator<J, C>,
     mut shutdown: watch::Receiver<bool>,
@@ -307,8 +329,6 @@ where
     let mut active: Option<(usize, JoinHandle<Result<PingRoundReport, PingRoundError>>)> = None;
     let mut next_interface = 0_usize;
     let mut next_round = 0_u64;
-    let mut bandwidth_number = 0_u64;
-    let mut interface_event_number = 0_u64;
 
     loop {
         if *shutdown.borrow() {
@@ -381,7 +401,6 @@ where
                     &mut interfaces,
                     resolver,
                     &fairness,
-                    &mut interface_event_number,
                     &mut stats,
                 );
                 if let Some(interface) = selected {
@@ -394,9 +413,7 @@ where
                     coordinator.publish_batch(&selection_events)?;
                     let mut attempt_config = resolved.clone();
                     attempt_config.interfaces = vec![interface.clone()];
-                    let bandwidth_run_id =
-                        format!("{}:bandwidth:{bandwidth_number}", config.run_id);
-                    bandwidth_number = bandwidth_number.wrapping_add(1);
+                    let bandwidth_run_id = RunId::new();
                     let load_transport = factory.create(&interface, &config.targets);
                     let mut report = measure_bandwidth_while_monitoring(
                         &attempt_config,
@@ -424,6 +441,7 @@ where
                         report.events.extend(events);
                     }
                     coordinator.publish_batch(&report.events)?;
+                    coordinator.finish_run(bandwidth_run_id, report.outcome, None)?;
                     if let Some(message) = reservation_error {
                         return Err(MonitorError::Scheduler(SchedulerError::Admission(message)));
                     }
@@ -467,19 +485,18 @@ where
                         if runtime.mark_available() {
                             let event = interface_event(
                                 &config.run_id,
-                                &mut interface_event_number,
-                                &runtime.name,
+                                            &runtime.name,
                                 Outcome::Success,
                                 None,
                                 None,
-                                "decision=interface_recovered".to_owned(),
+                (SchedulerAction::InterfaceRecovered, "interface recovered".to_owned()),
                             );
                             coordinator.publish_batch(&[event])?;
                         }
                         let transport = factory.create(&runtime.name, &config.targets);
                         active = Some((
                             index,
-                            start_dynamic_round(transport, &config, next_round, None, None),
+                            start_round(transport, &config, coordinator, next_round, None, None)?,
                         ));
                         stats.rounds_started += 1;
                         next_round = next_round.wrapping_add(1);
@@ -489,12 +506,11 @@ where
                         stats.interface_failures += 1;
                         let event = interface_event(
                             &config.run_id,
-                            &mut interface_event_number,
-                            &runtime.name,
+                                    &runtime.name,
                             Outcome::Deferred,
                             Some(ErrorKind::Io),
                             Some(Utc::now() + chrono_duration(delay)),
-                            format!("decision=interface_retry error={error}"),
+                (SchedulerAction::InterfaceRetry, format!("error={error}")),
                         );
                         coordinator.publish_batch(&[event])?;
                     }
@@ -509,6 +525,23 @@ where
 }
 
 pub async fn monitor_ping<T, J, C>(
+    transport: Arc<T>,
+    config: PingMonitorConfig,
+    coordinator: &mut OutputCoordinator<J, C>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<MonitorStats, MonitorError>
+where
+    T: PingTransport,
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let session = config.run_id;
+    coordinator.start_session(session, "run")?;
+    let result = monitor_ping_inner(transport, config, coordinator, shutdown).await;
+    finish_monitor(session, result, coordinator)
+}
+
+async fn monitor_ping_inner<T, J, C>(
     transport: Arc<T>,
     config: PingMonitorConfig,
     coordinator: &mut OutputCoordinator<J, C>,
@@ -527,7 +560,14 @@ where
 
     let mut ticker = tokio::time::interval_at(Instant::now() + config.interval, config.interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut active = Some(start_round(&transport, &config, 0, None, None));
+    let mut active = Some(start_round(
+        Arc::clone(&transport),
+        &config,
+        coordinator,
+        0,
+        None,
+        None,
+    )?);
     stats.rounds_started = 1;
     let mut next_round = 1_u64;
 
@@ -563,7 +603,7 @@ where
                     }
                 }
                 _ = ticker.tick() => {
-                    active = Some(start_round(&transport, &config, next_round, None, None));
+                    active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, None, None)?);
                     stats.rounds_started += 1;
                     next_round = next_round.wrapping_add(1);
                 }
@@ -575,6 +615,33 @@ where
 }
 
 pub async fn monitor_adaptive<T, J, C>(
+    resolved: &ResolvedConfig,
+    transport: Arc<T>,
+    config: PingMonitorConfig,
+    scheduler: Scheduler,
+    coordinator: &mut OutputCoordinator<J, C>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<MonitorStats, MonitorError>
+where
+    T: PingTransport,
+    J: JournalSink,
+    C: crate::console::ConsoleSink,
+{
+    let session = config.run_id;
+    coordinator.start_session(session, "run")?;
+    let result = monitor_adaptive_inner(
+        resolved,
+        transport,
+        config,
+        scheduler,
+        coordinator,
+        shutdown,
+    )
+    .await;
+    finish_monitor(session, result, coordinator)
+}
+
+async fn monitor_adaptive_inner<T, J, C>(
     resolved: &ResolvedConfig,
     transport: Arc<T>,
     config: PingMonitorConfig,
@@ -594,7 +661,6 @@ where
     let mut active: Option<JoinHandle<Result<PingRoundReport, PingRoundError>>> = None;
     let mut next_round = 0_u64;
     let mut latest_round_has_success = false;
-    let mut bandwidth_number = 0_u64;
 
     loop {
         if *shutdown.borrow() {
@@ -637,8 +703,7 @@ where
         let action = scheduler.poll(&config.run_id, Utc::now(), latest_round_has_success)?;
         coordinator.publish_batch(&action.events)?;
         if let Some(opportunity) = action.opportunity {
-            let bandwidth_run_id = format!("{}:bandwidth:{bandwidth_number}", config.run_id);
-            bandwidth_number = bandwidth_number.wrapping_add(1);
+            let bandwidth_run_id = RunId::new();
             let load_transport: Arc<dyn PingTransport> = transport.clone();
             let mut report = measure_bandwidth_while_monitoring(
                 resolved,
@@ -665,6 +730,7 @@ where
                 report.events.extend(events);
             }
             coordinator.publish_batch(&report.events)?;
+            coordinator.finish_run(bandwidth_run_id, report.outcome, None)?;
             if let Some(message) = reservation_error {
                 return Err(MonitorError::Scheduler(SchedulerError::Admission(message)));
             }
@@ -678,7 +744,7 @@ where
                 }
             }
             _ = ticker.tick() => {
-                active = Some(start_round(&transport, &config, next_round, None, None));
+                active = Some(start_round(Arc::clone(&transport), &config, coordinator, next_round, None, None)?);
                 stats.rounds_started += 1;
                 next_round = next_round.wrapping_add(1);
             }
@@ -689,7 +755,7 @@ where
 }
 
 fn complete_interface_round<J, C>(
-    run_id: &str,
+    run_id: &RunId,
     runtime: &mut InterfaceRuntime,
     report: PingRoundReport,
     scheduler: Option<&mut Scheduler>,
@@ -700,7 +766,7 @@ where
     J: JournalSink,
     C: crate::console::ConsoleSink,
 {
-    coordinator.publish_batch(&report.events)?;
+    publish_ping_report(&report, coordinator)?;
     let decision = runtime.health.observe_events(&report.events);
     trace_health(decision);
     runtime.latest_success = report.successful_targets > 0;
@@ -721,12 +787,11 @@ where
 }
 
 fn select_bandwidth_interface<R: InterfaceResolver>(
-    run_id: &str,
+    run_id: &RunId,
     opportunity: &BandwidthOpportunity,
     interfaces: &mut [InterfaceRuntime],
     resolver: &R,
     fairness: &FairInterfaceSelector,
-    event_number: &mut u64,
     stats: &mut MonitorStats,
 ) -> (Option<String>, Vec<MeasurementEvent>) {
     let mut events = Vec::new();
@@ -737,24 +802,28 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
         else {
             events.push(interface_event(
                 run_id,
-                event_number,
                 requested,
                 Outcome::Error,
                 Some(ErrorKind::Io),
                 None,
-                "decision=bandwidth_suppressed reason=trigger_interface_missing".to_owned(),
+                (
+                    SchedulerAction::BandwidthSuppressed,
+                    "reason=trigger_interface_missing".to_owned(),
+                ),
             ));
             return (None, events);
         };
         if !runtime.can_resolve(Instant::now()) {
             events.push(interface_event(
                 run_id,
-                event_number,
                 requested,
                 Outcome::Deferred,
-                Some(ErrorKind::Io),
+                None,
                 runtime.retry_at.map(instant_to_utc),
-                "decision=bandwidth_suppressed reason=trigger_interface_backoff".to_owned(),
+                (
+                    SchedulerAction::BandwidthSuppressed,
+                    "reason=trigger_interface_backoff".to_owned(),
+                ),
             ));
             return (None, events);
         }
@@ -768,13 +837,13 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                 stats.interface_failures += 1;
                 events.push(interface_event(
                     run_id,
-                    event_number,
                     requested,
                     Outcome::Deferred,
                     Some(ErrorKind::Io),
                     Some(Utc::now() + chrono_duration(delay)),
-                    format!(
-                        "decision=bandwidth_suppressed reason=trigger_interface_unavailable error={error}"
+                    (
+                        SchedulerAction::BandwidthSuppressed,
+                        format!("reason=trigger_interface_unavailable error={error}"),
                     ),
                 ));
                 (None, events)
@@ -804,13 +873,13 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
                 stats.interface_failures += 1;
                 events.push(interface_event(
                     run_id,
-                    event_number,
                     &selected,
                     Outcome::Deferred,
                     Some(ErrorKind::Io),
                     Some(Utc::now() + chrono_duration(delay)),
-                    format!(
-                        "decision=bandwidth_interface_skipped reason=unavailable error={error}"
+                    (
+                        SchedulerAction::BandwidthInterfaceSkipped,
+                        format!("reason=unavailable error={error}"),
                     ),
                 ));
                 eligible.remove(&selected);
@@ -819,38 +888,32 @@ fn select_bandwidth_interface<R: InterfaceResolver>(
     }
     events.push(interface_event(
         run_id,
-        event_number,
         "unassigned",
         Outcome::Suppressed,
-        Some(ErrorKind::Io),
         None,
-        "decision=bandwidth_suppressed reason=no_healthy_interface".to_owned(),
+        None,
+        (
+            SchedulerAction::BandwidthSuppressed,
+            "reason=no_healthy_interface".to_owned(),
+        ),
     ));
     (None, events)
 }
 
 fn interface_event(
-    run_id: &str,
-    event_number: &mut u64,
+    run_id: &RunId,
     interface: &str,
     outcome: Outcome,
     error_kind: Option<ErrorKind>,
     retry_at: Option<DateTime<Utc>>,
-    message: String,
+    decision: (SchedulerAction, String),
 ) -> MeasurementEvent {
-    let number = *event_number;
-    *event_number = number.wrapping_add(1);
-    let mut event = MeasurementEvent::new(
-        run_id,
-        format!("{run_id}:interface:{number}"),
-        EventKind::Scheduler,
-        outcome,
-        Utc::now(),
-    );
+    let mut event = MeasurementEvent::new(run_id, EventKind::Scheduler, outcome, Utc::now());
     event.interface = (interface != "unassigned").then(|| interface.to_owned());
     event.error_kind = error_kind;
-    event.rate_limit_until_utc = retry_at;
-    event.error_message = Some(message);
+    event.scheduler_not_before_utc = retry_at;
+    event.scheduler_action = Some(decision.0);
+    event.message = Some(decision.1);
     event
 }
 
@@ -867,7 +930,7 @@ async fn measure_bandwidth_while_monitoring<J, C>(
     resolved: &ResolvedConfig,
     transport: Arc<dyn PingTransport>,
     ping: &PingMonitorConfig,
-    bandwidth_run_id: &str,
+    bandwidth_run_id: &RunId,
     scheduler: &mut Scheduler,
     coordinator: &mut OutputCoordinator<J, C>,
     shutdown: watch::Receiver<bool>,
@@ -879,6 +942,7 @@ where
     J: JournalSink,
     C: crate::console::ConsoleSink,
 {
+    coordinator.start_run(*bandwidth_run_id, ping.run_id, RunKind::Bandwidth)?;
     let (phase_sender, phase_receiver) = watch::channel(LoadPhase::Setup);
     let bandwidth = measure_bandwidth_with_gate_and_phase(
         resolved,
@@ -909,7 +973,7 @@ where
                         skipped_ticks = stats.skipped_ticks,
                         scheduled_at = ?scheduled,
                         load_phase = ?*phase_receiver.borrow(),
-                        load_run_id = bandwidth_run_id,
+                        load_run_id = %bandwidth_run_id,
                         "ping round still active during bandwidth test; skipping interval tick"
                     );
                 }
@@ -920,13 +984,14 @@ where
                 report = &mut bandwidth => return Ok(report),
                 _ = ticker.tick() => {
                     let phase = *phase_receiver.borrow();
-                    active_ping = Some(start_dynamic_round(
+                    active_ping = Some(start_round(
                         Arc::clone(&transport),
                         ping,
+                        coordinator,
                         *next_round,
                         Some(phase),
                         Some(bandwidth_run_id),
-                    ));
+                    )?);
                     stats.rounds_started += 1;
                     *next_round = next_round.wrapping_add(1);
                 }
@@ -951,52 +1016,37 @@ where
             .iter()
             .all(|event| { event.load_phase.is_some() && event.load_run_id.is_some() })
     );
-    coordinator.publish_batch(&report.events)?;
+    publish_ping_report(&report, coordinator)?;
     stats.rounds_completed += 1;
     stats.successful_probes += report.successful_targets as u64;
     stats.failed_probes += report.failed_targets as u64;
     Ok(())
 }
 
-fn start_dynamic_round(
-    transport: Arc<dyn PingTransport>,
+fn start_round<T: PingTransport + ?Sized, J: JournalSink, C: crate::console::ConsoleSink>(
+    transport: Arc<T>,
     config: &PingMonitorConfig,
+    coordinator: &mut OutputCoordinator<J, C>,
     round_number: u64,
     load_phase: Option<LoadPhase>,
-    load_run_id: Option<&str>,
-) -> JoinHandle<Result<PingRoundReport, PingRoundError>> {
+    load_run_id: Option<&RunId>,
+) -> Result<JoinHandle<Result<PingRoundReport, PingRoundError>>, MonitorError> {
+    let child = RunId::new();
     let request = PingRoundRequest {
-        run_id: config.run_id.clone(),
+        run_id: child,
         round_number,
         targets: config.targets.clone(),
         timeout: config.timeout,
         scheduled_at_utc: Utc::now(),
         identifier: config.identifier,
         load_phase,
-        load_run_id: load_run_id.map(str::to_owned),
+        load_run_id: load_run_id.copied(),
     };
-    tokio::spawn(async move { measure_round(transport, request).await })
-}
-
-fn start_round<T: PingTransport>(
-    transport: &Arc<T>,
-    config: &PingMonitorConfig,
-    round_number: u64,
-    load_phase: Option<LoadPhase>,
-    load_run_id: Option<&str>,
-) -> JoinHandle<Result<PingRoundReport, PingRoundError>> {
-    let request = PingRoundRequest {
-        run_id: config.run_id.clone(),
-        round_number,
-        targets: config.targets.clone(),
-        timeout: config.timeout,
-        scheduled_at_utc: Utc::now(),
-        identifier: config.identifier,
-        load_phase,
-        load_run_id: load_run_id.map(str::to_owned),
-    };
-    let transport = Arc::clone(transport);
-    tokio::spawn(async move { measure_round(transport, request).await })
+    crate::ping::validate_round_request(&request)?;
+    coordinator.start_run(child, config.run_id, RunKind::PingRound)?;
+    Ok(tokio::spawn(async move {
+        measure_round(transport, request).await
+    }))
 }
 
 fn complete_round<J, C>(
@@ -1010,7 +1060,7 @@ where
     C: crate::console::ConsoleSink,
 {
     let report = result??;
-    coordinator.publish_batch(&report.events)?;
+    publish_ping_report(&report, coordinator)?;
     let decision = health.observe_events(&report.events);
     trace_health(decision);
     stats.rounds_completed += 1;
@@ -1063,4 +1113,36 @@ async fn cancellation_requested(shutdown: &mut watch::Receiver<bool>) -> bool {
 fn next_monitor_number() -> u64 {
     static MONITOR_NUMBER: AtomicU64 = AtomicU64::new(1);
     MONITOR_NUMBER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn publish_ping_report<J: JournalSink, C: crate::console::ConsoleSink>(
+    report: &PingRoundReport,
+    coordinator: &mut OutputCoordinator<J, C>,
+) -> Result<(), JournalError> {
+    coordinator.publish_batch(&report.events)?;
+    let run = report
+        .events
+        .first()
+        .expect("validated ping round has targets")
+        .run_id;
+    coordinator.finish_run(run, report.outcome(), None)
+}
+
+fn finish_monitor<J: JournalSink, C: crate::console::ConsoleSink>(
+    session: RunId,
+    result: Result<MonitorStats, MonitorError>,
+    coordinator: &mut OutputCoordinator<J, C>,
+) -> Result<MonitorStats, MonitorError> {
+    let finish = coordinator.finish_session(
+        session,
+        if result.is_ok() {
+            Outcome::Cancelled
+        } else {
+            Outcome::Error
+        },
+        result.as_ref().err().map(ToString::to_string).as_deref(),
+    );
+    let stats = result?;
+    finish?;
+    Ok(stats)
 }

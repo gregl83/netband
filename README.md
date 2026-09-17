@@ -145,7 +145,10 @@ build identities, uncertainty, protocol coverage and reproduction commands.
 Start with the [recorded-data analysis](docs/ndt7-validation.md#analyze-recorded-data-offline)
 to inspect the benchmark without sending network traffic. Preserve the executable
 hash, source revision, effective configuration, and measurement environment with
-each study's CSV journals. Review addresses and diagnostics before sharing data;
+each study's CSV journals. The journal records session and measurement-run lifecycles,
+results, request failures, and scheduler decisions. UUIDs and explicit parent references
+link related events; see the [data contract](docs/data-format.md).
+Review addresses and diagnostics before sharing data;
 token redaction does not anonymize a journal.
 
 Netband measures ICMP latency/loss and one TCP/WebSocket stream per NDT7 direction.

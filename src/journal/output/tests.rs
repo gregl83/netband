@@ -27,7 +27,14 @@ fn now() -> DateTime<Utc> {
 }
 
 fn event(id: &str) -> MeasurementEvent {
-    MeasurementEvent::new("run", id, EventKind::PingProbe, Outcome::Success, now())
+    let mut event = MeasurementEvent::new(
+        crate::model::RunId::new(),
+        EventKind::PingProbe,
+        Outcome::Success,
+        now(),
+    );
+    event.ping_target_ip = Some(id.to_owned());
+    event
 }
 
 fn segments(directory: &Path) -> Vec<PathBuf> {
@@ -40,13 +47,24 @@ fn segments(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn ids(path: &Path) -> Vec<String> {
+fn labels(path: &Path) -> Vec<String> {
     let text = fs::read_to_string(path).unwrap();
     assert!(text.starts_with(CSV_HEADER));
     assert_eq!(text.matches(CSV_HEADER).count(), 1);
     csv::Reader::from_reader(text.as_bytes())
         .records()
-        .map(|record| record.unwrap().get(2).unwrap().to_owned())
+        .map(|record| {
+            record
+                .unwrap()
+                .get(
+                    CSV_HEADER
+                        .split(',')
+                        .position(|field| field == "ping_target_ip")
+                        .unwrap(),
+                )
+                .unwrap()
+                .to_owned()
+        })
         .collect()
 }
 
@@ -76,15 +94,15 @@ fn utc_rotation_uses_write_time_and_handles_idle_and_backward_clocks() {
         .append_batch_at(&[event("idle")], next_day + TimeDelta::days(9))
         .unwrap();
     assert_eq!(segments(dir.path()).len(), 3);
-    assert_eq!(ids(&first), ["before"]);
-    assert_eq!(ids(&second), ["after", "backward", "same-day"]);
-    assert_eq!(ids(output.path()), ["idle"]);
+    assert_eq!(labels(&first), ["before"]);
+    assert_eq!(labels(&second), ["after", "backward", "same-day"]);
+    assert_eq!(labels(output.path()), ["idle"]);
 }
 
 #[test]
 fn size_limits_count_encoded_bytes_and_keep_batches_intact() {
     let mut special = event("a");
-    special.error_message = Some("Unicode é, quoted \"value\"\nand newline".into());
+    special.message = Some("Unicode é, quoted \"value\"\nand newline".into());
     let batch = [special.clone(), event("b")];
     let mut expected = JournalWriter::from_writer(Vec::new()).unwrap();
     expected.append_batch(&batch).unwrap();
@@ -109,8 +127,8 @@ fn size_limits_count_encoded_bytes_and_keep_batches_intact() {
         output.append_batch_at(&[event("c")], now()).unwrap();
         assert_ne!(output.path(), first);
         assert_eq!(segments(dir.path()).len(), 2);
-        assert_eq!(ids(&first), ["a", "b"]);
-        assert_eq!(ids(output.path()), ["c"]);
+        assert_eq!(labels(&first), ["a", "b"]);
+        assert_eq!(labels(output.path()), ["c"]);
     }
 }
 
@@ -136,7 +154,7 @@ fn exact_size_boundary_fits_and_combined_triggers_create_one_segment() {
         .append_batch_at(&[event("c")], now() + TimeDelta::seconds(1))
         .unwrap();
     assert_eq!(segments(dir.path()).len(), 2);
-    assert_eq!(ids(&first), ["a", "b"]);
+    assert_eq!(labels(&first), ["a", "b"]);
 }
 
 #[test]
@@ -218,7 +236,7 @@ fn restart_recovers_only_recorded_segment_and_collision_never_overwrites() {
     assert_ne!(restarted.path(), first);
     assert_eq!(fs::read(&first).unwrap(), before);
     restarted.append_batch_at(&[event("b")], now()).unwrap();
-    assert_eq!(ids(restarted.path()), ["b"]);
+    assert_eq!(labels(restarted.path()), ["b"]);
     assert_eq!(fs::read(unrelated).unwrap(), b"unrelated invalid CSV");
 }
 
@@ -313,7 +331,7 @@ fn transition_faults_preserve_acknowledged_rows_and_poison_the_writer() {
             .unwrap();
         let all: Vec<_> = segments(dir.path())
             .iter()
-            .flat_map(|path| ids(path))
+            .flat_map(|path| labels(path))
             .collect();
         assert_eq!(
             all.iter().filter(|id| *id == "acknowledged").count(),
@@ -400,7 +418,9 @@ fn rotation_and_restart_preserve_scheduler_admission_evidence() {
     let mut restarted = Scheduler::open(&config.state_file, &config.bandwidth, now()).unwrap();
     assert_eq!(restarted.snapshot().runs, snapshot.runs);
     assert!(matches!(
-        restarted.preflight_manual("next", now()).unwrap(),
+        restarted
+            .preflight_manual(&crate::model::RunId::new(), now())
+            .unwrap(),
         ManualDecision::Blocked(_)
     ));
 }
@@ -426,13 +446,13 @@ fn initialization_faults_leave_only_parseable_csvs_and_can_restart() {
             "{failure:?}"
         );
         for path in segments(dir.path()) {
-            assert!(ids(&path).is_empty());
+            assert!(labels(&path).is_empty());
         }
         let mut output = Journal::open_at(&target, None, now()).unwrap();
         output
             .append_batch_at(&[event("recovered")], now())
             .unwrap();
-        assert_eq!(ids(output.path()), ["recovered"]);
+        assert_eq!(labels(output.path()), ["recovered"]);
     }
 }
 
@@ -444,7 +464,7 @@ fn incomplete_staged_header_never_becomes_an_archive() {
     let output =
         Journal::open_at(&OutputTarget::Directory(dir.path().to_owned()), None, now()).unwrap();
     assert_eq!(segments(dir.path()).len(), 1);
-    assert!(ids(output.path()).is_empty());
+    assert!(labels(output.path()).is_empty());
     assert!(!dir.path().join(PENDING).exists());
     assert!(!dir.path().join(MARKER_TEMP).exists());
 }
@@ -469,7 +489,7 @@ fn marker_staging_preserves_a_locked_explicit_journal() {
     );
     assert!(!dir.path().join(ACTIVE).exists());
     fixed.append_batch(&[event("after-rejection")]).unwrap();
-    assert_eq!(ids(&path), ["acknowledged", "after-rejection"]);
+    assert_eq!(labels(&path), ["acknowledged", "after-rejection"]);
 }
 
 #[test]
@@ -500,5 +520,5 @@ fn marker_collision_during_rotation_preserves_both_journals() {
     assert!(journal.flush().is_err());
     assert!(journal.append_batch_at(&[event("retry")], now()).is_err());
     fixed.append_batch(&[event("after-rejection")]).unwrap();
-    assert_eq!(ids(&temporary), ["explicit", "after-rejection"]);
+    assert_eq!(labels(&temporary), ["explicit", "after-rejection"]);
 }

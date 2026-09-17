@@ -1,39 +1,39 @@
 # JSONL output examples
 
-[console.jsonl](console.jsonl) contains 14 synthetic records illustrating all four
-current event kinds. These are independent example scenarios, not captured network
-measurements or one continuous session. Names, addresses, identifiers, and values are
-illustrative. Every record includes all schema fields; unavailable values are null.
+[console.jsonl](console.jsonl) is a synthetic session showing all six event kinds.
+It includes successful, timed-out and unsent pings; a loaded ping overlapping a
+bandwidth attempt; successful and partial bandwidth results; upload cancellation;
+Locate rate limiting; and scheduler deferral and suppression. These are illustrative
+records, not captured network measurements. Every record includes all 64 fields.
 
-| Lines | Scenario |
-| --- | --- |
-| 1–3 | Successful ping, timed-out ping, and an unsent permission-denied ping |
-| 4–6 | Scheduled bandwidth start, a ping during download, and a successful two-direction test with TCP metrics |
-| 7–8 | Upload connection failure and its partial bandwidth result retaining download measurements |
-| 9–10 | Cancellation during upload and its bandwidth result retaining download measurements |
-| 11–13 | Locate HTTP 429 with Retry-After, a bandwidth result with no measurements, and the resulting scheduler deferral |
-| 14 | Scheduler suppression after the daily start limit |
+The matching [CSV session fixture](../../tests/fixtures/v1-events.csv) contains the
+same 32 records in the same order. Tests keep both representations aligned and
+verify lifecycle ordering and parent relationships. The separate
+[serialization fixture](../../tests/fixtures/serialization-edge-events.csv) covers
+CSV escaping and diagnostic redaction; it is not a complete session.
 
-The populated `connection_details.wifi` object on line 5 illustrates what a future
-collector could supply. **Current collectors leave connection details unavailable.**
-The object demonstrates the extension contract; it does not claim Wi-Fi collection is
-implemented. Other fields illustrate current output behavior.
+Follow `event_sequence` for emission order. The root session start records command,
+version and PID. Child starts precede their results, and every child record points
+back to that session through `parent_run_id`. Ping-round grouping uses `run_id`;
+`load_run_id` separately identifies concurrent bandwidth work. Request IDs join
+retained directional measurements to any diagnostics from the same request.
 
-For field definitions, availability rules, units, and record relationships, use the
-[data-format reference](../data-format.md). The scenarios illustrate these together:
+Lifecycle records carry no measurement values. Normal scheduler explanations use
+`message` and `scheduler_action`, leaving `error_kind` and `os_error_code` empty. Run finishes retain the
+operation outcome; the root session ends with orderly cancellation.
 
-| Example | Interpretation |
-| --- | --- |
-| Ping records (1–3) | One record per attempt; an unsent probe has no loss percentage |
-| Loaded ping (5) | `load_run_id` links to the bandwidth attempt; `load_phase` identifies download activity |
-| Successful bandwidth (6) | `elapsed_ms` is 20,200 ms; the two active transfer windows total 20,000 ms; upload retransmitted bytes demonstrates measured zero |
-| Upload failure (7–8) | `request_direction=upload` and `request_stage=connect` identify the failure; `request_url` names its endpoint and `server_name` the logical server; `run_id` joins the result |
-| Interrupted bandwidth (9–10) | Download measurements remain available; missing upload measurements are unavailable, not zero |
-| Locate failure (11–13) | Shared discovery has no request direction; the attempt has 100 ms elapsed time despite producing no transfer measurements |
-| Scheduler records (4, 13–14) | Decision explanations use `error_message`; measurement fields, including `elapsed_ms`, are null |
+The populated `connection_details.wifi` object illustrates what a future collector
+could supply. **Current collectors leave connection details unavailable.**
 
-For easier inspection without changing the JSONL file:
+For definitions, availability, units and relationships, see the
+[data-format reference](../data-format.md). For easier inspection:
 
 ```sh
 jq . docs/examples/console.jsonl
 ```
+
+Columns follow the same family order as the data contract. `message` contains either
+a normal explanation or a failure diagnostic; structured outcomes and error kinds
+determine its context. Ping loss is derived from `ping_packets_sent` and
+`ping_packets_received`. Request retry deadlines and scheduler eligibility deadlines
+occupy separate columns even when their timestamps happen to match.

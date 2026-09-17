@@ -51,20 +51,20 @@ with pathlib.Path(sys.argv[2]).open(newline="", encoding="utf-8") as stream:
     rows = list(csv.DictReader(stream))
 assert rows
 kinds = {row["event_kind"] for row in rows}
-assert {"ping_probe", "bandwidth", "request_failure", "scheduler"} <= kinds
-assert len(rows[0]) == 54
+assert {"run_started", "run_finished", "ping_probe", "bandwidth", "request_failure", "scheduler"} == kinds
+assert len(rows[0]) == 64
 for row in rows:
     assert row["schema_version"] == "1"
     if row["connection_details"]:
         assert isinstance(json.loads(row["connection_details"]), dict)
     if row["event_kind"] != "bandwidth":
         continue
-    assert row["local_ip"] == row["remote_ip"] == ""
+    assert row["ping_local_ip"] == row["request_local_ip"] == row["request_remote_ip"] == ""
     for direction, byte_field in [("download", "download_bytes"), ("upload", "upload_bytes")]:
         rate = row[f"{direction}_mbps"]
         if not rate:
             continue
-        duration = float(row[f"{direction}_duration_ms"])
+        duration = float(row[f"{direction}_measurement_duration_ms"])
         expected = 8 * int(row[byte_field]) / (1000 * duration)
         assert math.isclose(float(rate), expected, rel_tol=1e-12)
 PY

@@ -1,3 +1,4 @@
+mod support;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -36,8 +37,7 @@ fn service_stdout_does_not_change_inherited_descriptor_flags() {
 
 fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
     MeasurementEvent::new(
-        "run-1",
-        "event-1",
+        support::id::<netband::model::RunId>("run-1"),
         kind,
         outcome,
         Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 2)
@@ -50,11 +50,10 @@ fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
 fn human_output_is_concise_and_omits_internal_events() {
     let mut ping = event(EventKind::PingProbe, Outcome::Timeout);
     ping.interface = Some("eth0".into());
-    ping.target = Some("1.1.1.1".into());
-    ping.packets_sent = Some(1);
-    ping.packets_received = Some(0);
-    ping.packet_loss_pct = Some(100.0);
-    ping.error_message = Some("request timed out".into());
+    ping.ping_target_ip = Some("1.1.1.1".into());
+    ping.ping_packets_sent = Some(1);
+    ping.ping_packets_received = Some(0);
+    ping.message = Some("request timed out".into());
     let line = human_line(&ping).unwrap();
     assert_eq!(
         line,
@@ -63,16 +62,19 @@ fn human_output_is_concise_and_omits_internal_events() {
     assert!(!line.contains("\u{1b}["));
 
     ping.load_phase = Some(LoadPhase::Download);
-    ping.load_run_id = Some("run-1:bandwidth:0".into());
+    ping.load_run_id = Some(support::id("run-1:bandwidth:0"));
     let line = human_line(&ping).unwrap();
-    assert!(line.contains("load_phase=download load_run_id=run-1:bandwidth:0"));
+    assert!(line.contains(&format!(
+        "load_phase=download load_run_id={}",
+        ping.load_run_id.unwrap()
+    )));
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial);
     bandwidth.provider_kind = Some(ProviderKind::Direct);
     bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_mbps = Some(100.25);
     bandwidth.upload_mbps = None;
-    bandwidth.error_message = Some("upload failed".into());
+    bandwidth.message = Some("upload failed".into());
     let line = human_line(&bandwidth).unwrap();
     assert!(line.contains("provider=direct"));
     assert!(line.contains("server_name=ndt.example.net"));
@@ -86,13 +88,14 @@ fn human_output_is_concise_and_omits_internal_events() {
 #[test]
 fn human_numbers_are_readable_without_rounding_machine_output() {
     let mut ping = event(EventKind::PingProbe, Outcome::Success);
-    ping.rtt_ms = Some(0.011236999999999999);
-    ping.packet_loss_pct = Some(0.0);
+    ping.ping_rtt_ms = Some(0.011236999999999999);
+    ping.ping_packets_sent = Some(1);
+    ping.ping_packets_received = Some(1);
     let line = human_line(&ping).unwrap();
     assert!(line.contains("rtt_ms=0.011 loss_pct=0"));
     assert!(render_jsonl(&ping).unwrap().contains(&format!(
-        "\"rtt_ms\":{}",
-        serde_json::to_string(&ping.rtt_ms.unwrap()).unwrap()
+        "\"ping_rtt_ms\":{}",
+        serde_json::to_string(&ping.ping_rtt_ms.unwrap()).unwrap()
     )));
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
@@ -111,11 +114,11 @@ fn jsonl_is_versioned_flat_and_sanitized() {
     request.provider_kind = Some(ProviderKind::Mlab);
     request.request_url = Some("https://locate.example/nearest?access_token=secret".into());
     request.request_stage = Some(RequestStage::Locate);
-    request.http_status = Some(429);
-    request.retry_after_ms = Some(60_000);
+    request.request_http_status = Some(429);
+    request.request_retry_after_ms = Some(60_000);
     request.trigger_reason = Some(TriggerReason::PingLoss);
     request.error_kind = Some(ErrorKind::HttpStatus);
-    request.error_message = Some("rate limited".into());
+    request.message = Some("rate limited".into());
 
     let line = render_jsonl(&request).unwrap();
     assert!(line.ends_with('\n'));
@@ -126,7 +129,7 @@ fn jsonl_is_versioned_flat_and_sanitized() {
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["event_kind"], "request_failure");
     assert_eq!(value["request_stage"], "locate");
-    assert_eq!(value["rtt_ms"], serde_json::Value::Null);
+    assert_eq!(value["ping_rtt_ms"], serde_json::Value::Null);
     assert_eq!(value["load_phase"], serde_json::Value::Null);
     assert_eq!(value["load_run_id"], serde_json::Value::Null);
     assert_eq!(
@@ -140,7 +143,7 @@ fn diagnostic_text_and_endpoint_credentials_are_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::Error);
     request.server_name = Some("logical.example.test".into());
     request.request_url = Some("https://user:password@192.0.2.10/path?token=server-secret".into());
-    request.error_message = Some("access_token=first api_key=second token=third key=fourth".into());
+    request.message = Some("access_token=first api_key=second token=third key=fourth".into());
 
     let line = render_jsonl(&request).unwrap();
     let json: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -255,7 +258,7 @@ async fn blocked_console_drops_do_not_remove_durable_csv_rows() {
     let mut coordinator = OutputCoordinator::new(journal, console);
     for index in 0..10 {
         let mut measurement = event(EventKind::PingProbe, Outcome::Success);
-        measurement.event_id = format!("event-{index}");
+        measurement.event_id = support::id(&format!("event-{index}"));
         coordinator.publish_batch(&[measurement]).unwrap();
     }
 
@@ -335,7 +338,7 @@ async fn broken_stdout_disables_console_once_without_payload_diagnostics() {
         captured.lock().unwrap().push(diagnostic);
     });
     let mut sensitive = event(EventKind::PingProbe, Outcome::Error);
-    sensitive.target = Some("access-token-must-not-appear".into());
+    sensitive.ping_target_ip = Some("access-token-must-not-appear".into());
     console.offer(&sensitive);
     tokio::task::yield_now().await;
     console.offer(&sensitive);

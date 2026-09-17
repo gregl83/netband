@@ -1,3 +1,4 @@
+mod support;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
@@ -212,7 +213,7 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
     let journal = RecordingJournal::default();
     let mut coordinator = OutputCoordinator::new(journal.clone(), ConsoleOff);
     let settings = PingMonitorConfig {
-        run_id: "multi-run".into(),
+        run_id: support::id("multi-run"),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
         timeout: Duration::from_secs(30),
@@ -255,7 +256,7 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
         event.event_kind == EventKind::Scheduler
             && event.interface.as_deref() == Some("eth-b")
             && event.outcome == Outcome::Deferred
-            && event.local_ip.is_none()
+            && event.ping_local_ip.is_none()
     }));
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::Scheduler
@@ -272,7 +273,7 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
             "eth-c" => "192.0.2.30",
             other => panic!("unexpected interface {other}"),
         };
-        assert_eq!(event.local_ip, Some(expected.parse().unwrap()));
+        assert_eq!(event.ping_local_ip, Some(expected.parse().unwrap()));
     }
 }
 
@@ -471,7 +472,7 @@ mod loaded_tests {
         let scheduler =
             Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
         let settings = PingMonitorConfig {
-            run_id: "multi-loaded-run".into(),
+            run_id: support::id("multi-loaded-run"),
             targets: config.ping.targets.clone(),
             interval: config.ping.interval,
             timeout: Duration::from_secs(1),
@@ -512,7 +513,7 @@ mod loaded_tests {
         assert!(!loaded.is_empty());
         assert!(loaded.iter().all(|event| {
             event.interface.as_deref() == Some("lo")
-                && event.local_ip == Some("127.0.0.1".parse().unwrap())
+                && event.ping_local_ip == Some("127.0.0.1".parse().unwrap())
         }));
         assert!(
             loaded

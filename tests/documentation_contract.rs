@@ -1,3 +1,4 @@
+mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -258,7 +259,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 54);
+    assert_eq!(CSV_HEADER.split(',').count(), 64);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -276,9 +277,16 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         kinds,
-        ["ping_probe", "bandwidth", "request_failure", "scheduler"]
-            .into_iter()
-            .collect()
+        [
+            "run_started",
+            "run_finished",
+            "ping_probe",
+            "bandwidth",
+            "request_failure",
+            "scheduler"
+        ]
+        .into_iter()
+        .collect()
     );
     let ids = example_rows
         .iter()
@@ -290,6 +298,43 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), example_rows.len());
+    let mut active = std::collections::BTreeMap::new();
+    for (index, row) in example_rows.iter().enumerate() {
+        assert_eq!(row["event_sequence"], index + 1);
+        let run = row["run_id"].as_str().unwrap();
+        let parent = row["parent_run_id"].as_str();
+        if let Some(parent) = parent {
+            assert!(active.contains_key(parent));
+        }
+        if row["event_kind"] == "run_started" {
+            assert!(active.insert(run, parent).is_none());
+        }
+        assert_eq!(active.get(run), Some(&parent));
+        for field in [
+            "run_id",
+            "event_id",
+            "parent_run_id",
+            "load_run_id",
+            "request_id",
+            "download_request_id",
+            "upload_request_id",
+        ] {
+            if let Some(value) = row[field].as_str() {
+                assert_eq!(uuid::Uuid::parse_str(value).unwrap().get_version_num(), 4);
+            }
+        }
+        if row["event_kind"] == "run_finished" {
+            assert!(!active.values().any(|parent| *parent == Some(run)));
+            active.remove(run);
+        }
+        if row["event_kind"] == "scheduler" {
+            assert!(row["scheduler_action"].is_string());
+            assert!(row["error_kind"].is_null());
+            assert!(row["message"].is_string());
+        }
+    }
+    assert!(active.is_empty());
+
     assert!(
         example_rows
             .iter()
@@ -312,14 +357,21 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         );
     }
     for row in &example_rows {
-        if row["event_kind"] == "scheduler" {
+        if matches!(
+            row["event_kind"].as_str(),
+            Some("scheduler" | "run_started")
+        ) {
             assert!(row["elapsed_ms"].is_null());
         } else {
             let elapsed = row["elapsed_ms"].as_f64().unwrap();
             assert!(elapsed.is_finite() && elapsed >= 0.0);
             if row["event_kind"] == "bandwidth" {
-                let active = row["download_duration_ms"].as_f64().unwrap_or(0.0)
-                    + row["upload_duration_ms"].as_f64().unwrap_or(0.0);
+                let active = row["download_measurement_duration_ms"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    + row["upload_measurement_duration_ms"]
+                        .as_f64()
+                        .unwrap_or(0.0);
                 assert!(elapsed >= active);
             }
         }
@@ -349,15 +401,24 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 54);
+        assert_eq!(row.as_object().unwrap().len(), 64);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");
         }
         for (direction, bytes) in [("download", "download_bytes"), ("upload", "upload_bytes")] {
+            let request_id = &row[format!("{direction}_request_id")];
+            assert_eq!(request_id.is_null(), row[bytes].is_null());
+            if !request_id.is_null() {
+                assert!(!request_id.as_str().unwrap().is_empty());
+            }
+
             if let Some(rate) = row[format!("{direction}_mbps")].as_f64() {
                 let expected = 8.0 * row[bytes].as_f64().unwrap()
-                    / (1000.0 * row[format!("{direction}_duration_ms")].as_f64().unwrap());
+                    / (1000.0
+                        * row[format!("{direction}_measurement_duration_ms")]
+                            .as_f64()
+                            .unwrap());
                 assert!((rate - expected).abs() <= rate.abs() * 1e-12);
             }
         }
@@ -398,7 +459,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     let trigger_at = Utc.with_ymd_and_hms(2026, 8, 30, 1, 0, 0).unwrap();
     scheduler
         .observe_health(
-            "docs",
+            &support::id("docs"),
             trigger_at,
             HealthDecision::Degraded {
                 snapshot: HealthSnapshot {
@@ -413,15 +474,14 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         )
         .unwrap();
     let opportunity = scheduler
-        .poll("docs", trigger_at, true)
+        .poll(&support::id("docs"), trigger_at, true)
         .unwrap()
         .opportunity
         .unwrap();
     assert_eq!(opportunity.reason, TriggerReason::PingLoss);
     scheduler.reserve_run(trigger_at).unwrap();
     let mut success = MeasurementEvent::new(
-        "docs",
-        "bandwidth:success",
+        support::id::<netband::model::RunId>("docs"),
         EventKind::Bandwidth,
         Outcome::Success,
         trigger_at,
@@ -434,7 +494,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         reservation_error: None,
     };
     scheduler
-        .finish_attempt("docs", trigger_at, opportunity, &mut report)
+        .finish_attempt(&support::id("docs"), trigger_at, opportunity, &mut report)
         .unwrap();
     assert_eq!(scheduler.snapshot().runs.len(), 1);
     assert_eq!(scheduler.snapshot().slots.len(), 3);
@@ -446,7 +506,10 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     }
     assert!(matches!(
         scheduler
-            .preflight_manual("docs", Utc.with_ymd_and_hms(2026, 8, 30, 5, 0, 0).unwrap())
+            .preflight_manual(
+                &support::id("docs"),
+                Utc.with_ymd_and_hms(2026, 8, 30, 5, 0, 0).unwrap()
+            )
             .unwrap(),
         ManualDecision::Blocked(_)
     ));
@@ -455,16 +518,15 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     let cooldown_state = work.path().join("cooldown.json");
     let mut scheduler = Scheduler::open_seeded(cooldown_state, &config.bandwidth, now, 7).unwrap();
     let mut failure = MeasurementEvent::new(
-        "docs",
-        "request:rate-limit",
+        support::id::<netband::model::RunId>("docs"),
         EventKind::RequestFailure,
         Outcome::RateLimited,
         trigger_at,
     );
     failure.request_stage = Some(RequestStage::Locate);
-    failure.http_status = Some(429);
-    failure.retry_after_ms = Some(120_000);
-    failure.rate_limit_until_utc = Some(trigger_at + chrono::TimeDelta::seconds(120));
+    failure.request_http_status = Some(429);
+    failure.request_retry_after_ms = Some(120_000);
+    failure.request_retry_at_utc = Some(trigger_at + chrono::TimeDelta::seconds(120));
     let mut report = BandwidthReport {
         events: vec![failure],
         outcome: Outcome::RateLimited,
@@ -473,7 +535,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     };
     scheduler
         .finish_attempt(
-            "docs",
+            &support::id("docs"),
             trigger_at,
             netband::scheduler::BandwidthOpportunity {
                 reason: TriggerReason::Scheduled,
@@ -487,4 +549,35 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         scheduler.snapshot().cooldown_until_utc,
         Some(Utc.with_ymd_and_hms(2026, 8, 30, 1, 2, 0).unwrap())
     );
+}
+
+#[test]
+fn csv_fixture_matches_the_complete_example_session() {
+    let examples = include_str!("../docs/examples/console.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let mut reader = csv::Reader::from_reader(include_bytes!("fixtures/v1-events.csv").as_slice());
+    let headers = reader.headers().unwrap().clone();
+    assert_eq!(headers.iter().collect::<Vec<_>>().join(","), CSV_HEADER);
+    let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(rows.len(), examples.len());
+    for (row, example) in rows.iter().zip(&examples) {
+        for (field, cell) in headers.iter().zip(row) {
+            let expected = &example[field];
+            let actual = match expected {
+                serde_json::Value::Null => {
+                    assert!(cell.is_empty(), "{field} must be unavailable");
+                    serde_json::Value::Null
+                }
+                serde_json::Value::String(_) => serde_json::Value::String(cell.into()),
+                _ => serde_json::from_str(cell).unwrap(),
+            };
+            assert_eq!(
+                &actual, expected,
+                "event {} field {field}",
+                example["event_sequence"]
+            );
+        }
+    }
 }

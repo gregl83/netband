@@ -46,7 +46,7 @@ fn ordinary_ping_state_flushes_do_not_append_accounting_records() {
     let ledger = path(&root).with_extension("accounting.jsonl");
     let before = fs::read(&ledger).unwrap();
     scheduler
-        .preflight_manual("test", now() + TimeDelta::minutes(1))
+        .preflight_manual(&crate::model::RunId::new(), now() + TimeDelta::minutes(1))
         .unwrap();
     scheduler.flush().unwrap();
     assert_eq!(fs::read(&ledger).unwrap(), before);
@@ -91,7 +91,9 @@ fn failed_cooldown_commit_replays_complete_evidence_or_refuses_recovery() {
                 let mut recovered = open(&root).unwrap();
                 assert_eq!(recovered.snapshot().cooldown_until_utc, Some(deadline));
                 assert!(matches!(
-                    recovered.preflight_manual("test", now()).unwrap(),
+                    recovered
+                        .preflight_manual(&crate::model::RunId::new(), now())
+                        .unwrap(),
                     ManualDecision::Blocked(_)
                 ));
             }

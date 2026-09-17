@@ -1,3 +1,4 @@
+mod support;
 use netband::health::{
     DegradationReason, HealthConfig, HealthDecision, HealthSample, HealthWindow,
 };
@@ -128,4 +129,47 @@ fn total_outage_degrades_and_recovery_requires_consecutive_rounds() {
         window.observe_round(vec![ok(5.0), ok(6.0)]),
         HealthDecision::Healthy(_)
     ));
+}
+
+#[test]
+fn journal_context_does_not_change_ping_health_or_recovery() {
+    use netband::model::{EventKind, MeasurementEvent, Outcome};
+    let mut plain = HealthWindow::new(config());
+    let mut mixed = HealthWindow::new(config());
+    for outcome in [
+        Outcome::Timeout,
+        Outcome::Success,
+        Outcome::Success,
+        Outcome::Success,
+    ] {
+        let mut probe = MeasurementEvent::new(
+            support::id::<netband::model::RunId>("run"),
+            EventKind::PingProbe,
+            outcome,
+            chrono::Utc::now(),
+        );
+        probe.ping_rtt_ms = Some(12.0);
+        let mut events = vec![probe.clone()];
+        for kind in [
+            EventKind::RunStarted,
+            EventKind::RunFinished,
+            EventKind::Bandwidth,
+            EventKind::RequestFailure,
+            EventKind::Scheduler,
+        ] {
+            let mut context = MeasurementEvent::new(
+                support::id::<netband::model::RunId>("run"),
+                kind,
+                Outcome::Error,
+                chrono::Utc::now(),
+            );
+            context.ping_rtt_ms = Some(9999.0);
+            events.push(context);
+        }
+        assert_eq!(
+            plain.observe_events(&[probe]),
+            mixed.observe_events(&events)
+        );
+        assert_eq!(plain.rounds_retained(), mixed.rounds_retained());
+    }
 }

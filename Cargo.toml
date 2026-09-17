@@ -38,6 +38,7 @@ toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 url = "2.5.8"
+uuid = { version = "1.26.1", features = ["v4", "serde"] }
 webpki-roots = "1.0.9"
 
 [dev-dependencies]

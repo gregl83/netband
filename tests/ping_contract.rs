@@ -1,3 +1,4 @@
+mod support;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::IpAddr;
@@ -95,7 +96,7 @@ fn behavior(delay_ms: u64, result: ProbeAttemptResult) -> Behavior {
 
 fn round(targets: Vec<IpAddr>) -> PingRoundRequest {
     PingRoundRequest {
-        run_id: "run-test".into(),
+        run_id: support::id("run-test"),
         round_number: 0,
         targets,
         timeout: Duration::from_secs(2),
@@ -130,16 +131,15 @@ async fn targets_overlap_but_events_remain_in_configuration_order() {
     for (index, probe) in report.events.iter().enumerate() {
         assert_eq!(probe.event_kind, EventKind::PingProbe);
         assert_eq!(
-            probe.target.as_deref(),
+            probe.ping_target_ip.as_deref(),
             Some(targets[index].to_string()).as_deref()
         );
-        assert_eq!(probe.sequence, Some(index as u16));
+        assert_eq!(probe.ping_sequence, Some(index as u16));
         assert_eq!(probe.outcome, Outcome::Success);
-        assert_eq!(probe.local_ip, Some(ip("192.0.2.10")));
+        assert_eq!(probe.ping_local_ip, Some(ip("192.0.2.10")));
         assert_eq!(probe.interface.as_deref(), Some("eth-test"));
-        assert_eq!(probe.packets_sent, Some(1));
-        assert_eq!(probe.packets_received, Some(1));
-        assert_eq!(probe.packet_loss_pct, Some(0.0));
+        assert_eq!(probe.ping_packets_sent, Some(1));
+        assert_eq!(probe.ping_packets_received, Some(1));
     }
 }
 
@@ -152,14 +152,14 @@ async fn a_round_snapshots_load_context_for_probe_rows() {
     )]));
     let mut request = round(vec![target]);
     request.load_phase = Some(LoadPhase::Download);
-    request.load_run_id = Some("run-test:bandwidth:0".into());
+    request.load_run_id = Some(support::id("run-test:bandwidth:0"));
 
     let report = measure_round(transport, request).await.unwrap();
 
     assert_eq!(report.events.len(), 1);
     assert!(report.events.iter().all(|event| {
         event.load_phase == Some(LoadPhase::Download)
-            && event.load_run_id.as_deref() == Some("run-test:bandwidth:0")
+            && event.load_run_id == Some(support::id("run-test:bandwidth:0"))
     }));
 }
 
@@ -211,13 +211,13 @@ async fn timeout_unreachable_permission_and_cancelled_are_detailed() {
     assert_eq!(probes[0].outcome, Outcome::Timeout);
     assert_eq!(probes[0].error_kind, Some(ErrorKind::IcmpTimeout));
     assert_eq!(probes[1].outcome, Outcome::Unreachable);
-    assert_eq!(probes[1].icmp_type, Some(3));
-    assert_eq!(probes[1].icmp_code, Some(1));
+    assert_eq!(probes[1].ping_icmp_type, Some(3));
+    assert_eq!(probes[1].ping_icmp_code, Some(1));
     assert_eq!(probes[2].outcome, Outcome::PermissionDenied);
     assert_eq!(probes[2].os_error_code, Some(13));
     assert!(
         probes[2]
-            .error_message
+            .message
             .as_deref()
             .unwrap()
             .contains("ping_group_range")
@@ -225,9 +225,8 @@ async fn timeout_unreachable_permission_and_cancelled_are_detailed() {
     assert_eq!(probes[3].outcome, Outcome::Cancelled);
     assert_eq!(report.events.len(), 4);
     for (index, probe) in probes.iter().enumerate() {
-        assert_eq!(probe.packets_sent, Some(u32::from(index != 2)));
-        assert_eq!(probe.packets_received, Some(0));
-        assert_eq!(probe.packet_loss_pct, (index != 2).then_some(100.0));
+        assert_eq!(probe.ping_packets_sent, Some(u32::from(index != 2)));
+        assert_eq!(probe.ping_packets_received, Some(0));
     }
     assert!(probes.iter().all(|event| event.elapsed_ms.is_some()));
     assert!(probes.iter().all(|event| event.started_at_utc.is_some()));
@@ -272,8 +271,8 @@ async fn an_icmp_error_reply_is_recorded_as_unreachable() {
     let probe = &report.events[0];
     assert_eq!(probe.outcome, Outcome::Unreachable);
     assert_eq!(probe.error_kind, Some(ErrorKind::IcmpUnreachable));
-    assert_eq!(probe.icmp_type, Some(3));
-    assert_eq!(probe.icmp_code, Some(1));
+    assert_eq!(probe.ping_icmp_type, Some(3));
+    assert_eq!(probe.ping_icmp_code, Some(1));
 }
 
 fn context(root: PathBuf) -> ResolveContext {
@@ -343,20 +342,20 @@ async fn one_shot_cli_pipeline_records_all_rows_and_separates_console_modes() {
     assert_eq!(human.lines().count(), 2);
     assert!(human.contains("outcome=success"));
     assert!(human.contains("outcome=timeout"));
-    assert_eq!(human_csv.len(), 2);
+    assert_eq!(human_csv.len(), 6);
 
     let (jsonl, jsonl_csv, _) = execute_mode(ConsoleMode::Jsonl).await;
-    assert_eq!(jsonl.lines().count(), 2);
+    assert_eq!(jsonl.lines().count(), 6);
     for line in jsonl.lines() {
         serde_json::from_str::<serde_json::Value>(line).unwrap();
     }
     assert!(jsonl.contains("\"event_kind\":\"ping_probe\""));
     assert!(jsonl.contains("\"error_kind\":\"icmp_timeout\""));
-    assert_eq!(jsonl_csv.len(), 2);
+    assert_eq!(jsonl_csv.len(), 6);
 
     let (off, off_csv, _) = execute_mode(ConsoleMode::Off).await;
     assert!(off.is_empty());
-    assert_eq!(off_csv.len(), 2);
+    assert_eq!(off_csv.len(), 6);
 }
 
 #[tokio::test]
@@ -391,7 +390,7 @@ async fn panicked_probe_keeps_other_targets_and_load_context() {
     )]));
     let mut request = round(targets.clone());
     request.load_phase = Some(LoadPhase::Upload);
-    request.load_run_id = Some("load-1".to_owned());
+    request.load_run_id = Some(support::id("load-1"));
     let report = measure_round(transport, request).await.unwrap();
     assert_eq!((report.successful_targets, report.failed_targets), (1, 1));
     let failed = &report.events[..1];
@@ -400,12 +399,15 @@ async fn panicked_probe_keeps_other_targets_and_load_context() {
             .iter()
             .all(|event| event.error_kind == Some(ErrorKind::Protocol)
                 && event.load_phase == Some(LoadPhase::Upload)
-                && event.load_run_id.as_deref() == Some("load-1")
+                && event.load_run_id == Some(support::id("load-1"))
                 && event.elapsed_ms == Some(0.0))
     );
-    assert_eq!(failed[0].packets_sent, Some(0));
+    assert_eq!(failed[0].ping_packets_sent, Some(0));
     assert_eq!(report.events[1].outcome, Outcome::Success);
-    assert_eq!(report.events[1].target, Some(targets[1].to_string()));
+    assert_eq!(
+        report.events[1].ping_target_ip,
+        Some(targets[1].to_string())
+    );
 }
 
 #[tokio::test]
@@ -423,16 +425,25 @@ async fn sequence_wrap_and_ipv6_reply_validation_preserve_measurements() {
     )));
     let mut request = round(targets);
     request.round_number = 32_768;
+    let mut next = request.clone();
+    next.run_id = netband::model::RunId::new();
+    next.round_number = 0;
     let report = measure_round(Arc::clone(&transport), request)
         .await
         .unwrap();
+    let repeated = measure_round(Arc::clone(&transport), next).await.unwrap();
     assert_eq!(report.exit_status().code(), 0);
+    for (before, after) in report.events.iter().zip(&repeated.events) {
+        assert_eq!(before.ping_sequence, after.ping_sequence);
+        assert_eq!(before.scheduled_at_utc, after.scheduled_at_utc);
+        assert_ne!(before.run_id, after.run_id);
+        assert_ne!(before.event_id, after.event_id);
+    }
     for (index, probe) in report.events.iter().enumerate() {
-        assert_eq!(probe.sequence, Some(index as u16));
-        assert_eq!(probe.icmp_type, Some(129));
-        assert_eq!(probe.rtt_ms, Some(0.125));
-        assert_eq!(probe.packets_received, Some(1));
-        assert_eq!(probe.packet_loss_pct, Some(0.0));
+        assert_eq!(probe.ping_sequence, Some(index as u16));
+        assert_eq!(probe.ping_icmp_type, Some(129));
+        assert_eq!(probe.ping_rtt_ms, Some(0.125));
+        assert_eq!(probe.ping_packets_received, Some(1));
     }
 }
 
@@ -458,10 +469,9 @@ async fn io_failure_retains_os_error_and_unsent_accounting() {
         assert_eq!(event.outcome, Outcome::Error);
         assert_eq!(event.error_kind, Some(ErrorKind::Io));
         assert_eq!(event.os_error_code, Some(5));
-        assert_eq!(event.error_message.as_deref(), Some("send failed"));
-        assert_eq!(event.rtt_ms, None);
+        assert_eq!(event.message.as_deref(), Some("send failed"));
+        assert_eq!(event.ping_rtt_ms, None);
     }
-    assert_eq!(report.events[0].packets_sent, Some(0));
-    assert_eq!(report.events[0].packets_received, Some(0));
-    assert_eq!(report.events[0].packet_loss_pct, None);
+    assert_eq!(report.events[0].ping_packets_sent, Some(0));
+    assert_eq!(report.events[0].ping_packets_received, Some(0));
 }

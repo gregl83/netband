@@ -1,3 +1,4 @@
+mod support;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
@@ -98,7 +99,7 @@ impl JournalSink for RecordingJournal {
 
 fn settings(interval: Duration, targets: usize) -> PingMonitorConfig {
     PingMonitorConfig {
-        run_id: "continuous-test".into(),
+        run_id: support::id("continuous-test"),
         targets: (1..=targets)
             .map(|last| IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last as u8)))
             .collect(),
@@ -157,14 +158,46 @@ async fn immediate_start_and_regular_ticks_cover_one_logical_hour() {
     assert_eq!(stats.rounds_started, 721);
     assert_eq!(stats.rounds_completed, 721);
     assert_eq!(stats.skipped_ticks, 0);
-    assert_eq!(journal.batches.load(Ordering::SeqCst), 721);
+    assert_eq!(journal.batches.load(Ordering::SeqCst), 721 * 3 + 2);
     let events = journal.events.lock().unwrap();
+    assert_eq!(events.len(), 721 * 3 + 2);
+    let mut active = HashSet::new();
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.event_sequence, Some(index as u64 + 1));
+        if let Some(parent) = event.parent_run_id {
+            assert!(active.contains(&parent));
+        }
+        if event.event_kind == netband::model::EventKind::RunStarted {
+            assert!(active.insert(event.run_id));
+        }
+        assert!(active.contains(&event.run_id));
+        if event.event_kind == netband::model::EventKind::RunFinished {
+            assert!(active.remove(&event.run_id));
+        }
+    }
+    assert!(active.is_empty());
+    let events: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_kind == netband::model::EventKind::PingProbe)
+        .collect();
     assert_eq!(events.len(), 721);
-    assert!(events.iter().all(|event| event.run_id == "continuous-test"));
     assert_eq!(
         events
             .iter()
-            .map(|event| event.event_id.as_str())
+            .map(|event| event.run_id)
+            .collect::<HashSet<_>>()
+            .len(),
+        721
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.parent_run_id == Some(support::id("continuous-test")))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_id)
             .collect::<HashSet<_>>()
             .len(),
         events.len()
@@ -249,7 +282,7 @@ async fn mixed_probe_failures_do_not_stop_future_rounds() {
 async fn journal_failure_is_fatal_and_stops_scheduling() {
     let transport = Arc::new(FakeTransport::new(Duration::ZERO, ResultMode::Success));
     let journal = RecordingJournal {
-        fail_on_batch: Some(2),
+        fail_on_batch: Some(6),
         ..RecordingJournal::default()
     };
     let mut coordinator = OutputCoordinator::new(journal, ConsoleOff);
@@ -303,7 +336,7 @@ async fn closed_stdout_disables_console_without_stopping_measurements() {
     shutdown_tx.send(true).unwrap();
     let (result, console_stats) = task.await.unwrap();
     assert_eq!(result.unwrap().rounds_completed, 4);
-    assert_eq!(journal.batches.load(Ordering::SeqCst), 4);
+    assert_eq!(journal.batches.load(Ordering::SeqCst), 4 * 3 + 2);
     assert!(console_stats.disabled);
 }
 
@@ -361,14 +394,14 @@ async fn rotating_monitor_drains_inflight_round_and_reports_final_segment() {
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "csv"))
         .collect();
-    assert_eq!(paths.len(), 2);
+    assert_eq!(paths.len(), 8);
     let mut identifiers = HashSet::new();
     for path in &paths {
         let mut reader = csv::Reader::from_path(path).unwrap();
         let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(rows.len(), 1);
         for row in rows {
-            assert!(identifiers.insert((row[1].to_owned(), row[2].to_owned())));
+            assert!(identifiers.insert((row[4].to_owned(), row[1].to_owned())));
         }
     }
     let last = std::fs::read_to_string(root.path().join(".netband-active")).unwrap();
@@ -424,7 +457,7 @@ async fn rotation_failure_stops_monitor_and_preserves_original_error() {
     assert!(
         matches!(error, MonitorError::Journal(JournalError::Corrupt(path)) if path == obstruction)
     );
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     let active = std::fs::read_to_string(root.path().join(".netband-active")).unwrap();
     let mut reader = csv::Reader::from_path(root.path().join(active.trim())).unwrap();
     assert_eq!(
@@ -435,4 +468,74 @@ async fn rotation_failure_stops_monitor_and_preserves_original_error() {
             .len(),
         1
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_drains_mixed_round_without_changing_probe_accounting() {
+    let transport = Arc::new(FakeTransport::new(
+        Duration::from_secs(2),
+        ResultMode::Alternating,
+    ));
+    let journal = RecordingJournal::default();
+    let recorded = journal.clone();
+    let mut coordinator = OutputCoordinator::new(journal, ConsoleOff);
+    let (sender, shutdown) = cancellation_channel();
+    let worker = transport.clone();
+    let task = tokio::spawn(async move {
+        monitor_ping(
+            worker,
+            settings(Duration::from_secs(1), 2),
+            &mut coordinator,
+            shutdown,
+        )
+        .await
+    });
+    wait_for_calls(&transport.calls, 2).await;
+    sender.send(true).unwrap();
+    let stats = task.await.unwrap().unwrap();
+    assert_eq!(stats.rounds_completed, 1);
+    assert_eq!((stats.successful_probes, stats.failed_probes), (1, 1));
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    let events = recorded.events.lock().unwrap();
+    let probes: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_kind == netband::model::EventKind::PingProbe)
+        .collect();
+    assert_eq!(probes.len(), 2);
+    assert_eq!(
+        probes
+            .iter()
+            .map(|e| e.ping_packets_sent.unwrap())
+            .sum::<u32>(),
+        2
+    );
+    assert_eq!(
+        probes
+            .iter()
+            .map(|e| e.ping_packets_received.unwrap())
+            .sum::<u32>(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_session_start_prevents_any_probe() {
+    let transport = Arc::new(FakeTransport::new(Duration::ZERO, ResultMode::Success));
+    let journal = RecordingJournal {
+        fail_on_batch: Some(1),
+        ..Default::default()
+    };
+    let mut output = OutputCoordinator::new(journal, ConsoleOff);
+    let (_sender, shutdown) = cancellation_channel();
+    assert!(matches!(
+        monitor_ping(
+            transport.clone(),
+            settings(Duration::from_secs(1), 1),
+            &mut output,
+            shutdown
+        )
+        .await,
+        Err(MonitorError::Journal(_))
+    ));
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
 }

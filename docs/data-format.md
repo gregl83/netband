@@ -1,13 +1,13 @@
 # CSV schema and outcomes
 
-Netband's v1 journal has 54 fields shared by CSV and JSONL. CSV is the authoritative
+Netband's v1 journal has 64 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
-a ping attempt, bandwidth attempt, request failure, or scheduler decision.
+a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
 ## Fields and encoding
 
 ```csv
-schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,local_ip,connection_details,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,elapsed_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server_name,request_url,remote_ip,request_direction,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_bandwidth_starts,download_mbps,download_bytes,download_duration_ms,download_local_ip,download_remote_ip,download_tcp_min_rtt_ms,download_tcp_rtt_ms,download_tcp_retransmitted_bytes,upload_mbps,upload_bytes,upload_duration_ms,upload_local_ip,upload_remote_ip,upload_tcp_min_rtt_ms,upload_tcp_rtt_ms,upload_tcp_retransmitted_bytes,os_error_code,error_kind,error_message
+schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,trigger_reason,scheduler_not_before_utc,provider_daily_starts,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -27,85 +27,205 @@ Schema version `1` identifies this contract independently of the application ver
 Changes to CSV columns, order, types, units, or field meanings require a new schema
 version. Optional connection metadata follows the extension rules below.
 
+Columns use the following contiguous families, in the same order in CSV and JSONL.
+Download and upload families have identical suffixes and ordering.
+
+### Event and run identity
+
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Integer schema version, currently `1` |
-| `run_id` | Identifier for a measurement stream; automatic bandwidth attempts use a nested run ID |
-| `event_id` | Unique event identifier within the run |
-| `scheduled_at_utc` | Planned opportunity or trigger creation time |
-| `started_at_utc` | Attempt start time; request-failure rows record the request-stage start |
-| `finished_at_utc` | Event completion time |
-| `interface` | Selected Linux interface; empty means default route |
-| `local_ip` | Netband’s local address actually bound/used for ping or request failures; empty on combined bandwidth rows |
-| `connection_details` | Optional JSON object describing connection context; unavailable until supplied by a collector |
-| `event_kind` | `ping_probe`, `bandwidth`, `request_failure`, or `scheduler` |
-| `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
-| `load_phase` | Concurrent NDT7 phase at ping-round start: `setup`, `download`, or `upload`; empty without a concurrent test |
-| `load_run_id` | `run_id` of the concurrent bandwidth attempt; empty without a concurrent test |
-| `target` | Ping target address |
-| `sequence` | ICMP sequence number |
+| `event_id` | UUID identifying one event, independent of its run |
+| `event_kind` | `run_started`, `run_finished`, `ping_probe`, `bandwidth`, `request_failure`, or `scheduler` |
+| `event_sequence` | One-based journal emission order across a session and all its children; resets for each session |
+| `run_id` | UUID of the session, ping round, or bandwidth attempt owning this event |
+| `parent_run_id` | Parent session UUID on every child-run event; empty for session events |
+| `run_kind` | `session`, `ping_round`, or `bandwidth`, populated on every event |
+
+### Timing
+
+| Field | Meaning |
+| --- | --- |
+| `scheduled_at_utc` | Planned slot time for scheduled bandwidth, trigger/opportunity creation time for triggered/manual bandwidth, or ping-round dispatch time; see timing semantics below |
+| `started_at_utc` | Operation start time; request failures use stage start, lifecycle records use run start |
+| `finished_at_utc` | Event completion time; empty on `run_started` |
+| `elapsed_ms` | Monotonic elapsed time in milliseconds: full ping/bandwidth attempt or failed request stage; populated on those events even without a measurement, also populated on `run_finished`; empty on `run_started` and scheduler events |
+
+### Result and explanation
+
+| Field | Meaning |
+| --- | --- |
 | `outcome` | Classified result listed below |
-| `elapsed_ms` | Monotonic elapsed time in milliseconds: full ping/bandwidth attempt or failed request stage; populated on those events even without a measurement, empty on scheduler events |
-| `rtt_ms` | Successful ICMP round-trip time in milliseconds |
-| `packets_sent` | Ping-only: 1 if the probe was sent, otherwise 0 |
-| `packets_received` | Ping-only: 1 if a successful reply was received, otherwise 0 |
-| `packet_loss_pct` | Packet loss percentage from 0 through 100; empty when no packet was sent |
-| `icmp_type` | Returned ICMP type when available |
-| `icmp_code` | Returned ICMP code when available |
+| `message` | Sanitized human explanation of a decision or failure; optional, not machine-readable, and its presence alone does not indicate an error |
+
+### Session provenance
+
+| Field | Meaning |
+| --- | --- |
+| `command` | `run`, `once ping`, or `once bandwidth`; populated only on the session's `run_started` event |
+| `netband_version` | Executable package version; populated only on the session's `run_started` event |
+| `process_id` | Operating-system PID; populated only on the session's `run_started` event |
+
+### Shared network context
+
+| Field | Meaning |
+| --- | --- |
+| `interface` | Selected Linux interface; empty for default-route measurements or events without interface context |
+| `connection_details` | Optional JSON object describing connection context; unavailable until supplied by a collector |
+
+### Provider context
+
+| Field | Meaning |
+| --- | --- |
 | `provider_id` | Persisted provider identity (`mlab` or hashed direct endpoint identity) |
 | `provider_kind` | `mlab` or `direct` |
 | `server_name` | Logical measurement-server identity: M-Lab machine name, or direct TLS name/download hostname; not necessarily the requested host |
-| `request_url` | Sanitized endpoint URL on request-failure events, including scheme, host, port and path; credentials/fragments removed and query redacted; empty on bandwidth summaries |
-| `remote_ip` | Actual remote address for request failures when known; empty on combined bandwidth rows |
+
+### Scheduling and accounting
+
+| Field | Meaning |
+| --- | --- |
+| `scheduler_action` | Structured scheduling decision; values listed under Diagnostics |
+| `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
+| `scheduler_not_before_utc` | Deadline applied by this scheduler decision, including provider cooldown, minimum spacing or interface retry; other policy gates may still block work after this time; empty on other event kinds |
+| `provider_daily_starts` | Bandwidth starts reserved for this provider and UTC day, including failed or interrupted attempts; not a count of successful tests |
+
+### Ping
+
+| Field | Meaning |
+| --- | --- |
+| `ping_target_ip` | Configured ping target IP address; distinct from an actually established remote endpoint |
+| `ping_local_ip` | Netband’s local address actually bound/used for the ping; empty when unavailable and on other event kinds |
+| `ping_sequence` | ICMP sequence number |
+| `ping_packets_sent` | Ping-only: 1 if the probe was sent, otherwise 0 |
+| `ping_packets_received` | Ping-only: 1 if a successful reply was received, otherwise 0 |
+| `ping_rtt_ms` | Successful ICMP round-trip time in milliseconds |
+| `ping_icmp_type` | Returned ICMP type when available |
+| `ping_icmp_code` | Returned ICMP code when available |
+
+### Concurrent load
+
+| Field | Meaning |
+| --- | --- |
+| `load_run_id` | `run_id` of the concurrent bandwidth attempt; empty without a concurrent test |
+| `load_phase` | Concurrent NDT7 phase at ping-round start: `setup`, `download`, or `upload`; empty without a concurrent test |
+
+### Request
+
+| Field | Meaning |
+| --- | --- |
+| `request_id` | Opaque string identifying the failed request attempt across stages; use equality for correlation |
 | `request_direction` | `download` or `upload` on NDT7 request failures, including setup, transfer, and cleanup; null/empty for shared discovery or admission failures and all other event kinds |
 | `request_stage` | `locate`, `dns`, `connect`, `tls`, `websocket_handshake`, `download`, or `upload` |
-| `request_attempt` | One-based request/candidate attempt number |
-| `http_status` | HTTP/WebSocket handshake status when returned |
-| `retry_after_ms` | Parsed provider delay at response receipt; HTTP-dates report remaining time, floored at zero; empty if absent, invalid, or too large for this field |
-| `rate_limit_until_utc` | Provider retry deadline on request-failure rows; enforced cooldown deadline on scheduler rows, which may retain a later existing cooldown |
-| `daily_bandwidth_starts` | Bandwidth starts reserved for this provider and UTC day, including failed or interrupted attempts; not a count of successful tests |
-| `download_mbps` | NDT7 download throughput in decimal Mb/s |
-| `download_bytes` | Application payload bytes received |
-| `download_duration_ms` | Client receive measurement window in milliseconds; empty when that direction is unavailable |
+| `request_url` | Sanitized endpoint URL on request-failure events, including scheme, host, port and path; credentials/fragments removed and query redacted; empty on bandwidth summaries |
+| `request_local_ip` | Local address of a failed request when known; empty on other event kinds |
+| `request_remote_ip` | Actual remote address of a failed request when known; empty on other event kinds |
+| `request_http_status` | HTTP/WebSocket handshake status when returned |
+| `request_retry_after_ms` | Parsed provider delay at response receipt; HTTP-dates report remaining time, floored at zero; empty if absent, invalid, or too large for this field |
+| `request_retry_at_utc` | Provider Retry-After deadline captured at response receipt; populated only on request failures when the header is usable |
+
+### Download
+
+| Field | Meaning |
+| --- | --- |
+| `download_request_id` | Request ID of the retained download measurement; empty without that measurement |
 | `download_local_ip` | Local address of the download connection; empty when that direction is unavailable |
 | `download_remote_ip` | Remote address of the download connection; empty when that direction is unavailable |
-| `download_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the download connection |
-| `download_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the download connection |
-| `download_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the download connection |
-| `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
-| `upload_bytes` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
-| `upload_duration_ms` | Client send measurement window in milliseconds; excludes close-handshake waiting; empty when that direction is unavailable |
+| `download_bytes` | Application payload bytes received |
+| `download_measurement_duration_ms` | Client receive measurement window in milliseconds; empty when that direction is unavailable |
+| `download_mbps` | NDT7 download throughput in decimal Mb/s |
+| `download_server_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the download connection |
+| `download_server_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the download connection |
+| `download_server_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the download connection |
+
+### Upload
+
+| Field | Meaning |
+| --- | --- |
+| `upload_request_id` | Request ID of the retained upload measurement; empty without that measurement |
 | `upload_local_ip` | Local address of the upload connection; empty when that direction is unavailable |
 | `upload_remote_ip` | Remote address of the upload connection; empty when that direction is unavailable |
-| `upload_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the upload connection |
-| `upload_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the upload connection |
-| `upload_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the upload connection |
-| `os_error_code` | Operating-system error number when available |
+| `upload_bytes` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
+| `upload_measurement_duration_ms` | Client send measurement window in milliseconds; excludes close-handshake waiting; empty when that direction is unavailable |
+| `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
+| `upload_server_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the upload connection |
+| `upload_server_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the upload connection |
+| `upload_server_tcp_retransmitted_bytes` | NDT7 server TCPInfo retransmitted bytes (`BytesRetrans`) for the upload connection |
+
+### Error details
+
+| Field | Meaning |
+| --- | --- |
 | `error_kind` | Stable machine-readable failure classification |
-| `error_message` | Sanitized human explanation of a failure or scheduler decision; not a machine-readable contract |
+| `os_error_code` | Operating-system error number when available |
 
 
 ## Event context and relationships
 
 | Event kind | Record scope | Field context |
 | --- | --- | --- |
-| `ping_probe` | One attempt against one target | Target, sequence, packet counts, loss, RTT, ICMP details, and any failure; load fields identify a concurrent bandwidth attempt |
+| `run_started` | Start of a session or child run | Run identity, parent, kind, start timestamp; session starts also include command, version and PID; outcome is `started` |
+| `run_finished` | Completion or orderly termination of that run | Same run identity, parent and kind; start/finish timestamps, monotonic elapsed time, outcome and any command failure |
+| `ping_probe` | One attempt against one target | Target, sequence, packet counts, RTT, ICMP details, and any failure; load fields identify a concurrent bandwidth attempt |
 | `bandwidth` | One bandwidth attempt | Provider, logical server, trigger, accounting, and independently available download/upload measurements |
-| `request_failure` | One failed request or stage within a bandwidth attempt | Request URL, direction, stage, attempt number, known endpoints, response details, and diagnostic |
+| `request_failure` | One failed request or stage within a bandwidth attempt | Request URL, direction, stage, request ID, known endpoints, response details, and diagnostic |
 | `scheduler` | One scheduling decision | Provider, trigger, accounting, applicable cooldown, and decision explanation; measurement fields are unavailable |
 
 Each ping attempt produces one complete `ping_probe`, including failures. Packet
-counts describe that attempt; rolling health calculations remain internal.
+counts describe that attempt; rolling health calculations remain internal. Calculate
+aggregate loss from probe rows as
+`100 * (SUM(ping_packets_sent) - SUM(ping_packets_received)) / SUM(ping_packets_sent)`.
+Loss is unavailable when the denominator is zero. Unsent probes remain visible as
+failed attempts but do not contribute to the packet-loss denominator. Human output
+may display derived loss; no redundant per-probe loss percentage is stored.
 
-Join request failures to their bandwidth summary by `run_id` (and use `event_id` for
-deduplication). An automatic attempt has its own nested `run_id`; use `load_run_id`
-from ping events to join it. Use `request_direction` together with `request_stage`
-for failure attribution. For example, `upload` plus `tls` means upload TLS setup failed. Direction is selected
+Every measurement command creates a root session. Each ping round and bandwidth
+attempt has a distinct child run, including measurements from one-shot commands.
+Scheduler decisions belong to the session. `config check` emits no journal events.
+A child start is durably recorded before its measurement work begins, and a session
+start precedes every child start. Results precede their run's finish record.
+
+Join children to the session start using `parent_run_id = run_id`. Join probe events
+by `run_id` to group a ping round; ICMP `ping_sequence` wraps and is not a round identifier.
+Join request failures to their bandwidth result by `run_id`, and use `event_id` for
+deduplication. `load_run_id` separately links a probe to overlapping bandwidth work.
+
+Run, event and request IDs are UUID v4 values serialized as canonical lowercase,
+hyphenated strings. Treat IDs as opaque equality keys, not timestamps or counters.
+UUID generation requires operating-system randomness; failure does not fall back to
+weaker identifiers. `event_sequence` provides emission order across a session and its
+concurrent children, even when operation timestamps tie or move backward. It is not
+operation-start order, and gaps may indicate omitted output. Console JSONL can drop
+records under backpressure; CSV remains authoritative.
+
+A run finish records success, partial results, failure or cancellation. A monitor
+session ends with `cancelled` on orderly shutdown; drained ping rounds retain their
+measurement outcome. Missing finish records mean completion was not recorded, not
+necessarily that the process crashed. No synthetic finish is written on process exit.
+Preflight configuration/storage failures can prevent a session from starting at all.
+
+Use `request_direction` together with `request_stage` for failure attribution. For example, `upload` plus `tls` means upload TLS setup failed. Direction is selected
 before DNS and retained through timeout/cancellation and cleanup; it does not depend
 on URL path naming or whether a measurement was retained. Shared Locate discovery
 and pre-connection admission failures leave direction unavailable/not applicable.
 Do not infer direction from diagnostic prose or count each request as a bandwidth test.
 Rate availability and diagnostics must be assessed independently of overall outcome.
+
+`request_id` is an opaque string identifying one request attempt. Endpoint
+resolution and admission share an ID, including Locate discovery, redirects, and
+candidate validation. Direct configuration resolution also has an ID; its presence
+does not imply a network connection was established. Each direction receives a new
+ID before DNS. The first address retains that ID; each subsequent address attempt
+receives a fresh ID. Different directions, server candidates, and runs receive fresh
+IDs. TLS, handshake, transfer, cleanup, timeout, and cancellation retain the active ID.
+
+`download_request_id` and `upload_request_id` reference the requests that produced
+retained measurements. Match these to failure records' `request_id` within the same
+`run_id`. A measurement and cleanup failure can share an ID. Missing result IDs mean
+no measurement was retained, not that no request occurred. These IDs do not encode
+direction, retry count, or order; do not parse or sort their representation. Count
+distinct IDs across failure records and retained results to count represented attempts
+for a direction. Timestamps provide a timeline but can tie or move backward.
 
 During automatic bandwidth tests in `run`, ping rounds continue on the selected bandwidth
 interface. A ping is under load when `load_phase` is `download` or `upload`; `setup`
@@ -118,6 +238,22 @@ use their timestamps rather than file order when constructing a timeline.
 
 ## Timing and throughput
 
+`scheduled_at_utc` records the opportunity's origin, whose meaning depends on context:
+
+- Scheduled bandwidth: the planned slot time.
+- Health-triggered bandwidth: the triggering opportunity's creation time.
+- Manual bandwidth: the manual opportunity's creation time.
+- Ping: the round's dispatch time, not the nominal ticker deadline.
+
+It is unavailable on lifecycle/scheduler rows and on measurement failures that were
+not annotated by completed scheduler handling. It is not a universal scheduling-delay
+baseline. `started_at_utc` and `finished_at_utc` retain actual operation boundaries.
+
+`request_retry_after_ms` and `request_retry_at_utc` preserve a response's delay and
+absolute deadline. `scheduler_not_before_utc` records the deadline applied by the
+scheduler, which can retain a later existing cooldown or represent local spacing or
+interface backoff. Do not substitute one deadline for the other.
+
 Bandwidth `started_at_utc` is captured before endpoint resolution, and
 `finished_at_utc` when the attempt terminates, including setup and upload cleanup.
 Both are recorded even when the attempt fails, times out, or is cancelled before
@@ -125,9 +261,9 @@ producing measurements. Request-failure rows retain the stage start and failure 
 UTC timestamps reflect the observed wall clock and can move backward after a clock
 adjustment. Elapsed time and active durations use a monotonic clock.
 
-`download_duration_ms` and `upload_duration_ms` retain each active monotonic window.
-Recompute download as `8 * download_bytes / (1000 * download_duration_ms)` and upload
-as `8 * upload_bytes / (1000 * upload_duration_ms)` in decimal Mb/s. Allow floating-point
+`download_measurement_duration_ms` and `upload_measurement_duration_ms` retain each active monotonic window.
+Recompute download as `8 * download_bytes / (1000 * download_measurement_duration_ms)` and upload
+as `8 * upload_bytes / (1000 * upload_measurement_duration_ms)` in decimal Mb/s. Allow floating-point
 roundoff (relative tolerance `1e-12`); CSV and JSONL do not round measurements for display.
 `elapsed_ms` measures the entire attempt independently, including discovery, connection
 setup, transfer and cleanup. It is available even when both directions fail before
@@ -174,9 +310,9 @@ the configured Locate URL (not necessarily the final redirect URL) or the direct
 NDT7 URL. A bandwidth summary has a logical name but no single request URL.
 
 Direction-specific addresses remain empty when that direction has no retained
-measurement. Generic `local_ip` and `remote_ip` are empty on bandwidth summaries;
+measurement. `ping_local_ip`, `request_local_ip`, and `request_remote_ip` are empty on bandwidth summaries;
 use the direction-specific addresses even when both endpoints share a hostname.
-`local_ip` always means Netband’s endpoint and `remote_ip` the server’s endpoint,
+Local addresses always identify Netband’s endpoint and remote addresses the server’s endpoint,
 regardless of which side sends the payload.
 
 ## TCP measurements
@@ -223,16 +359,36 @@ a reviewed copy while retaining the original journal as evidence.
 `icmp_timeout`, `icmp_unreachable`, `permission_denied`, `dns`, `connect`, `tls`,
 `http_status`, `websocket_handshake`, `download_failed`, `upload_failed`,
 `provider_cooldown`, `daily_cap`, `cancelled`, `timeout`, `io`, `protocol`, `internal`.
-`os_error_code` is platform-specific; `error_message` is sanitized explanatory prose
+`os_error_code` is platform-specific; `message` is sanitized explanatory prose
 and is not a stable machine contract.
 
-Scheduler events also use `error_message` for ordinary decision explanations; a
-nonempty message does not itself indicate failure.
+Scheduler decisions use `scheduler_action` and optional `message`. Normal cap,
+spacing, cooldown and health decisions leave `error_kind` and `os_error_code` empty.
+An actual interface resolution or clock error may additionally populate those fields.
+The same `message` column holds any human-readable failure explanation.
+
+| `scheduler_action` | Meaning |
+| --- | --- |
+| `trigger_pending` | Health degradation created a pending trigger |
+| `trigger_merged_with_deferred` | Health trigger merged into an existing retry |
+| `trigger_cancelled` | Health recovery cleared a pending trigger |
+| `trigger_expired` | Trigger lifetime expired while retaining its health latch |
+| `deferred_expired` | Retry reached its day or attempt limit |
+| `bandwidth_start` | Scheduler admitted a bandwidth opportunity |
+| `rate_limit` | Provider response established a cooldown/retry decision |
+| `clock_rollback` | Backward wall-clock movement blocked scheduling |
+| `suppressed` | Policy blocked an opportunity |
+| `deferred` | Policy delayed an opportunity |
+| `interface_recovered` | Interface became available again |
+| `interface_retry` | Interface resolution failed and will be retried |
+| `bandwidth_suppressed` | Interface selection prevented an attempt |
+| `bandwidth_interface_skipped` | Unavailable interface was skipped during selection |
 
 ## Outcomes
 
 | Outcome | Meaning |
 | --- | --- |
+| `started` | Run began; only on `run_started` |
 | `success` | Requested operation completed |
 | `partial` | One bandwidth direction is available without an overriding timeout, cancellation, or provider-wide failure |
 | `timeout` | Configured operation deadline expired |
