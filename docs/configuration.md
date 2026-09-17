@@ -1,5 +1,8 @@
 # Configuration and providers
 
+For a first measurement, start with [quick tests](usage.md). This page is the full
+reference for customizing targets, interfaces, providers, and output.
+
 Netband reads one optional TOML file, then applies CLI overrides. Scalar CLI values
 replace TOML values. Repeated `--interface` and `--ping-target` values replace, rather
 than extend, their TOML lists. Relative paths are resolved from the current directory.

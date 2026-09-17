@@ -54,6 +54,11 @@ endpoint and retain the measured executable's identity with the results.
 
 ## Publication workflow
 
+Before publishing, check that README installation commands lead to binaries with the
+advertised CLI and that linked reference docs match the release. Update the v1
+source-branch example and development-checkout note in [installation](install.md)
+and the README when v1 becomes the published release.
+
 The [CD workflow](../.github/workflows/cd.yml) starts when a GitHub release is
 published. The tag must be `v` followed by the package version in `Cargo.toml`.
 The workflow then:

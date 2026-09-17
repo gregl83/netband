@@ -435,8 +435,12 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         }
     }
 
+    let usage = fs::read_to_string(root().join("docs/usage.md")).unwrap();
     for mode in ["auto", "human", "jsonl", "off"] {
-        assert!(readme.contains(mode), "README omits console mode {mode}");
+        assert!(
+            usage.contains(mode),
+            "usage guide omits console mode {mode}"
+        );
     }
     assert!(readme.contains(">events.jsonl 2>netband.log"));
     assert!(privacy.contains("https://www.measurementlab.net/aup/"));

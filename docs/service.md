@@ -32,13 +32,14 @@ sudo systemctl enable --now netband.service
 
 ## Build from source
 
-Building requires Git and Rust 1.98 or newer:
+For a quick test from source, follow [the source-build guide](install.md#build-from-source).
+It stops at a runnable binary and does not install a service.
+
+### Enable the service from a checkout
+
+After building, run these commands only if you want systemd to manage Netband:
 
 ```sh
-git clone https://github.com/gregl83/netband.git
-cd netband
-cargo build --release --locked
-./target/release/netband config check
 sudo install -Dm0755 target/release/netband /usr/local/bin/netband
 sudo install -Dm0644 packaging/netband.toml /etc/netband/netband.toml
 sudo install -Dm0644 packaging/netband.service /etc/systemd/system/netband.service
@@ -104,8 +105,8 @@ Do not use `copytruncate` or rename an active CSV. A size threshold does not bou
 disk usage, and the separate scheduler accounting ledger also grows over time.
 
 Each ping round emits one row per target. Three targets at a five-second interval
-produce 51,840 ping rows per day, plus bandwidth, request-failure, and scheduler
-records. Storage also depends on identifiers and diagnostics. Measure your actual
+produce 51,840 ping rows per day, plus two lifecycle records per round, session lifecycle, bandwidth, request-failure,
+and scheduler records. Storage also depends on identifiers and diagnostics. Measure your actual
 files, choose an archive policy and free-space reserve, and alert on disk-full failures.
 
 ## ICMP permissions

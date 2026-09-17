@@ -1,24 +1,32 @@
 # Netband documentation
 
-Start with the [project quick start](../README.md#five-minute-quick-start) to install
-Netband and collect your first measurements.
+Start with [a quick ping or bandwidth test](../README.md#try-a-quick-test).
+Choose the next guide for what you want to do:
 
-| Document | Contents |
+| I want to… | Start here |
 | --- | --- |
-| [Configuration and providers](configuration.md) | CLI options, TOML defaults, state paths, M-Lab consent, and direct endpoints |
-| [Service operation](service.md) | Installation, systemd, CSV locations, journal logs, permissions, and recovery |
-| [CSV schema and outcomes](data-format.md) | Measurement fields, units, outcomes, and parsing examples |
-| [Scheduling](scheduling.md) | Daily opportunities, health triggers, provider cooldowns, and interface selection |
-| [NDT7 measurement validation](ndt7-validation.md) | Measurement methods, reference-client comparison, offline analysis, and reproduction |
-| [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md) | Deploying an operator-controlled measurement server |
-| [Release maintenance](release.md) | Maintainer validation commands, publication workflow, and release assets |
-| [Privacy and provider data](../PRIVACY.md) | Collected data, provider policies, and operator responsibilities |
+| Install a binary or build from source | [Installation](install.md) |
+| Run a single test or use JSONL in a script | [Quick tests and output](usage.md) |
+| Change targets, interfaces, providers, or defaults | [Configuration and providers](configuration.md) |
+| Leave Netband running unattended | [Service operation](service.md) |
+| Understand automatic tests, limits, or deferrals | [Scheduling](scheduling.md) |
+| Parse results or inspect example records | [Data format](data-format.md) · [Example session](examples/README.md) |
+| Understand measurement methods and validation | [NDT7 validation](ndt7-validation.md) |
+| Plan a study and preserve measurement provenance | [Research use](ndt7-validation.md#research-use) |
+| Run an operator-controlled NDT7 server | [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md) |
+| Understand what data is collected and shared | [Privacy and provider data](../PRIVACY.md) |
 
 ## Recorded benchmarks
 
-| Dataset | Supporting files |
-| --- | --- |
-| [2026-09-06 Akamai comparison](benchmarks/2026-09-06-akamai/summary.md) | [Measurements](benchmarks/2026-09-06-akamai/measurements.csv), [metadata](benchmarks/2026-09-06-akamai/metadata.json), [summary JSON](benchmarks/2026-09-06-akamai/summary.json), [paired analysis](benchmarks/2026-09-06-akamai/paired-analysis.json) |
+The [reference-client comparison](benchmarks/2026-09-06-akamai/summary.md) includes
+[measurements](benchmarks/2026-09-06-akamai/measurements.csv),
+[build metadata](benchmarks/2026-09-06-akamai/metadata.json), and
+[paired analysis](benchmarks/2026-09-06-akamai/paired-analysis.json).
+Records describe the identified binaries and environment; see the validation guide
+for interpretation and limitations.
 
-Benchmark records describe the identified binaries and measurement environment.
-See the validation guide for interpretation and limitations.
+## Maintainers
+
+[Release maintenance](release.md) covers validation, packaging, publication, and artifacts.
+These reference docs describe their source checkout. For an installed release, use
+the documentation at its matching Git tag; see [installation](install.md).

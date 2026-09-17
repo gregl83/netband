@@ -179,3 +179,22 @@ Retain exact binaries, hashes, source revisions, native counters and timing
 boundaries. Compare distributions, paired differences, run order and diagnostic
 counts. Repeat under other conditions before generalizing. See
 [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md).
+
+## Research use
+
+Start with the [recorded-data analysis](#analyze-recorded-data-offline)
+to inspect the benchmark without sending network traffic. Preserve the executable
+hash, source revision, effective configuration, and measurement environment with
+each study's CSV journals. The journal records session and measurement-run lifecycles,
+results, request failures, and scheduler decisions. UUIDs and explicit parent references
+link related events; see the [data contract](data-format.md).
+Review addresses and diagnostics before sharing data;
+token redaction does not anonymize a journal.
+
+Netband measures ICMP latency/loss and one TCP/WebSocket stream per NDT7 direction.
+These observations do not isolate an ISP as a cause or establish cluster interconnect,
+MPI, or RDMA performance. The recorded comparison covers one host and one server.
+
+Provider limits are enforced per scheduler state file. Separate hosts or independent
+state files do not share a budget. Coordinate targets, aggregate traffic, and provider
+authorization with the network operator before deploying across shared infrastructure.
