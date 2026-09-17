@@ -26,3 +26,30 @@ fn message_sanitization_redacts_field_keys_without_matching_word_suffixes() {
         assert_eq!(sanitize_message(&sanitized), sanitized, "input: {input}");
     }
 }
+
+#[test]
+fn explanations_and_failure_diagnostics_are_redacted_without_changing_classification() {
+    use netband::model::{ErrorKind, EventKind, MeasurementEvent, Outcome, RunId};
+    for failure in [false, true] {
+        let mut event = MeasurementEvent::new(
+            RunId::new(),
+            EventKind::Scheduler,
+            Outcome::Deferred,
+            chrono::Utc::now(),
+        );
+        if failure {
+            event.error_kind = Some(ErrorKind::Io);
+            event.os_error_code = Some(5);
+            event.message = Some("interface failed token=private".into());
+        } else {
+            event.message = Some("retry deferred token=private".into());
+        }
+        let sanitized = event.sanitized();
+        assert_eq!(sanitized.outcome, event.outcome);
+        assert_eq!(sanitized.error_kind, event.error_kind);
+        assert_eq!(sanitized.os_error_code, event.os_error_code);
+        let json = serde_json::to_string(&sanitized).unwrap();
+        assert!(!json.contains("private"));
+        assert!(json.contains("[redacted]"));
+    }
+}

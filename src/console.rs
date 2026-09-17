@@ -11,8 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::cli::ConsoleMode;
 use crate::model::{
-    EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, sanitize_endpoint,
-    sanitize_message, timestamp_text,
+    EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, sanitize_message, timestamp_text,
 };
 
 #[derive(Debug, Error)]
@@ -264,7 +263,7 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
     let timestamp = event.finished_at_utc.map(timestamp_text)?;
     let interface = event.interface.as_deref().unwrap_or("default-route");
     let reason = event
-        .error_message
+        .message
         .as_deref()
         .map(|message| format!(" reason=\"{}\"", quote_human(message)))
         .unwrap_or_default();
@@ -272,33 +271,47 @@ pub fn human_line(event: &MeasurementEvent) -> Option<String> {
         format!(
             " load_phase={} load_run_id={}",
             load_phase_name(phase),
-            event.load_run_id.as_deref().unwrap_or("-")
+            event
+                .load_run_id
+                .map_or_else(|| "-".to_owned(), |id| id.to_string())
         )
     });
     match event.event_kind {
-        EventKind::PingSummary => Some(format!(
+        EventKind::PingProbe => Some(format!(
             "{timestamp} ping interface={interface} target={} outcome={} rtt_ms={} loss_pct={}{}{}\n",
-            event.target.as_deref().unwrap_or("-"),
+            event.ping_target_ip.as_deref().unwrap_or("-"),
             outcome_name(event.outcome),
-            decimal_or_dash(event.rtt_ms),
-            decimal_or_dash(event.packet_loss_pct),
+            decimal_or_dash(event.ping_rtt_ms),
+            decimal_or_dash(
+                event
+                    .ping_packets_sent
+                    .zip(event.ping_packets_received)
+                    .and_then(|(sent, received)| {
+                        (sent > 0).then(|| {
+                            100.0 * (f64::from(sent) - f64::from(received)) / f64::from(sent)
+                        })
+                    })
+            ),
             load,
             reason,
         )),
         EventKind::Bandwidth => Some(format!(
-            "{timestamp} bandwidth interface={interface} provider={} server={} outcome={} download_mbps={} upload_mbps={}{}\n",
+            "{timestamp} bandwidth interface={interface} provider={} server_name={} outcome={} download={} upload={}{}\n",
             event.provider_kind.map(provider_name).unwrap_or("-"),
             event
-                .server
+                .server_name
                 .as_deref()
-                .map(sanitize_endpoint)
+                .map(sanitize_message)
                 .unwrap_or_else(|| "-".to_owned()),
             outcome_name(event.outcome),
-            decimal_or_dash(event.download_mbps),
-            decimal_or_dash(event.upload_mbps),
+            bandwidth_or_dash(event.download_mbps),
+            bandwidth_or_dash(event.upload_mbps),
             reason,
         )),
-        EventKind::PingProbe | EventKind::RequestFailure | EventKind::Scheduler => None,
+        EventKind::RequestFailure
+        | EventKind::Scheduler
+        | EventKind::RunStarted
+        | EventKind::RunFinished => None,
     }
 }
 
@@ -308,12 +321,49 @@ fn quote_human(value: &str) -> String {
         .replace('"', "\\\"")
 }
 
+fn bandwidth_or_dash(mbps: Option<f64>) -> String {
+    let Some(mbps) = mbps.filter(|value| value.is_finite() && *value >= 0.0) else {
+        return "-".to_owned();
+    };
+    if mbps == 0.0 {
+        return "0 bps".to_owned();
+    }
+
+    // Promote units when rounding to three significant digits would reach 1000.
+    let (scale, unit) = [(1e6, "Tbps"), (1e3, "Gbps"), (1.0, "Mbps"), (1e-3, "Kbps")]
+        .into_iter()
+        .find(|(scale, _)| mbps / scale >= 0.9995)
+        .unwrap_or((1e-6, "bps"));
+    let value = mbps / scale;
+    if !(0.001..1000.0).contains(&value) {
+        return format!("{value:.2e} {unit}");
+    }
+    let precision = (2.0 - value.log10().floor()).max(0.0) as usize;
+    let rounded = format!("{value:.precision$}");
+    let number = if precision == 0 {
+        rounded.as_str()
+    } else {
+        rounded.trim_end_matches('0').trim_end_matches('.')
+    };
+    format!("{number} {unit}")
+}
+
 fn decimal_or_dash(value: Option<f64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
+    value.map_or_else(
+        || "-".to_owned(),
+        |value| {
+            let rounded = format!("{value:.3}");
+            rounded
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned()
+        },
+    )
 }
 
 fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
+        Outcome::Started => "started",
         Outcome::Success => "success",
         Outcome::Partial => "partial",
         Outcome::Timeout => "timeout",

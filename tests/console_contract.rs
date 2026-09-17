@@ -1,3 +1,4 @@
+mod support;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 use chrono::{TimeZone, Utc};
 use netband::cli::ConsoleMode;
 use netband::console::{Console, ConsoleDiagnostic, ConsoleSink, human_line, render_jsonl};
-use netband::journal::{Journal, OutputCoordinator};
+use netband::journal::{JournalWriter, OutputCoordinator};
 use netband::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
     TriggerReason,
@@ -36,8 +37,7 @@ fn service_stdout_does_not_change_inherited_descriptor_flags() {
 
 fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
     MeasurementEvent::new(
-        "run-1",
-        "event-1",
+        support::id::<netband::model::RunId>("run-1"),
         kind,
         outcome,
         Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 2)
@@ -48,13 +48,12 @@ fn event(kind: EventKind, outcome: Outcome) -> MeasurementEvent {
 
 #[test]
 fn human_output_is_concise_and_omits_internal_events() {
-    let mut ping = event(EventKind::PingSummary, Outcome::Timeout);
+    let mut ping = event(EventKind::PingProbe, Outcome::Timeout);
     ping.interface = Some("eth0".into());
-    ping.target = Some("1.1.1.1".into());
-    ping.packets_sent = Some(1);
-    ping.packets_received = Some(0);
-    ping.packet_loss_pct = Some(100.0);
-    ping.error_message = Some("request timed out".into());
+    ping.ping_target_ip = Some("1.1.1.1".into());
+    ping.ping_packets_sent = Some(1);
+    ping.ping_packets_received = Some(0);
+    ping.message = Some("request timed out".into());
     let line = human_line(&ping).unwrap();
     assert_eq!(
         line,
@@ -63,20 +62,23 @@ fn human_output_is_concise_and_omits_internal_events() {
     assert!(!line.contains("\u{1b}["));
 
     ping.load_phase = Some(LoadPhase::Download);
-    ping.load_run_id = Some("run-1:bandwidth:0".into());
+    ping.load_run_id = Some(support::id("run-1:bandwidth:0"));
     let line = human_line(&ping).unwrap();
-    assert!(line.contains("load_phase=download load_run_id=run-1:bandwidth:0"));
+    assert!(line.contains(&format!(
+        "load_phase=download load_run_id={}",
+        ping.load_run_id.unwrap()
+    )));
 
     let mut bandwidth = event(EventKind::Bandwidth, Outcome::Partial);
     bandwidth.provider_kind = Some(ProviderKind::Direct);
-    bandwidth.server = Some("wss://ndt.example.net/down?token=secret".into());
+    bandwidth.server_name = Some("ndt.example.net".into());
     bandwidth.download_mbps = Some(100.25);
     bandwidth.upload_mbps = None;
-    bandwidth.error_message = Some("upload failed".into());
+    bandwidth.message = Some("upload failed".into());
     let line = human_line(&bandwidth).unwrap();
     assert!(line.contains("provider=direct"));
-    assert!(line.contains("server=wss://ndt.example.net/down?[redacted]"));
-    assert!(line.contains("download_mbps=100.25 upload_mbps=-"));
+    assert!(line.contains("server_name=ndt.example.net"));
+    assert!(line.contains("download=100 Mbps upload=-"));
     assert!(!line.contains("secret"));
 
     assert!(human_line(&event(EventKind::RequestFailure, Outcome::Error)).is_none());
@@ -84,16 +86,96 @@ fn human_output_is_concise_and_omits_internal_events() {
 }
 
 #[test]
+fn human_numbers_are_readable_without_rounding_machine_output() {
+    let mut ping = event(EventKind::PingProbe, Outcome::Success);
+    ping.ping_rtt_ms = Some(0.011236999999999999);
+    ping.ping_packets_sent = Some(1);
+    ping.ping_packets_received = Some(1);
+    let line = human_line(&ping).unwrap();
+    assert!(line.contains("rtt_ms=0.011 loss_pct=0"));
+    assert!(render_jsonl(&ping).unwrap().contains(&format!(
+        "\"ping_rtt_ms\":{}",
+        serde_json::to_string(&ping.ping_rtt_ms.unwrap()).unwrap()
+    )));
+
+    let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+    bandwidth.download_mbps = Some(12.694732433504065);
+    bandwidth.upload_mbps = Some(1000.0);
+    assert!(
+        human_line(&bandwidth)
+            .unwrap()
+            .contains("download=12.7 Mbps upload=1 Gbps")
+    );
+}
+
+#[test]
+fn bandwidth_units_cover_small_large_and_rounding_boundary_values() {
+    for (mbps, expected) in [
+        (0.0, "0 bps"),
+        (0.0000001, "0.1 bps"),
+        (1e-10, "1.00e-4 bps"),
+        (0.0001, "100 bps"),
+        (0.0009994, "999 bps"),
+        (0.0009996, "1 Kbps"),
+        (0.001, "1 Kbps"),
+        (0.25, "250 Kbps"),
+        (0.9996, "1 Mbps"),
+        (1.0, "1 Mbps"),
+        (94.234, "94.2 Mbps"),
+        (999.6, "1 Gbps"),
+        (1250.0, "1.25 Gbps"),
+        (10000.0, "10 Gbps"),
+        (999600.0, "1 Tbps"),
+        (1250000.0, "1.25 Tbps"),
+        (1e12, "1.00e6 Tbps"),
+    ] {
+        let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+        bandwidth.download_mbps = Some(mbps);
+        bandwidth.upload_mbps = Some(mbps);
+        let line = human_line(&bandwidth).unwrap();
+        assert!(
+            line.contains(&format!("download={expected} upload={expected}\n")),
+            "{mbps} Mbps: {line}"
+        );
+    }
+}
+
+#[test]
+fn bandwidth_presentation_preserves_csv_and_jsonl_mbps() {
+    let mut bandwidth = event(EventKind::Bandwidth, Outcome::Success);
+    bandwidth.download_mbps = Some(0.000123456789);
+    bandwidth.upload_mbps = Some(12345.678901234);
+    let original = bandwidth.clone();
+    human_line(&bandwidth).unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&render_jsonl(&bandwidth).unwrap()).unwrap();
+    let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
+    journal.append_batch(&[bandwidth]).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    let headers = reader.headers().unwrap().clone();
+    let row = reader.records().next().unwrap().unwrap();
+    for (field, expected) in [
+        ("download_mbps", original.download_mbps.unwrap()),
+        ("upload_mbps", original.upload_mbps.unwrap()),
+    ] {
+        assert_eq!(json[field].as_f64().unwrap(), expected);
+        let column = headers.iter().position(|header| header == field).unwrap();
+        assert_eq!(row[column].parse::<f64>().unwrap(), expected);
+    }
+}
+
+#[test]
 fn jsonl_is_versioned_flat_and_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::RateLimited);
     request.provider_kind = Some(ProviderKind::Mlab);
-    request.server = Some("https://locate.example/nearest?access_token=secret".into());
+    request.request_url = Some("https://locate.example/nearest?access_token=secret".into());
     request.request_stage = Some(RequestStage::Locate);
-    request.http_status = Some(429);
-    request.retry_after_ms = Some(60_000);
+    request.request_http_status = Some(429);
+    request.request_retry_after_ms = Some(60_000);
     request.trigger_reason = Some(TriggerReason::PingLoss);
     request.error_kind = Some(ErrorKind::HttpStatus);
-    request.error_message = Some("rate limited".into());
+    request.message = Some("rate limited".into());
 
     let line = render_jsonl(&request).unwrap();
     assert!(line.ends_with('\n'));
@@ -104,19 +186,27 @@ fn jsonl_is_versioned_flat_and_sanitized() {
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["event_kind"], "request_failure");
     assert_eq!(value["request_stage"], "locate");
-    assert_eq!(value["rtt_ms"], serde_json::Value::Null);
+    assert_eq!(value["ping_rtt_ms"], serde_json::Value::Null);
     assert_eq!(value["load_phase"], serde_json::Value::Null);
     assert_eq!(value["load_run_id"], serde_json::Value::Null);
-    assert_eq!(value["server"], "https://locate.example/nearest?[redacted]");
+    assert_eq!(
+        value["request_url"],
+        "https://locate.example/nearest?[redacted]"
+    );
 }
 
 #[test]
 fn diagnostic_text_and_endpoint_credentials_are_sanitized() {
     let mut request = event(EventKind::RequestFailure, Outcome::Error);
-    request.server = Some("https://user:password@example.test/path?token=server-secret".into());
-    request.error_message = Some("access_token=first api_key=second token=third key=fourth".into());
+    request.server_name = Some("logical.example.test".into());
+    request.request_url = Some("https://user:password@192.0.2.10/path?token=server-secret".into());
+    request.message = Some("access_token=first api_key=second token=third key=fourth".into());
 
     let line = render_jsonl(&request).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(json["server_name"], "logical.example.test");
+    assert_eq!(json["request_url"], "https://192.0.2.10/path?[redacted]");
+    assert!(json.get("server").is_none());
     for secret in [
         "user",
         "password",
@@ -136,7 +226,7 @@ async fn worker_writes_jsonl_and_drains_on_shutdown() {
     let (writer, mut reader) = tokio::io::duplex(16 * 1024);
     let console = Console::spawn(ConsoleMode::Jsonl, writer, 8, |_| {});
     console.offer(&event(EventKind::PingProbe, Outcome::Success));
-    console.offer(&event(EventKind::PingSummary, Outcome::Success));
+    console.offer(&event(EventKind::PingProbe, Outcome::Success));
     let stats = console.shutdown(Duration::from_secs(1)).await;
     assert!(!stats.disabled);
     assert_eq!(stats.dropped_events, 0);
@@ -220,12 +310,12 @@ async fn full_queue_drops_only_console_events_and_shutdown_is_bounded() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn blocked_console_drops_do_not_remove_durable_csv_rows() {
-    let journal = Journal::from_writer(Vec::new()).unwrap();
+    let journal = JournalWriter::from_writer(Vec::new()).unwrap();
     let console = Console::spawn(ConsoleMode::Jsonl, PendingWriter, 1, |_| {});
     let mut coordinator = OutputCoordinator::new(journal, console);
     for index in 0..10 {
         let mut measurement = event(EventKind::PingProbe, Outcome::Success);
-        measurement.event_id = format!("event-{index}");
+        measurement.event_id = support::id(&format!("event-{index}"));
         coordinator.publish_batch(&[measurement]).unwrap();
     }
 
@@ -304,8 +394,8 @@ async fn broken_stdout_disables_console_once_without_payload_diagnostics() {
     let console = Console::spawn(ConsoleMode::Human, BrokenWriter, 8, move |diagnostic| {
         captured.lock().unwrap().push(diagnostic);
     });
-    let mut sensitive = event(EventKind::PingSummary, Outcome::Error);
-    sensitive.target = Some("access-token-must-not-appear".into());
+    let mut sensitive = event(EventKind::PingProbe, Outcome::Error);
+    sensitive.ping_target_ip = Some("access-token-must-not-appear".into());
     console.offer(&sensitive);
     tokio::task::yield_now().await;
     console.offer(&sensitive);

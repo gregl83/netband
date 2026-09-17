@@ -10,7 +10,9 @@ the network probes you configure and stores results on the machine where it runs
 
 Netband writes an authoritative CSV journal containing timestamps, configured ping
 targets, selected interface/source addresses, latency and loss, NDT7 server/remote
-addresses, throughput/TCP metrics, request status, and failure details. It also stores
+addresses, throughput/TCP metrics, request status, and failure details. Session records
+also include the command name (without its arguments), Netband version, process ID,
+and UUIDs linking runs and events. It also stores
 scheduler state, backups, a reservation ledger, and a lock file so provider limits and
 cooldowns survive restart. Operational stderr may contain the same categories of
 diagnostic data and is retained according to your terminal, redirection, or journald

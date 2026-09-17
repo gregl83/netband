@@ -1,7 +1,10 @@
 console = "off"
 verbosity = "info"
 interfaces = []
-output = "/var/lib/netband/netband.csv"
+output_dir = "/var/lib/netband/measurements"
+# Rotate daily at UTC midnight or at 64 MiB, whichever comes first.
+# A complete batch may exceed this soft limit. Segments are never auto-deleted.
+rotate_max_bytes = 67108864
 state_file = "/var/lib/netband/scheduler.json"
 shutdown_grace = "30s"
 

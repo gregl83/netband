@@ -28,12 +28,14 @@ measurement bytes nor measurement time. Incoming control messages remain respons
 while writes are blocked.
 
 A terminal bandwidth `success` means both rates are available, not that shutdown was
-clean. Unexpected transport errors and cleanup timeouts remain diagnostics. See
-[Data format](data-format.md).
+clean. Unexpected transport errors and cleanup timeouts remain diagnostics. Whole-test
+timeout or cancellation retains completed direction measurements while preserving the
+terminal outcome; unfinished direction counters remain unavailable. See
+[Data format](data-format.md#outcomes).
 
 ## Reference-client benchmark
 
-The current release build was compared with M-Lab's Go `ndt7-client` on
+The Netband build identified below was compared with M-Lab's Go `ndt7-client` on
 **2026-09-06 UTC**: twenty pairs, forty sequential measurements, against the same
 operator-authorized Akamai Cloud NDT7 server from one Wi-Fi-connected Linux host.
 Netband ran first in odd-numbered pairs and Go ran first in even-numbered pairs.
@@ -78,15 +80,14 @@ between the two clients' median rates.
 
 Intervals use 20,000 bootstrap resamples of adjacent two-pair blocks, preserving
 both run orders within each block. They are exploratory: longer-term path
-variation is not controlled. This is a comparison with the reference, not an
-isolated A/B test of the TCP buffer change.
+variation is not controlled. The results describe the clients as a whole and do
+not isolate the effect of TCP buffering.
 
 All forty runs completed with both direction rates and no recorded diagnostics.
 Netband's download median was 6.94% higher than Go's, and its median paired
-advantage was 7.28%. Netband was faster in 13 of 20 download pairs. The aggregate
-10% download deficit did not recur in this run.
+advantage was 7.28%. Netband was faster in 13 of 20 download pairs.
 
-The order effect remains substantial: Netband's median paired difference was
+The order effect was substantial: Netband's median paired difference was
 -4.96% when it ran first and +11.48% when it ran second. The positive aggregate
 result therefore does not establish an order-independent speed advantage. The
 exploratory download interval was +2.43% to +12.17% under the stated resampling
@@ -111,11 +112,33 @@ writes are backpressured. Upload unit and contract tests exercise:
 - incoming Ping, measurement and Close messages during backpressure;
 - partial-frame integrity, exact byte accounting and adaptive payload limits;
 - early disconnects, no-data closure and retained diagnostics;
-- cancellation, whole-test timeout and load-phase retention during cleanup.
+- cancellation and whole-test timeout across setup and transfer stages;
+- completed-direction and diagnostic retention, including interrupted upload cleanup;
+- unchanged reservation accounting and load-phase retention during cleanup.
 
 Monitoring contracts verify concurrent pings and serialized bandwidth execution.
 Published-data contracts verify the paired dataset, sanitized fields, and agreement
 between the dataset, generated summary and documented medians.
+
+## Analyze recorded data offline
+
+Python 3 can regenerate the recorded summaries without installing Netband or contacting
+a measurement server. Run from the repository root, writing results separately from
+the checked-in evidence:
+
+```sh
+python3 scripts/summarize-ndt7-benchmark.py \
+  docs/benchmarks/2026-09-06-akamai/measurements.csv \
+  .netband/research-example
+python3 scripts/analyze-ndt7-benchmark.py \
+  docs/benchmarks/2026-09-06-akamai/measurements.csv \
+  .netband/research-example
+```
+
+Compare the generated `summary.json` and `paired-analysis.json` with the checked-in
+files. This reproduces the analysis of the recorded data, not a new network experiment
+or validation of a different executable. Keep the accompanying build metadata with
+the dataset.
 
 ## Reproduce the comparison
 
@@ -136,16 +159,8 @@ accepted, so `ndt.example.com 4 10` gives a quick four-pair screen. Use
 
 Raw output and generated summaries default to the Git-ignored `.netband/benchmarks/`
 directory. Raw journals can contain client addresses; publish only whitelisted
-measurement fields. To regenerate the checked-in summary from the sanitized data:
-
-```sh
-python3 scripts/summarize-ndt7-benchmark.py \
-  docs/benchmarks/2026-09-06-akamai/measurements.csv \
-  docs/benchmarks/2026-09-06-akamai
-python3 scripts/analyze-ndt7-benchmark.py \
-  docs/benchmarks/2026-09-06-akamai/measurements.csv \
-  docs/benchmarks/2026-09-06-akamai
-```
+measurement fields. To regenerate the checked-in summary from the sanitized data,
+use the [offline analysis commands](#analyze-recorded-data-offline).
 
 The benchmark harness runs both shared analysis scripts automatically. Each accepts
 a measurements CSV and an optional output directory, defaulting to the CSV's
@@ -164,3 +179,22 @@ Retain exact binaries, hashes, source revisions, native counters and timing
 boundaries. Compare distributions, paired differences, run order and diagnostic
 counts. Repeat under other conditions before generalizing. See
 [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md).
+
+## Research use
+
+Start with the [recorded-data analysis](#analyze-recorded-data-offline)
+to inspect the benchmark without sending network traffic. Preserve the executable
+hash, source revision, effective configuration, and measurement environment with
+each study's CSV journals. The journal records session and measurement-run lifecycles,
+results, request failures, and scheduler decisions. UUIDs and explicit parent references
+link related events; see the [data contract](data-format.md).
+Review addresses and diagnostics before sharing data;
+token redaction does not anonymize a journal.
+
+Netband measures ICMP latency/loss and one TCP/WebSocket stream per NDT7 direction.
+These observations do not isolate an ISP as a cause or establish cluster interconnect,
+MPI, or RDMA performance. The recorded comparison covers one host and one server.
+
+Provider limits are enforced per scheduler state file. Separate hosts or independent
+state files do not share a budget. Coordinate targets, aggregate traffic, and provider
+authorization with the network operator before deploying across shared infrastructure.

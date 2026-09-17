@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::config::{BandwidthConfig, DirectConfig, MlabConfig, ProviderConfig};
-use crate::model::{ErrorKind, Outcome, ProviderKind, RequestStage};
+use crate::model::{ErrorKind, Outcome, ProviderKind, RequestDirection, RequestId, RequestStage};
 
 pub const USER_AGENT: &str = concat!("netband/", env!("CARGO_PKG_VERSION"));
 const DOWNLOAD_KEY: &str = "wss:///ndt/v7/download";
@@ -36,17 +36,23 @@ pub enum FailureDisposition {
 
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
+    pub elapsed: Duration,
+    pub(crate) finished_monotonic: tokio::time::Instant,
+    pub started_at_utc: DateTime<Utc>,
+    pub finished_at_utc: DateTime<Utc>,
+    pub direction: Option<RequestDirection>,
     pub stage: RequestStage,
     pub outcome: Outcome,
     pub error_kind: ErrorKind,
     pub message: String,
-    pub server: Option<String>,
-    pub source_ip: Option<IpAddr>,
+    pub server_name: Option<String>,
+    pub request_url: Option<String>,
+    pub local_ip: Option<IpAddr>,
     pub remote_ip: Option<IpAddr>,
     pub os_error_code: Option<i32>,
-    pub attempt: u32,
+    pub request_id: RequestId,
     pub http_status: Option<u16>,
-    pub retry_after: Option<Duration>,
+    pub retry_after: Option<RetryAfter>,
     pub disposition: FailureDisposition,
 }
 
@@ -55,19 +61,26 @@ impl RequestFailure {
         stage: RequestStage,
         error_kind: ErrorKind,
         message: impl Into<String>,
-        server: Option<String>,
-        attempt: u32,
+        request_url: Option<String>,
+        request_id: impl Into<RequestId>,
     ) -> Self {
+        let now = Utc::now();
         Self {
+            elapsed: Duration::ZERO,
+            finished_monotonic: tokio::time::Instant::now(),
+            started_at_utc: now,
+            finished_at_utc: now,
+            direction: None,
             stage,
             outcome: Outcome::Error,
             error_kind,
             message: message.into(),
-            server,
-            source_ip: None,
+            server_name: None,
+            request_url,
+            local_ip: None,
             remote_ip: None,
             os_error_code: None,
-            attempt,
+            request_id: request_id.into(),
             http_status: None,
             retry_after: None,
             disposition: FailureDisposition::Terminal,
@@ -86,7 +99,10 @@ pub async fn resolve_endpoints(
     config: &BandwidthConfig,
     interface: Option<&str>,
 ) -> EndpointResolution {
-    match &config.provider {
+    let request_id = RequestId::new();
+    let started_at = Utc::now();
+    let started_monotonic = tokio::time::Instant::now();
+    let mut resolution = match &config.provider {
         ProviderConfig::Direct(direct) => resolve_direct(config, direct),
         ProviderConfig::Mlab(mlab) if mlab.policy_accepted => {
             resolve_mlab(config, mlab, interface).await
@@ -99,10 +115,22 @@ pub async fn resolve_endpoints(
                 ErrorKind::PermissionDenied,
                 "M-Lab bandwidth requires explicit policy acceptance",
                 Some(mlab.locate_url.to_string()),
-                0,
+                RequestId::new(),
             )),
         },
+    };
+    for failure in resolution
+        .failures
+        .iter_mut()
+        .chain(resolution.terminal.iter_mut())
+    {
+        failure.request_id = request_id;
+        failure.started_at_utc = started_at;
+        failure.elapsed = failure
+            .finished_monotonic
+            .saturating_duration_since(started_monotonic);
     }
+    resolution
 }
 
 fn resolve_direct(config: &BandwidthConfig, direct: &DirectConfig) -> EndpointResolution {
@@ -146,7 +174,7 @@ async fn resolve_mlab(
                 ErrorKind::Connect,
                 message,
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -158,7 +186,7 @@ async fn resolve_mlab(
                 ErrorKind::Connect,
                 format!("cannot configure Locate client: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -180,16 +208,18 @@ async fn resolve_mlab(
                 kind,
                 format!("Locate request failed: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
 
+    let received_at = Utc::now();
+    let received_monotonic = tokio::time::Instant::now();
     let status = response.status();
     let retry_after_present = response
         .headers()
         .contains_key(reqwest::header::RETRY_AFTER);
-    let retry_after = parse_retry_after(response.headers(), SystemTime::now());
+    let retry_after = parse_retry_after(response.headers(), received_at);
     if status != StatusCode::OK {
         let (outcome, base_message) = match status {
             StatusCode::NO_CONTENT => (Outcome::NoCapacity, "Locate returned no capacity"),
@@ -207,15 +237,21 @@ async fn resolve_mlab(
             (false, _) => "Retry-After missing",
         };
         return terminal_resolution(RequestFailure {
+            elapsed: Duration::ZERO,
+            finished_monotonic: received_monotonic,
+            started_at_utc: received_at,
+            finished_at_utc: received_at,
+            direction: None,
             stage: RequestStage::Locate,
             outcome,
             error_kind: ErrorKind::HttpStatus,
             message: format!("{base_message}; {retry_detail}"),
-            server: Some(mlab.locate_url.to_string()),
-            source_ip: None,
+            server_name: None,
+            request_url: Some(mlab.locate_url.to_string()),
+            local_ip: None,
             remote_ip: None,
             os_error_code: None,
-            attempt: 1,
+            request_id: RequestId::new(),
             http_status: Some(status.as_u16()),
             retry_after,
             disposition: FailureDisposition::ProviderWide,
@@ -230,7 +266,7 @@ async fn resolve_mlab(
                 ErrorKind::Protocol,
                 format!("cannot read Locate response: {error}"),
                 Some(mlab.locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
@@ -250,20 +286,30 @@ pub fn parse_locate_candidates(
                 ErrorKind::Protocol,
                 format!("invalid Locate response: {error}"),
                 Some(locate_url.to_string()),
-                1,
+                RequestId::new(),
             ));
         }
     };
+    let request_id = RequestId::new();
     let mut candidates = Vec::new();
     let mut failures = Vec::new();
-    for (index, result) in body.results.into_iter().enumerate() {
-        let attempt = index as u32 + 1;
+    for result in body.results {
         let Some(download) = result.urls.get(DOWNLOAD_KEY) else {
-            failures.push(missing_url_failure(&result.machine, DOWNLOAD_KEY, attempt));
+            failures.push(missing_url_failure(
+                &result.machine,
+                DOWNLOAD_KEY,
+                request_id,
+                locate_url,
+            ));
             continue;
         };
         let Some(upload) = result.urls.get(UPLOAD_KEY) else {
-            failures.push(missing_url_failure(&result.machine, UPLOAD_KEY, attempt));
+            failures.push(missing_url_failure(
+                &result.machine,
+                UPLOAD_KEY,
+                request_id,
+                locate_url,
+            ));
             continue;
         };
         let parsed = Url::parse(download)
@@ -271,13 +317,15 @@ pub fn parse_locate_candidates(
             .zip(Url::parse(upload).ok())
             .filter(|(download, upload)| download.scheme() == "wss" && upload.scheme() == "wss");
         let Some((download_url, upload_url)) = parsed else {
-            failures.push(RequestFailure::simple(
+            let mut failure = RequestFailure::simple(
                 RequestStage::Locate,
                 ErrorKind::Protocol,
                 "Locate candidate has invalid or insecure NDT7 URLs",
-                Some(result.machine),
-                attempt,
-            ));
+                Some(locate_url.to_string()),
+                request_id,
+            );
+            failure.server_name = Some(result.machine);
+            failures.push(failure);
             continue;
         };
         candidates.push(EndpointCandidate {
@@ -297,7 +345,7 @@ pub fn parse_locate_candidates(
             ErrorKind::Protocol,
             "Locate returned no usable secure NDT7 targets",
             Some(locate_url.to_string()),
-            1,
+            request_id,
         )
     });
     EndpointResolution {
@@ -307,14 +355,20 @@ pub fn parse_locate_candidates(
     }
 }
 
-fn missing_url_failure(machine: &str, key: &str, attempt: u32) -> RequestFailure {
+fn missing_url_failure(
+    machine: &str,
+    key: &str,
+    request_id: impl Into<RequestId>,
+    locate_url: &Url,
+) -> RequestFailure {
     let mut failure = RequestFailure::simple(
         RequestStage::Locate,
         ErrorKind::Protocol,
         format!("Locate candidate is missing {key}"),
-        Some(machine.to_owned()),
-        attempt,
+        Some(locate_url.to_string()),
+        request_id,
     );
+    failure.server_name = Some(machine.to_owned());
     failure.disposition = FailureDisposition::TryNextTarget;
     failure
 }
@@ -327,27 +381,34 @@ fn terminal_resolution(failure: RequestFailure) -> EndpointResolution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryAfter {
+    pub delay: Duration,
+    pub deadline: DateTime<Utc>,
+}
+
 pub fn parse_retry_after(
     headers: &reqwest::header::HeaderMap,
-    now: SystemTime,
-) -> Option<Duration> {
+    received_at: DateTime<Utc>,
+) -> Option<RetryAfter> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    parse_retry_after_value(value, now)
+    parse_retry_after_value(value, received_at)
 }
 
-pub fn parse_retry_after_value(value: &str, now: SystemTime) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+pub fn parse_retry_after_value(value: &str, received_at: DateTime<Utc>) -> Option<RetryAfter> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let delay = Duration::from_secs(value.parse().ok()?);
+        // A valid delay beyond the UTC range must not remove the provider's limit.
+        let deadline = chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delay| received_at.checked_add_signed(delay))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        return Some(RetryAfter { delay, deadline });
     }
-    httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(now)
-        .ok()
-}
-
-pub fn retry_until(now: DateTime<Utc>, delay: Option<Duration>) -> Option<DateTime<Utc>> {
-    let delay = chrono::Duration::from_std(delay?).ok()?;
-    now.checked_add_signed(delay)
+    let deadline = DateTime::<Utc>::from(httpdate::parse_http_date(value).ok()?);
+    let delay = (deadline - received_at).to_std().unwrap_or_default();
+    Some(RetryAfter { delay, deadline })
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,5 +467,50 @@ fn bind_http_interface(
             "binding Locate requests to interface {interface} is unsupported"
         )),
         None => Ok(builder),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_deadlines_preserve_dates_and_check_numeric_boundaries() {
+        let received = DateTime::from_timestamp(120, 500_000_000).unwrap();
+        for seconds in [0, 60, 172_800, u64::MAX] {
+            let retry = parse_retry_after_value(&seconds.to_string(), received).unwrap();
+            assert_eq!(retry.delay, Duration::from_secs(seconds));
+            let expected = if seconds == u64::MAX {
+                DateTime::<Utc>::MAX_UTC
+            } else {
+                received + chrono::Duration::seconds(seconds as i64)
+            };
+            assert_eq!(retry.deadline, expected);
+        }
+        assert_eq!(
+            parse_retry_after_value("1", DateTime::<Utc>::MAX_UTC)
+                .unwrap()
+                .deadline,
+            DateTime::<Utc>::MAX_UTC
+        );
+        for (date, seconds, delay_ms) in [
+            ("Thu, 01 Jan 1970 00:01:00 GMT", 60, 0),
+            ("Thu, 01 Jan 1970 00:02:00 GMT", 120, 0),
+            ("Thu, 01 Jan 1970 00:03:00 GMT", 180, 59_500),
+        ] {
+            let retry = parse_retry_after_value(date, received).unwrap();
+            assert_eq!(
+                retry.deadline,
+                DateTime::from_timestamp(seconds, 0).unwrap()
+            );
+            assert_eq!(retry.delay, Duration::from_millis(delay_ms));
+        }
+        for value in ["", "later", "-1", "+1", "1.5", "18446744073709551616"] {
+            assert_eq!(parse_retry_after_value(value, received), None, "{value}");
+        }
+        assert_eq!(
+            parse_retry_after_value(" 60 ", received),
+            parse_retry_after_value("60", received)
+        );
     }
 }

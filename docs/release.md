@@ -1,47 +1,126 @@
-# Release validation
+# Release maintenance
 
-Netband is not tagged `v1.0.0` until every item below has current evidence. Tests use
-local NDT7 and Locate servers unless a human explicitly opts into a live provider run.
+This guide describes the repository's release checks, artifacts, and publication
+workflow. For installation and service operation, see [Service operation](service.md).
+For recorded measurement evidence, see [NDT7 validation](ndt7-validation.md).
 
-## Automated gates
+## Source validation
 
-Run from a clean checkout with Rust 1.98:
+Run from the repository root with Rust 1.98 and `cargo-deny` installed:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo deny check
+python3 -m unittest discover -s scripts -p 'test_*.py'
 bash scripts/smoke-installer-linux.sh
 bash scripts/smoke-readme-linux.sh
 bash scripts/smoke-release-linux.sh
+cargo package --locked
 ```
 
-The release smoke builds with `--release --locked`, enforces a 25 MiB binary ceiling,
-requires `--version` startup in under two seconds, verifies help/config commands, parses
-the v1 fixture with Python's CSV implementation, and executes local NDT7 and Locate
-mocks. CI runs the quality/MSRV/release job on Linux x86_64 and cross-builds aarch64 with
-the GNU linker before executing help/version/config under QEMU. A separate CI job runs
-the test suite with `cargo-llvm-cov`, uploads LCOV to Codecov using `CODECOV_TOKEN`, and
-retains the raw report as a workflow artifact.
+The [CI workflow](../.github/workflows/ci.yml) runs source checks and Linux x86_64
+release smoke tests. A separate job cross-builds aarch64 and runs startup/configuration
+checks under QEMU. The release smoke uses local NDT7 and Locate fixtures, checks the
+CSV fixture with Python, and enforces binary size and startup-time limits.
 
-## Release publication
+These checks do not establish physical Raspberry Pi compatibility or qualify every
+GNU/Linux runtime. Record the source commit, toolchain, platform, binary hash, and
+results when reporting validation.
 
-Publishing a GitHub release is the only trigger for `.github/workflows/cd.yml`. Its tag
-must be exactly `v<crate-version>`; for example, crate version `1.0.0` requires tag
-`v1.0.0`. The workflow checks formatting, Clippy, tests, dependency policy, and package
-construction before the publishing job starts. Only the final step receives the
-`CARGO_REGISTRY_TOKEN` secret and runs `cargo publish` against crates.io.
+## Service and hardware validation
 
-The workflow also builds GNU/Linux x86_64 and aarch64 archives and publishes a SHA-256
-file beside each archive. The static `netband-installer.sh` downloads both files from
-the same GitHub release, verifies the archive before extraction, rejects unexpected
-archive entries, and installs through a temporary file in the destination directory.
-Release jobs check out the event's commit SHA, and third-party actions in the publishing
-workflow are pinned to complete commit SHAs.
+On a disposable Linux test host, run:
 
-Every release asset receives a GitHub artifact attestation from the pinned CD workflow.
-After downloading an asset, verify both its checksum and build provenance:
+```sh
+sudo bash scripts/smoke-service-linux.sh
+```
+
+After installing the binary, configuration, and unit using the
+[service instructions](service.md), exercise systemd integration:
+
+```sh
+sudo bash scripts/smoke-systemd-linux.sh
+```
+
+The systemd smoke replaces the installed example unit and starts, restarts, and stops
+`netband.service`. Use a test configuration with bandwidth disabled unless a live
+provider run has been explicitly authorized. For a Raspberry Pi hardware result,
+record the board model, OS/kernel, architecture, and command results from the board.
+
+Live NDT7 comparisons are separate from local smoke tests. Follow the
+[comparison procedure](ndt7-validation.md#reproduce-the-comparison) with an authorized
+endpoint and retain the measured executable's identity with the results.
+
+## Publication workflow
+
+Before publishing, check that README installation commands lead to binaries with the
+advertised CLI and that linked reference docs match the release. Keep the source-build
+tag in [installation](install.md) aligned with the package version.
+
+The [CD workflow](../.github/workflows/cd.yml) separates preparation from publication.
+The workflow must be present on the default branch to enable manual dispatch.
+
+### Prepare a draft
+
+In **Actions → CD → Run workflow**, select the release branch and enter the package
+version, such as `1.0.0`. Equivalently:
+
+```sh
+gh workflow run cd.yml --ref release/v1.0.0 -f version=1.0.0
+```
+
+The workflow captures the selected ref's commit when dispatched. Every checkout uses
+that exact commit, even if the branch advances. Preparation:
+
+1. Checks the version, formatting, lint, tests, installer fixtures, dependency policy,
+   and crate package.
+2. Builds GNU/Linux x86_64 and aarch64 binaries with Rust 1.98 on Ubuntu 22.04.
+   Checksums and extracts each archive, audits its ELF runtime requirements, then
+   tests version, help, and configuration in Ubuntu 22.04 containers with networking
+   disabled (aarch64 uses QEMU). glibc requirements above 2.35, an unexpected loader,
+   architecture, or shared library fail preparation. Each `runtime-<target>` Actions
+   artifact records the actual glibc symbol requirement and shared libraries.
+3. Attests all seven assets and verifies their source commit and workflow identity.
+4. Creates `v1.0.0` at the validated commit and a **draft** release, uploads the assets,
+   then downloads and verifies them again.
+
+A successful run leaves a public Git tag and an unpublished draft release. An existing
+tag must point to the same commit; preparation never moves it. A draft for that commit
+can be retried, replacing its assets while preserving release notes. A published
+release is rejected. Failed uploads can leave a partial draft: wait for a successful
+preparation run before publishing it.
+
+### Publish the prepared draft
+
+Review the successful preparation run, all seven assets, and the release notes, then
+publish the draft in GitHub's Releases page. Publishing triggers CD to verify the
+asset checksums and attestations against the released commit, then publish the crate
+through the `crates-io` environment. It does not rebuild or replace the binary assets.
+An already published crate version is skipped.
+
+Do not create a separate release or publish from automation using `GITHUB_TOKEN`;
+that token's release events do not start another workflow. Configure the `crates-io`
+environment and its `CARGO_REGISTRY_TOKEN` secret before publication.
+
+The binaries are available when the draft becomes public; crates.io publication
+follows. Confirm both destinations before announcing availability. These archive
+checks establish the [glibc 2.35 user-space baseline](install.md#runtime-requirements),
+not physical Raspberry Pi compatibility or a minimum kernel version.
+
+## Release assets
+
+| Asset | Contents |
+| --- | --- |
+| `netband-x86_64-unknown-linux-gnu.tar.gz` | x86_64 `netband` executable |
+| `netband-aarch64-unknown-linux-gnu.tar.gz` | aarch64 `netband` executable |
+| Each archive's `.sha256` file | SHA-256 checksum for that archive |
+| `netband-installer.sh` | Shell installer |
+| `netband.toml` | Example service configuration |
+| `netband.service` | Example systemd unit |
+
+With an archive and its checksum downloaded into the same directory, verify them:
 
 ```sh
 sha256sum --check netband-x86_64-unknown-linux-gnu.tar.gz.sha256
@@ -50,70 +129,5 @@ gh attestation verify netband-x86_64-unknown-linux-gnu.tar.gz \
   --signer-workflow gregl83/netband/.github/workflows/cd.yml
 ```
 
-The workflow does not overwrite existing assets. A failed or partially published
-release must be replaced with a new release version rather than repaired in place.
-
-The `published` event includes GitHub prereleases. Publish a prerelease only when the
-matching Cargo version also contains the intended SemVer prerelease suffix.
-
-## Architecture evidence
-
-| Target | Required evidence | Current result |
-| --- | --- | --- |
-| Linux x86_64 | Clean release build, README/release smoke, privileged service/systemd smoke | Passed 2026-08-31; Phase 8 systemd PID 1 smoke passed 2026-08-30 |
-| Linux aarch64 | Release build and QEMU startup/config smoke | Passed under QEMU 2026-08-31 |
-| Raspberry Pi hardware | 64-bit Pi build, ICMP, SIGTERM, CSV parse, optional authorized NDT7 | Required before a hardware-qualified release claim; QEMU does not replace it |
-
-On real Raspberry Pi hardware run:
-
-```sh
-cargo build --release --locked
-bash scripts/smoke-release-linux.sh
-sudo bash scripts/smoke-service-linux.sh
-```
-
-Then install the example unit, run `scripts/smoke-systemd-linux.sh`, and independently
-parse the resulting CSV. Record model, OS, architecture, Rust version, command results,
-and whether NDT7 used M-Lab consent or an authorized direct endpoint.
-
-## Live session gate
-
-A release operator must explicitly choose one provider:
-
-1. Review [PRIVACY.md](../PRIVACY.md) and both M-Lab policies, then run one manual M-Lab
-   NDT7 test with `--accept-mlab-policy`; or
-2. Use an authorized operator-owned direct NDT7 endpoint and its documented policy.
-
-Use one journal for a default-target ping and bandwidth run:
-
-```sh
-netband --output release-live.csv once ping
-netband --output release-live.csv --accept-mlab-policy once bandwidth
-```
-
-Do not run the second command without consent. Parse `release-live.csv` with the Python
-snippet in [CSV schema and outcomes](data-format.md) and require valid `ping_probe`,
-`ping_summary`, and `bandwidth` rows. Record the date, provider kind (not credentials),
-row count, exit statuses, and parser result in the Phase 9 decision log. Do not commit
-the live journal because it can contain public/source IP and endpoint data.
-
-The 2026-08-31 validation used the default timestamped output paths, producing one ping
-journal and one bandwidth journal instead of the single explicitly named journal above.
-Both were parsed independently and are equivalent evidence for this gate; neither is
-committed because they contain network metadata.
-
-## Final checklist
-
-- [x] All nine implementation phases and decision entries are current.
-- [x] Formatting, Clippy, tests, MSRV, dependency/license, and release builds pass.
-- [x] Linux x86_64 and aarch64 evidence is current.
-- [x] Raspberry Pi hardware evidence is current or the release is explicitly described
-  as CI/QEMU-qualified rather than hardware-qualified.
-- [x] Consented live CSV journals contain independently parsed ping and bandwidth rows.
-- [x] `Cargo.toml` metadata, `Cargo.lock`, README, privacy, examples, and service files
-  are included in `cargo package --list`.
-- [ ] Package version is changed to `1.0.0`, `cargo package --locked` succeeds, and only
-  then is the signed `v1.0.0` tag created.
-
-The package version is defined in `Cargo.toml`. Do not create a release tag or claim
-release readiness until the required live/provider and hardware evidence is available.
+The attestation command requires GitHub access. Keep the version, source identity,
+and artifact hash with any measurements made using a released binary.

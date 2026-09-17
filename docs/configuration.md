@@ -1,5 +1,11 @@
 # Configuration and providers
 
+For a first measurement, start with [quick tests](usage.md). This page is the full
+reference for customizing targets, interfaces, providers, and output.
+
+[Options](#cli-options-and-defaults) · [Result storage](#default-result-storage) ·
+[Scheduler state](#scheduler-state) · [M-Lab](#m-lab-provider) · [Direct servers](#direct-provider)
+
 Netband reads one optional TOML file, then applies CLI overrides. Scalar CLI values
 replace TOML values. Repeated `--interface` and `--ping-target` values replace, rather
 than extend, their TOML lists. Relative paths are resolved from the current directory.
@@ -14,27 +20,51 @@ netband --config examples/netband.toml --ping-interval 10s config check
 
 The complete default-oriented file is [examples/netband.toml](../examples/netband.toml).
 The service file is [packaging/netband.toml](../packaging/netband.toml). `output` and
-`output_dir` are mutually exclusive.
+`output_dir` are mutually exclusive. `rotate_max_bytes` requires directory output;
+combining it with a resolved fixed-file target is an error, including when the size
+setting comes from TOML and `--output` comes from the CLI. Remove the size setting to
+switch to a fixed file. Sizes are integer bytes, not strings such as `64MiB`.
+
+Directory output rotates before the first nonempty batch on a later UTC date, or
+before the next batch would exceed `rotate_max_bytes`. A batch stays together, so a
+segment may exceed the limit by one batch. The `run` default has daily rotation but
+no size trigger; the service example adds a 64 MiB threshold. Files are never
+auto-deleted. Use one rotating output directory per running process. Explicit
+directories must already exist; default storage is created automatically.
+See [CSV rotation and recovery](data-format.md#rotating-directory-output).
 
 ## CLI options and defaults
 
 Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
+
+### General and output
 
 | CLI option | TOML key | Default / behavior |
 | --- | --- | --- |
 | `--config FILE` | n/a | No file; load the named TOML before CLI overrides |
 | `--console auto\|human\|jsonl\|off` | `console` | `auto` for `run`/`config check`; `human` for `once`; `auto` is human on a TTY and off otherwise |
 | `--verbosity error\|warn\|info\|debug\|trace` | `verbosity` | `info` |
+| `--output FILE` | `output` | Unset; when selected, append to a single CSV without rotation |
+| `--output-dir DIR` | `output_dir` | Explicit rotating directory; defaults use application state storage (see below) |
+| `--rotate-max-bytes BYTES` | `rotate_max_bytes` | Unset; optional positive soft size limit for directory output, including the header |
+| `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
+| `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
+
+### Ping and interfaces
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
 | `--interface NAME` (repeatable) | `interfaces` | Empty; use the default route |
 | `--ping-target IP` (repeatable) | `ping.targets` | `1.1.1.1`, `8.8.8.8`, `9.9.9.9` |
 | `--ping-interval DURATION` | `ping.interval` | `5s` |
 | `--ping-timeout DURATION` | `ping.timeout` | `2s` per probe |
+
+### Bandwidth and providers
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
 | `--no-bandwidth` | n/a | False; disable automatic bandwidth work for this `run` |
 | `--force` | n/a | False; for `once bandwidth`, bypass configured cap, spacing, and cooldown for this attempt; M-Lab consent and its hard four-start daily cap still apply |
-| `--output FILE` | `output` | No fixed file; create a timestamped CSV in the current directory |
-| `--output-dir DIR` | `output_dir` | Current directory when neither output option is set |
-| `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
-| `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
 | `--ndt-provider mlab\|direct` | `bandwidth.provider` | `mlab` |
 | `--mlab-locate-url URL` | `bandwidth.mlab.locate_url` | M-Lab Locate v2 NDT7 URL; override is intended for testing |
 | `--ndt-target HOST[:PORT]` | `bandwidth.direct.target` | None; direct provider only; generates standard NDT7 paths |
@@ -43,10 +73,16 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--ndt-tls-server-name DNS_NAME` | `bandwidth.direct.tls_server_name` | None; TLS identity for an IP connection |
 | `--ndt-ca-cert FILE` | `bandwidth.direct.ca_cert` | System/WebPKI roots only; add the named private CA bundle |
 | `--allow-insecure-ndt` | `bandwidth.direct.allow_insecure` | False; required for plain `ws://` on a trusted private network |
+| `--accept-mlab-policy` | `bandwidth.accept_mlab_policy` | False; explicit M-Lab AUP/privacy acknowledgement |
+
+### Scheduling and health triggers
+
+| CLI option | TOML key | Default / behavior |
+| --- | --- | --- |
 | `--bandwidth-daily-max COUNT` | `bandwidth.daily_max` | `4`; `0` disables bandwidth; M-Lab rejects values above 4 |
 | `--bandwidth-min-spacing DURATION` | `bandwidth.min_spacing` | `36m`; direct minimum is at least timeout + shutdown margin and 60s |
 | `--bandwidth-slot-jitter-pct PERCENT` | `bandwidth.slot_jitter_pct` | `50`, range 0-100 |
-| `--bandwidth-timeout DURATION` | `bandwidth.whole_test_timeout` | `55s` for discovery, download, and upload together |
+| `--bandwidth-timeout DURATION` | `bandwidth.whole_test_timeout` | `55s` for discovery, download, upload, and cleanup together; completed directions survive timeout |
 | `--bandwidth-shutdown-margin DURATION` | `bandwidth.shutdown_margin` | `15s` reserved for clean cancellation |
 | `--loss-window-rounds ROUNDS` | `bandwidth.trigger.window_rounds` | `6` rounds |
 | `--loss-min-samples COUNT` | `bandwidth.trigger.min_samples` | `6` probes |
@@ -57,10 +93,22 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--pending-trigger-ttl DURATION` | `bandwidth.trigger.pending_ttl` | `30m` |
 | `--cooldown-initial DURATION` | `bandwidth.cooldown.initial` | `60s` |
 | `--cooldown-max DURATION` | `bandwidth.cooldown.max` | `16m` |
-| `--accept-mlab-policy` | `bandwidth.accept_mlab_policy` | False; explicit M-Lab AUP/privacy acknowledgement |
 
 `run`, `once ping`, `once bandwidth`, and `config check` are subcommands, not TOML
 values. CLI help is authoritative for spelling: `netband --help`.
+
+## Default result storage
+
+Without `output` or `output_dir`, journals live under the platform state directory
+listed below: `journals/once/` for unique one-shot CSVs and `journals/run/` for rotating
+continuous output. `--state-file` changes scheduler storage only, not journal paths.
+Default journal directories are created when measurements start; `config check`
+validates the nearest existing ancestor and reports the `run` destination without
+creating anything. Explicit output directories must already exist.
+
+One-shot defaults do not rotate. To use `--rotate-max-bytes` with `once`, explicitly
+select `--output-dir`. CLI output settings override TOML as before. Each opened CSV
+path is printed to stderr regardless of console mode or log verbosity.
 
 ## Scheduler state
 
@@ -74,8 +122,14 @@ The default scheduler file is independent of the current working directory:
 
 If no platform home directory is available, Netband falls back to
 `.netband/state/scheduler.json` under the current directory. `--state-file` and the
-TOML `state_file` key always override these defaults. System services should continue
-to use an explicitly managed state path such as `/var/lib/netband/scheduler.json`.
+TOML `state_file` key always override these defaults. System services should use an
+explicitly managed state path such as `/var/lib/netband/scheduler.json`.
+
+The snapshot's accounting log and checkpoint must remain together. See
+[State recovery](service.md#state-recovery) before restoring or moving
+scheduler files; replacing only the snapshot does not reset provider allowances.
+State filenames ending in `.lock`, `.bak`, or `.initialized` conflict with recovery
+files and are rejected.
 
 ## M-Lab provider
 
@@ -138,6 +192,13 @@ netband --ndt-provider direct \
   --allow-insecure-ndt config check
 ```
 
+Private CA bundles are parsed during local preflight. Missing, unreadable, empty, or
+invalid certificate bundles fail before output/state creation or network activity.
+TLS setup reads the bundle again, so changes after preflight can still cause failure.
+Local validation does not verify the remote server's identity or availability.
+CA and server-name options apply to each `wss` direction and require at least one
+secure endpoint. Any `ws` direction still requires `--allow-insecure-ndt`.
+
 A CDN-hosted endpoint uses the same DNS form, for example an operator-controlled
 `ndt.customer.example.invalid` name whose DNS is placed behind that operator's CDN.
 Netband does not supply, discover, endorse, or imply a public Akamai NDT7 endpoint.
@@ -146,4 +207,4 @@ with that provider's terms and traffic policy.
 
 URLs may contain operator query parameters, but credentials embedded in URL userinfo
 are rejected. Query values are removed from logs, stdout, provider fingerprints, and
-the CSV `server` field. Prefer a protected config file if an endpoint requires a token.
+the CSV `request_url` field. Prefer a protected config file if an endpoint requires a token.

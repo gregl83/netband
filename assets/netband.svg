@@ -1,57 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="514.5" height="323" viewBox="62.75 38.5 514.5 323"
+     preserveAspectRatio="xMidYMid meet"
+     role="img" aria-labelledby="nm-title nm-desc">
+  <title id="nm-title">Network monitoring — neon green logo</title>
+  <desc id="nm-desc">A smooth green network pulse with five connection nodes,
+    a circular inner ring, and a dashed circular outer ring. Transparent
+    background, fine dark-green edging, and a controlled neon glow that works
+    on both black and white backgrounds.</desc>
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="50 110 412 290" width="100%" height="100%">
-    <defs>
-        <!-- High-Tech Blue-Green to Orange Gradient -->
-        <linearGradient id="pulse-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#00D2FF" />
-            <stop offset="50%" stop-color="#00E676" />
-            <stop offset="100%" stop-color="#FF6D00" />
-        </linearGradient>
+  <defs>
+    <!-- Slightly less wide version: only the side leads are pulled in a bit. -->
+    <path id="nm-pulse" d="M 84,211
+            L 178,211 Q 189,211 197.50,204.02
+            L 210.82,193.08 Q 217,188 220.17,195.35
+            L 235.83,231.65 Q 239,239 240.59,231.16
+            L 272.81,71.88 Q 274,66 274.96,71.92
+            L 314.04,314.08 Q 315,320 316.23,314.13
+            L 352.77,139.87 Q 354,134 355.36,139.84
+            L 375.96,228.23 Q 378,237 382.50,229.21
+            L 399.50,199.79 Q 404,192 410.62,198.09
+            L 422.38,208.91 Q 429,215 434.68,208.01
+            L 449.32,189.99 Q 455,183 460.40,190.20
+            L 469.40,202.20 Q 476,211 487,211
+            L 556,211"/>
 
-        <!-- Ring Gradient -->
-        <linearGradient id="ring-grad" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="#00D2FF" stop-opacity="0.9" />
-            <stop offset="100%" stop-color="#FF6D00" stop-opacity="0.4" />
-        </linearGradient>
-    </defs>
+    <circle id="nm-inner" cx="320" cy="200" r="125"/>
+    <circle id="nm-outer" cx="320" cy="200" r="150"
+            stroke-dasharray="10 19.45243113"
+            stroke-dashoffset="5"/>
+    <g id="nm-nodes">
+      <circle cx="84" cy="211" r="10"/>
+      <circle cx="274" cy="66" r="10"/>
+      <circle cx="315" cy="320" r="10"/>
+      <circle cx="354" cy="134" r="10"/>
+      <circle cx="556" cy="211" r="10"/>
+    </g>
 
-    <!-- Outer Network Rings with dark stroke backing for contrast on white -->
-    <circle cx="256" cy="256" r="140" fill="none" stroke="#0B132B" stroke-width="12" stroke-dasharray="8 8" />
-    <circle cx="256" cy="256" r="140" fill="none" stroke="url(#ring-grad)" stroke-width="6" stroke-dasharray="8 8" />
+    <!-- Knock out ring crossings without painting a background color. -->
+    <mask id="nm-ring-clearance" maskUnits="userSpaceOnUse"
+          x="0" y="0" width="640" height="400"
+          style="mask-type:luminance">
+      <rect width="640" height="400" fill="white"/>
+      <use href="#nm-pulse" fill="none" stroke="black" stroke-width="20"
+           stroke-linecap="round" stroke-linejoin="round"/>
+      <use href="#nm-nodes" fill="black" stroke="black" stroke-width="8"/>
+    </mask>
 
-    <circle cx="256" cy="256" r="110" fill="none" stroke="#0B132B" stroke-width="6" />
-    <circle cx="256" cy="256" r="110" fill="none" stroke="#00D2FF" stroke-width="2" opacity="0.6" />
+    <!-- Clean neon glow for transparent backgrounds:
+         all halos are built from SourceAlpha only, so no dark matte bleeds in.
+         The glow is tighter and layered to avoid fuzzy-looking edges on black. -->
+    <filter id="nm-glow" filterUnits="userSpaceOnUse"
+            x="0" y="0" width="640" height="400"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="0.9" result="g-tight"/>
+      <feFlood flood-color="#7CFF5B" flood-opacity="0.42" result="c-tight"/>
+      <feComposite in="c-tight" in2="g-tight" operator="in" result="tight-halo"/>
 
-    <!-- Heartbeat / Jitter Pulse Line Backing Path (Dark contrast outline) -->
-    <path d="M 64,256 L 150,256 L 170,220 L 190,280 L 210,130 L 245,370 L 275,180 L 295,290 L 315,230 L 335,260 L 360,210 L 375,256 L 448,256"
-          fill="none"
-          stroke="#0B132B"
-          stroke-width="18"
-          stroke-linecap="round"
-          stroke-linejoin="round" />
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.2" result="g-mid"/>
+      <feFlood flood-color="#57FF2E" flood-opacity="0.24" result="c-mid"/>
+      <feComposite in="c-mid" in2="g-mid" operator="in" result="mid-halo"/>
 
-    <!-- Heartbeat / Jitter Pulse Foreground Line -->
-    <path d="M 64,256 L 150,256 L 170,220 L 190,280 L 210,130 L 245,370 L 275,180 L 295,290 L 315,230 L 335,260 L 360,210 L 375,256 L 448,256"
-          fill="none"
-          stroke="url(#pulse-grad)"
-          stroke-width="10"
-          stroke-linecap="round"
-          stroke-linejoin="round" />
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4.8" result="g-wide"/>
+      <feFlood flood-color="#48FF20" flood-opacity="0.10" result="c-wide"/>
+      <feComposite in="c-wide" in2="g-wide" operator="in" result="wide-halo"/>
 
-    <!-- Network Node Points with dark borders -->
-    <circle cx="210" cy="130" r="9" fill="#0B132B" />
-    <circle cx="210" cy="130" r="6" fill="#00D2FF" />
+      <feMerge>
+        <feMergeNode in="wide-halo"/>
+        <feMergeNode in="mid-halo"/>
+        <feMergeNode in="tight-halo"/>
+      </feMerge>
+    </filter>
+  </defs>
 
-    <circle cx="245" cy="370" r="9" fill="#0B132B" />
-    <circle cx="245" cy="370" r="6" fill="#00E676" />
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" shape-rendering="geometricPrecision">
+    <!-- Transparent glow only; vector strokes stay crisp. -->
+    <g stroke="#48FF20" filter="url(#nm-glow)">
+      <g mask="url(#nm-ring-clearance)">
+        <use href="#nm-outer" stroke-width="5"/>
+        <use href="#nm-inner" stroke-width="3"/>
+      </g>
+      <use href="#nm-pulse" stroke-width="10"/>
+      <use href="#nm-nodes" stroke-width="5"/>
+    </g>
 
-    <circle cx="275" cy="180" r="9" fill="#0B132B" />
-    <circle cx="275" cy="180" r="6" fill="#FF6D00" />
+    <!-- Rings: dark edge + neon body + pale core for readability on white and black. -->
+    <g mask="url(#nm-ring-clearance)">
+      <use href="#nm-outer" stroke="#146D2D" stroke-width="7"/>
+      <use href="#nm-outer" stroke="#56FF2B" stroke-width="4.8"/>
+      <use href="#nm-outer" stroke="#F2FFEC" stroke-width="1.35"/>
+      <use href="#nm-inner" stroke="#146D2D" stroke-width="4.2"/>
+      <use href="#nm-inner" stroke="#56FF2B" stroke-width="2.5"/>
+      <use href="#nm-inner" stroke="#F2FFEC" stroke-width="0.75"/>
+    </g>
 
-    <!-- Entry/Exit Connection Nodes -->
-    <circle cx="64" cy="256" r="7" fill="#0B132B" />
-    <circle cx="64" cy="256" r="4" fill="#00D2FF" />
+    <!-- Pulse tube -->
+    <use href="#nm-pulse" stroke="#146D2D" stroke-width="12"/>
+    <use href="#nm-pulse" stroke="#48FF20" stroke-width="9.5"/>
+    <use href="#nm-pulse" stroke="#B8FFA0" stroke-width="5.2"/>
+    <use href="#nm-pulse" stroke="#F7FFF2" stroke-width="2.65"/>
 
-    <circle cx="448" cy="256" r="7" fill="#0B132B" />
-    <circle cx="448" cy="256" r="4" fill="#FF6D00" />
+    <!-- Nodes -->
+    <use href="#nm-nodes" fill="#146D2D" stroke="#146D2D" stroke-width="6"/>
+    <use href="#nm-nodes" stroke="#56FF2B" stroke-width="4"/>
+    <use href="#nm-nodes" stroke="#F0FFEA" stroke-width="1.55"/>
+    <g fill="#F7FFF2" stroke="none">
+      <circle cx="84" cy="211" r="2.2"/>
+      <circle cx="274" cy="66" r="2.2"/>
+      <circle cx="315" cy="320" r="2.2"/>
+      <circle cx="354" cy="134" r="2.2"/>
+      <circle cx="556" cy="211" r="2.2"/>
+    </g>
+  </g>
 </svg>

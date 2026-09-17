@@ -2,7 +2,13 @@
 
 The example service runs Netband in the foreground under systemd as a non-root dynamic
 user. systemd owns `/var/lib/netband`, stdout is disabled, and operational stderr goes
-to journald. Measurements remain exclusively in the configured CSV file.
+to journald. Measurements remain exclusively in the configured CSV segments.
+
+For interactive use, start with [quick tests](usage.md).
+
+[Install](#install) · [Find measurements](#measurements-and-logs) ·
+[ICMP permissions](#icmp-permissions) · [Exit codes](#exit-codes) ·
+[Troubleshooting](#troubleshooting) · [State recovery](#state-recovery)
 
 ## Install
 
@@ -32,13 +38,14 @@ sudo systemctl enable --now netband.service
 
 ## Build from source
 
-Building requires Git and Rust 1.98 or newer:
+For a quick test from source, follow [the source-build guide](install.md#build-from-source).
+It stops at a runnable binary and does not install a service.
+
+### Enable the service from a checkout
+
+After building, run these commands only if you want systemd to manage Netband:
 
 ```sh
-git clone https://github.com/gregl83/netband.git
-cd netband
-cargo build --release --locked
-./target/release/netband config check
 sudo install -Dm0755 target/release/netband /usr/local/bin/netband
 sudo install -Dm0644 packaging/netband.toml /etc/netband/netband.toml
 sudo install -Dm0644 packaging/netband.service /etc/systemd/system/netband.service
@@ -57,8 +64,8 @@ sudo systemctl stop netband.service
 sudo systemctl restart netband.service
 ```
 
-The unit uses `DynamicUser=yes`, `StateDirectory=netband`, and only `CAP_NET_RAW` in its
-ambient/bounding capability set. `ProtectSystem=strict` makes the state directory the
+The unit uses `DynamicUser=yes`, `StateDirectory=netband netband/measurements`, and only
+`CAP_NET_RAW` in its ambient/bounding capability set. `ProtectSystem=strict` makes the state directory the
 persistent writable location. Keep `TimeoutStopSec` longer than Netband's configured
 `shutdown_grace` (30 seconds by default).
 
@@ -66,6 +73,48 @@ The unit deliberately specifies `--console off`, `StandardOutput=null`, and
 `StandardError=journal`. TTY detection is not a service boundary: those settings ensure
 measurement records are not duplicated into journald while startup, failures,
 scheduler decisions, and shutdown diagnostics remain available there.
+
+## Measurements and logs
+
+The packaged configuration writes rotating CSVs under
+`/var/lib/netband/measurements/`. It rotates daily at UTC midnight or before a batch
+would exceed 64 MiB (`rotate_max_bytes = 67108864`), whichever comes first. Complete
+batches stay together, so the size threshold is soft. systemd provisions both the
+state root and measurements subdirectory with mode 0700.
+
+Change `output_dir` and `rotate_max_bytes` in `/etc/netband/netband.toml` to choose the
+location and size threshold. Remove `rotate_max_bytes` for daily-only rotation. To use
+one fixed file, replace `output_dir` with `output` and remove `rotate_max_bytes`.
+Rotation takes place inside the running process and preserves scheduler accounting.
+
+With `DynamicUser=yes`, systemd protects the state tree under `/var/lib/private` and
+exposes it through `/var/lib/netband`. Use `sudo` to inspect it:
+
+```sh
+sudo ls -lah /var/lib/netband/measurements/
+sudo journalctl -u netband.service -f
+sudo journalctl -u netband.service -n 100 --no-pager
+sudo journalctl -u netband.service -b
+```
+
+Stderr reports the output directory at startup and each new segment path, regardless
+of log verbosity. `.netband-active` in the measurement
+directory records the current CSV basename. Following one CSV with `tail -f` does not
+switch to new segments; use a [CSV reader](data-format.md#rotating-directory-output)
+across the directory for analysis. Press `Ctrl-C` to stop following logs, or `q` to exit
+the journal pager.
+
+All segments are retained. Monitor available disk space and journal errors, and archive
+closed segments under an explicit operator policy. Do not remove the segment named in
+`.netband-active`, any `.netband-*` control files, or scheduler state and accounting.
+The recorded segment is needed for restart recovery even after the service stops.
+Do not use `copytruncate` or rename an active CSV. A size threshold does not bound total
+disk usage, and the separate scheduler accounting ledger also grows over time.
+
+Each ping round emits one row per target. Three targets at a five-second interval
+produce 51,840 ping rows per day, plus two lifecycle records per round, session lifecycle, bandwidth, request-failure,
+and scheduler records. Storage also depends on identifiers and diagnostics. Measure your actual
+files, choose an archive policy and free-space reserve, and alert on disk-full failures.
 
 ## ICMP permissions
 
@@ -111,6 +160,11 @@ Netband stops admitting work, cancels/drains active network work, flushes journa
 and returns zero within the configured grace period. A second signal or grace timeout
 returns 6 after a final best-effort flush.
 
+An interrupted bandwidth attempt records `cancelled` or `timeout` and retains any
+completed download/upload measurements. An unfinished direction remains empty. These
+measurement outcomes are separate from the service process exit code; see
+[CSV outcomes](data-format.md#outcomes).
+
 ## Troubleshooting
 
 **Configuration fails before startup**
@@ -141,10 +195,14 @@ interface exists, is up, and has an address suitable for each target family.
 
 **Exit 4 or repeated restart**
 
-Only one process may append an explicit CSV or own a scheduler state. Stop duplicate
-units/manual runs. Check `/var/lib/netband` ownership through `systemctl status`; do not
-delete lock files while a process is running. An incompatible CSV header requires a new
-output file or an explicit migration, not manual header editing.
+Only one process may write a CSV measurement journal (explicit or automatically named)
+or own a scheduler state. CSV locks are held on the open files, separate from
+systemd journal storage and the scheduler lock file. Stop duplicate
+units/manual runs. Inspect the unit with `systemctl status` and directory permissions with
+`sudo ls -ld /var/lib/netband/`; do not
+delete lock files while a process is running. The CSV header must match the
+[documented schema](data-format.md). If it does not, choose a new output file and
+preserve the existing journal; do not manually edit its header.
 
 **Bandwidth never starts**
 
@@ -155,32 +213,63 @@ provider cooldown, or five-attempt expiry. Direct endpoints never fall back to M
 
 **No measurements in journald**
 
-This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/netband.csv`
+This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/measurements/`
 with a CSV reader; journald contains operational diagnostics only.
 
 ## State recovery
 
-Netband fails closed when initialized scheduler state is missing or corrupt. It does not
-recreate daily allowances. Recovery must preserve the reservation ledger.
+Scheduler state uses internal format 1, independent of CSV schema 1. The recovery set
+contains:
 
-1. Stop `netband.service` and confirm no Netband process holds `scheduler.lock`.
-2. Preserve `scheduler.json`, `scheduler.bak`, `scheduler.initialized`, and
-   `scheduler.reservations.jsonl` before making changes.
-3. Validate `scheduler.json` as JSON. If it is missing or invalid, validate
-   `scheduler.bak`, then copy the backup to `scheduler.json` without deleting the
-   initialization marker or reservation ledger.
-4. Restart the service. `StateDirectory` restores dynamic-user ownership.
-5. Confirm the startup log reports a state flush and the retained `daily_runs_used`
-   does not exceed the configured provider maximum.
+| File | Purpose |
+| --- | --- |
+| `scheduler.json` | Current scheduler snapshot |
+| `scheduler.bak` | Previous snapshot, when available |
+| `scheduler.accounting.jsonl` | Sequenced, checksummed accounting records for all providers |
+| `scheduler.initialized` | Installation identity and committed accounting checkpoint |
+| `scheduler.lock` | Exclusive scheduler ownership |
 
-Never recover by deleting the initialization marker or reservation ledger. If neither
-state file is valid, retain all files and wait until the next UTC day or reconstruct the
-allowance conservatively before restarting.
+Reservations and cooldown changes are synced to the accounting log and checkpoint
+before snapshot replacement. A reservation is granted only after persistence succeeds.
+Restoring an older snapshot replays newer accounting, preserving consumed starts,
+last-start spacing, and provider cooldowns. Complete records beyond the checkpoint
+are retained conservatively after an interrupted commit; an incomplete or inconsistent
+log blocks bandwidth admission. Any persistence error requires reopening the scheduler
+before further admission.
+
+To recover a missing or corrupt primary snapshot:
+
+1. Stop `netband.service` and confirm no process owns `scheduler.lock`.
+2. Preserve the entire state directory, including temporary files, before making
+   changes.
+3. If a backup is available, copy `scheduler.bak` to `scheduler.json`. Leave the
+   accounting log and checkpoint untouched. Valid JSON alone does not establish a
+   valid recovery set; Netband checks installation identity, sequence, digests, and
+   snapshot accounting when opening it.
+4. Restart the service. Netband validates the recovery set under the state lock before
+   updating it or admitting traffic. Review `journalctl -u netband.service` for errors.
+
+If validation fails, retain the files and keep bandwidth disabled until a complete
+recovery set is available. Do not delete the checkpoint, trim accounting records, or
+hand-edit consumed allowances. Waiting for the next UTC day does not repair missing
+or invalid evidence. Ping-only monitoring can continue with `--no-bandwidth`.
+
+Interrupted initialization resumes automatically when the retained files establish
+that only the initial, zero-accounting state exists. An incomplete log is rejected.
+For a failed first installation known never to have admitted traffic, preserve and
+move aside its state directory before retrying initialization. This is not a recovery
+procedure for an installation that has already run bandwidth tests.
+
+These guarantees depend on local filesystem locking, atomic replacement, and file and
+directory syncing. They do not establish shared/network-filesystem support, recover a
+provider response that was never durably recorded, or detect replacement of every file
+with a mutually consistent older recovery set. The accounting log grows as accounting
+changes; CSV rotation does not rotate it.
 
 ## Raspberry Pi
 
 Use a 64-bit Raspberry Pi Linux image (`aarch64-unknown-linux-gnu`) and the pre-built
-binary above, or follow [Build from source](#build-from-source). Before a release is
-tagged, run [the release smoke](release.md) on real Pi hardware; CI's QEMU aarch64
-execution validates architecture/startup compatibility but not the board's kernel,
-interfaces, capabilities, thermals, or sustained NDT7 behavior.
+binary above, or follow [Build from source](#build-from-source). For hardware
+validation, run [the release smoke checks](release.md) on real Pi hardware; CI's QEMU
+aarch64 execution validates architecture/startup compatibility but not the board's
+kernel, interfaces, capabilities, thermals, or sustained NDT7 behavior.

@@ -141,9 +141,13 @@ pub struct Options {
     )]
     pub output: Option<PathBuf>,
 
-    /// Create a timestamped CSV in this directory
+    /// Create CSV segments in this directory, rotating daily at UTC midnight
     #[arg(long, global = true, value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
+
+    /// Also rotate directory output before a batch exceeds this soft byte limit
+    #[arg(long, global = true, value_name = "BYTES", conflicts_with = "output")]
+    pub rotate_max_bytes: Option<u64>,
 
     /// Persist scheduler state at this path
     #[arg(long, global = true, value_name = "FILE")]

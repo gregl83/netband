@@ -1,3 +1,7 @@
+mod durability;
+mod output;
+pub use output::Journal;
+
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -8,54 +12,117 @@ use thiserror::Error;
 
 use crate::config::OutputTarget;
 use crate::console::ConsoleSink;
-use crate::model::MeasurementEvent;
+use crate::model::{
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RunId, RunKind,
+    TriggerReason,
+};
+use std::collections::BTreeMap;
 
-pub const CSV_HEADER: &str = "schema_version,run_id,event_id,scheduled_at_utc,started_at_utc,finished_at_utc,interface,source_ip,event_kind,trigger_reason,load_phase,load_run_id,target,sequence,outcome,duration_ms,rtt_ms,packets_sent,packets_received,packet_loss_pct,icmp_type,icmp_code,provider_id,provider_kind,server,remote_ip,request_stage,request_attempt,http_status,retry_after_ms,rate_limit_until_utc,daily_runs_used,download_mbps,upload_mbps,bytes_sent,bytes_received,tcp_min_rtt_ms,tcp_rtt_ms,tcp_retransmissions,os_error_code,error_kind,error_message";
+// Keep CSV column order and its serializer in one declaration. JSONL serializes
+// MeasurementEvent directly so connection_details remains an object there.
+macro_rules! csv_event {
+    ($event:ident; $first:ident => $first_value:expr $(, $field:ident => $value:expr)* $(,)?) => {
+        pub const CSV_HEADER: &str = concat!(stringify!($first) $(, ",", stringify!($field))*);
+        const CSV_FIELDS: &[&str] = &[stringify!($first) $(, stringify!($field))*];
 
-const CSV_FIELDS: [&str; 42] = [
-    "schema_version",
-    "run_id",
-    "event_id",
-    "scheduled_at_utc",
-    "started_at_utc",
-    "finished_at_utc",
-    "interface",
-    "source_ip",
-    "event_kind",
-    "trigger_reason",
-    "load_phase",
-    "load_run_id",
-    "target",
-    "sequence",
-    "outcome",
-    "duration_ms",
-    "rtt_ms",
-    "packets_sent",
-    "packets_received",
-    "packet_loss_pct",
-    "icmp_type",
-    "icmp_code",
-    "provider_id",
-    "provider_kind",
-    "server",
-    "remote_ip",
-    "request_stage",
-    "request_attempt",
-    "http_status",
-    "retry_after_ms",
-    "rate_limit_until_utc",
-    "daily_runs_used",
-    "download_mbps",
-    "upload_mbps",
-    "bytes_sent",
-    "bytes_received",
-    "tcp_min_rtt_ms",
-    "tcp_rtt_ms",
-    "tcp_retransmissions",
-    "os_error_code",
-    "error_kind",
-    "error_message",
-];
+        struct CsvEvent<'a>(&'a MeasurementEvent);
+
+        impl serde::Serialize for CsvEvent<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeStruct;
+                let $event = self.0;
+                let mut record = serializer.serialize_struct("MeasurementEvent", CSV_FIELDS.len())?;
+                record.serialize_field(stringify!($first), &$first_value)?;
+                $(record.serialize_field(stringify!($field), &$value)?;)*
+                record.end()
+            }
+        }
+    };
+}
+
+csv_event! { event;
+    schema_version => event.schema_version,
+    event_id => event.event_id,
+    event_kind => event.event_kind,
+    event_sequence => event.event_sequence,
+    run_id => event.run_id,
+    parent_run_id => event.parent_run_id,
+    root_run_id => event.root_run_id,
+    run_kind => event.run_kind,
+
+    scheduled_at_utc => event.scheduled_at_utc.map(crate::model::timestamp_text),
+    requested_at_utc => event.requested_at_utc.map(crate::model::timestamp_text),
+    started_at_utc => event.started_at_utc.map(crate::model::timestamp_text),
+    finished_at_utc => event.finished_at_utc.map(crate::model::timestamp_text),
+    elapsed_ms => event.elapsed_ms,
+
+    outcome => event.outcome,
+    message => event.message,
+
+    command => event.command,
+    netband_version => event.netband_version,
+    process_id => event.process_id,
+
+    interface => event.interface,
+    connection_details => event.connection_details.as_ref().map(serde_json::to_string).transpose().map_err(serde::ser::Error::custom)?,
+
+    provider_id => event.provider_id,
+    provider_kind => event.provider_kind,
+    server_name => event.server_name,
+
+    scheduler_action => event.scheduler_action,
+    scheduler_reason => event.scheduler_reason,
+    trigger_reason => event.trigger_reason,
+    scheduler_not_before_utc => event.scheduler_not_before_utc.map(crate::model::timestamp_text),
+    provider_accounting_date => event.provider_accounting_date,
+    provider_daily_starts => event.provider_daily_starts,
+    bandwidth_start_reserved => event.bandwidth_start_reserved,
+
+    ping_target_ip => event.ping_target_ip,
+    ping_local_ip => event.ping_local_ip,
+    ping_sequence => event.ping_sequence,
+    ping_packets_sent => event.ping_packets_sent,
+    ping_packets_received => event.ping_packets_received,
+    ping_rtt_ms => event.ping_rtt_ms,
+    ping_icmp_type => event.ping_icmp_type,
+    ping_icmp_code => event.ping_icmp_code,
+
+    load_run_id => event.load_run_id,
+    load_phase => event.load_phase,
+
+    request_id => event.request_id,
+    request_direction => event.request_direction,
+    request_stage => event.request_stage,
+    request_url => event.request_url,
+    request_local_ip => event.request_local_ip,
+    request_remote_ip => event.request_remote_ip,
+    request_http_status => event.request_http_status,
+    request_retry_after_ms => event.request_retry_after_ms,
+    request_retry_at_utc => event.request_retry_at_utc.map(crate::model::timestamp_text),
+
+    download_request_id => event.download_request_id,
+    download_local_ip => event.download_local_ip,
+    download_remote_ip => event.download_remote_ip,
+    download_bytes => event.download_bytes,
+    download_measurement_duration_ms => event.download_measurement_duration_ms,
+    download_mbps => event.download_mbps,
+    download_server_tcp_min_rtt_ms => event.download_server_tcp_min_rtt_ms,
+    download_server_tcp_rtt_ms => event.download_server_tcp_rtt_ms,
+    download_server_tcp_retransmitted_bytes => event.download_server_tcp_retransmitted_bytes,
+
+    upload_request_id => event.upload_request_id,
+    upload_local_ip => event.upload_local_ip,
+    upload_remote_ip => event.upload_remote_ip,
+    upload_bytes => event.upload_bytes,
+    upload_measurement_duration_ms => event.upload_measurement_duration_ms,
+    upload_mbps => event.upload_mbps,
+    upload_server_tcp_min_rtt_ms => event.upload_server_tcp_min_rtt_ms,
+    upload_server_tcp_rtt_ms => event.upload_server_tcp_rtt_ms,
+    upload_server_tcp_retransmitted_bytes => event.upload_server_tcp_retransmitted_bytes,
+
+    error_kind => event.error_kind,
+    os_error_code => event.os_error_code,
+}
 
 #[derive(Debug, Error)]
 pub enum JournalError {
@@ -81,18 +148,21 @@ impl JournalError {
     }
 }
 
-pub struct Journal<W: Write> {
+/// Serialize CSV records and flush/sync a single writer.
+pub struct JournalWriter<W: Write> {
     writer: csv::Writer<W>,
     sync: Option<fn(&W) -> io::Result<()>>,
 }
 
-impl<W: Write> fmt::Debug for Journal<W> {
+impl<W: Write> fmt::Debug for JournalWriter<W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Journal").finish_non_exhaustive()
+        formatter
+            .debug_struct("JournalWriter")
+            .finish_non_exhaustive()
     }
 }
 
-impl<W: Write> Journal<W> {
+impl<W: Write> JournalWriter<W> {
     pub fn from_writer(writer: W) -> Result<Self, JournalError> {
         let mut journal = Self::without_header(writer);
         journal.writer.write_record(CSV_FIELDS)?;
@@ -112,7 +182,7 @@ impl<W: Write> Journal<W> {
 
     pub fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
         for event in events {
-            self.writer.serialize(event.sanitized())?;
+            self.writer.serialize(CsvEvent(&event.sanitized()))?;
         }
         self.flush()?;
         Ok(())
@@ -133,14 +203,27 @@ impl<W: Write> Journal<W> {
     }
 }
 
-impl Journal<File> {
+impl JournalWriter<File> {
     pub fn open_at(
         output: &OutputTarget,
         started_at: DateTime<Utc>,
     ) -> Result<(Self, PathBuf), JournalError> {
+        if output.is_automatic() {
+            durability::create_directory(output.directory())?;
+        }
         match output {
             OutputTarget::File(path) => Self::open_explicit(path),
-            OutputTarget::Directory(directory) => Self::create_timestamped(directory, started_at),
+            OutputTarget::Directory(directory) | OutputTarget::AutomaticDirectory(directory) => {
+                Self::create_timestamped(directory, started_at)
+            }
+            OutputTarget::AutomaticFile(directory) => {
+                let path = directory.join(format!(
+                    "netband-{}-{}.csv",
+                    started_at.format("%Y%m%dT%H%M%S%.3fZ"),
+                    uuid::Uuid::new_v4()
+                ));
+                Self::create_new(path)
+            }
         }
     }
 
@@ -163,8 +246,9 @@ impl Journal<File> {
         } else {
             Self::without_header(file)
         };
-        journal.sync = Some(File::sync_data);
+        journal.sync = Some(durability::sync_data);
         journal.flush()?;
+        durability::sync_parent(path)?;
         Ok((journal, path.to_path_buf()))
     }
 
@@ -173,14 +257,19 @@ impl Journal<File> {
         started_at: DateTime<Utc>,
     ) -> Result<(Self, PathBuf), JournalError> {
         let filename = format!("netband-{}.csv", started_at.format("%Y%m%dT%H%M%S%.3fZ"));
-        let path = directory.join(filename);
+        Self::create_new(directory.join(filename))
+    }
+
+    fn create_new(path: PathBuf) -> Result<(Self, PathBuf), JournalError> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)?;
+        lock_file(&file, &path)?;
         let mut journal = Self::from_writer(file)?;
-        journal.sync = Some(File::sync_data);
+        journal.sync = Some(durability::sync_data);
         journal.flush()?;
+        durability::sync_parent(&path)?;
         Ok((journal, path))
     }
 }
@@ -277,19 +366,41 @@ pub trait JournalSink {
     }
 }
 
-impl<W: Write> JournalSink for Journal<W> {
+impl<W: Write> JournalSink for JournalWriter<W> {
     fn append_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
-        Journal::append_batch(self, events)
+        JournalWriter::append_batch(self, events)
     }
 
     fn flush(&mut self) -> Result<(), JournalError> {
-        Journal::flush(self)
+        JournalWriter::flush(self)
     }
+}
+
+/// Known intent at run start; excludes measurements, discovered endpoints and accounting.
+#[derive(Debug, Default)]
+pub struct RunContext {
+    pub interface: Option<String>,
+    pub provider_id: Option<String>,
+    pub provider_kind: Option<ProviderKind>,
+    pub trigger_reason: Option<TriggerReason>,
+    pub load_run_id: Option<RunId>,
+    pub load_phase: Option<LoadPhase>,
+}
+
+struct ActiveRun {
+    root: RunId,
+    parent: Option<RunId>,
+    kind: RunKind,
+    started_at: DateTime<Utc>,
+    started: tokio::time::Instant,
 }
 
 pub struct OutputCoordinator<J, C> {
     journal: J,
     console: C,
+    sequence: u64,
+    failed: bool,
+    runs: BTreeMap<RunId, ActiveRun>,
 }
 
 impl<J, C> OutputCoordinator<J, C>
@@ -298,16 +409,177 @@ where
     C: ConsoleSink,
 {
     pub fn new(journal: J, console: C) -> Self {
-        Self { journal, console }
+        Self {
+            journal,
+            console,
+            sequence: 0,
+            failed: false,
+            runs: BTreeMap::new(),
+        }
     }
 
     pub fn publish_batch(&mut self, events: &[MeasurementEvent]) -> Result<(), JournalError> {
-        self.journal.append_batch(events)?;
-        crate::diagnostics::record_events(events);
-        for event in events {
+        if self.failed {
+            return Err(JournalError::write(io::Error::other(
+                "journal publication previously failed",
+            )));
+        }
+        let mut events = events.to_vec();
+        for event in &mut events {
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| JournalError::write(io::Error::other("event sequence exhausted")))?;
+            event.event_sequence = Some(self.sequence);
+            if let Some(run) = self.runs.get(&event.run_id) {
+                event.parent_run_id = run.parent;
+                event.root_run_id = run.root;
+                event.run_kind = run.kind;
+            }
+        }
+        if let Err(error) = self.journal.append_batch(&events) {
+            self.failed = true;
+            return Err(error);
+        }
+        crate::diagnostics::record_events(&events);
+        for event in &events {
             self.console.offer(event);
         }
         Ok(())
+    }
+
+    pub fn start_session(&mut self, id: RunId, command: &str) -> Result<(), JournalError> {
+        if !self.runs.is_empty() {
+            return Err(JournalError::write(io::Error::other(
+                "session is already active",
+            )));
+        }
+        self.sequence = 0;
+        self.begin_run(
+            id,
+            None,
+            RunKind::Session,
+            Some(command),
+            RunContext::default(),
+        )
+    }
+
+    pub fn start_run(
+        &mut self,
+        id: RunId,
+        parent: RunId,
+        kind: RunKind,
+    ) -> Result<(), JournalError> {
+        self.start_run_with_context(id, parent, kind, RunContext::default())
+    }
+
+    pub fn start_run_with_context(
+        &mut self,
+        id: RunId,
+        parent: RunId,
+        kind: RunKind,
+        context: RunContext,
+    ) -> Result<(), JournalError> {
+        if !self.runs.contains_key(&parent) {
+            return Err(JournalError::write(io::Error::other(
+                "parent run is not active",
+            )));
+        }
+        self.begin_run(id, Some(parent), kind, None, context)
+    }
+
+    fn begin_run(
+        &mut self,
+        id: RunId,
+        parent: Option<RunId>,
+        kind: RunKind,
+        command: Option<&str>,
+        context: RunContext,
+    ) -> Result<(), JournalError> {
+        if self.runs.contains_key(&id) {
+            return Err(JournalError::write(io::Error::other(
+                "run is already active",
+            )));
+        }
+        let root = parent.map_or(id, |parent| self.runs[&parent].root);
+        let started_at = Utc::now();
+        let started = tokio::time::Instant::now();
+        let mut event =
+            MeasurementEvent::new(id, EventKind::RunStarted, Outcome::Started, started_at);
+        event.parent_run_id = parent;
+        event.root_run_id = root;
+        event.run_kind = kind;
+        event.started_at_utc = Some(started_at);
+        event.finished_at_utc = None;
+        event.interface = context.interface;
+        event.provider_id = context.provider_id;
+        event.provider_kind = context.provider_kind;
+        event.trigger_reason = context.trigger_reason;
+        event.load_run_id = context.load_run_id;
+        event.load_phase = context.load_phase;
+        if let Some(command) = command {
+            event.command = Some(command.to_owned());
+            event.netband_version = Some(env!("CARGO_PKG_VERSION").to_owned());
+            event.process_id = Some(std::process::id());
+        }
+        self.publish_batch(&[event])?;
+        self.runs.insert(
+            id,
+            ActiveRun {
+                root,
+                parent,
+                kind,
+                started_at,
+                started,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn finish_run(
+        &mut self,
+        id: RunId,
+        outcome: Outcome,
+        error: Option<&str>,
+    ) -> Result<(), JournalError> {
+        if self.runs.values().any(|run| run.parent == Some(id)) {
+            return Err(JournalError::write(io::Error::other(
+                "run has active children",
+            )));
+        }
+        let run = self
+            .runs
+            .get(&id)
+            .ok_or_else(|| JournalError::write(io::Error::other("run is not active")))?;
+        let mut event = MeasurementEvent::new(id, EventKind::RunFinished, outcome, Utc::now());
+        event.started_at_utc = Some(run.started_at);
+        event.elapsed_ms = Some(run.started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(error) = error {
+            event.error_kind = Some(ErrorKind::Internal);
+            event.message = Some(error.to_owned());
+        }
+        self.publish_batch(&[event])?;
+        self.runs.remove(&id);
+        Ok(())
+    }
+
+    pub fn finish_session(
+        &mut self,
+        id: RunId,
+        outcome: Outcome,
+        error: Option<&str>,
+    ) -> Result<(), JournalError> {
+        if error.is_some() {
+            while let Some(child) = self.runs.iter().find_map(|(&child, run)| {
+                (child != id
+                    && run.root == id
+                    && !self.runs.values().any(|run| run.parent == Some(child)))
+                .then_some(child)
+            }) {
+                self.finish_run(child, Outcome::Error, error)?;
+            }
+        }
+        self.finish_run(id, outcome, error)
     }
 
     pub fn flush(&mut self) -> Result<(), JournalError> {

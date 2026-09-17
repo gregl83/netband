@@ -2,6 +2,8 @@
 console = "auto"
 verbosity = "info"
 interfaces = []
+# Fixed-file mode never rotates. For daily rotation, replace this with output_dir.
+# Directory mode also accepts rotate_max_bytes = 67108864 (64 MiB; optional).
 output = "netband.csv"
 shutdown_grace = "30s"
 

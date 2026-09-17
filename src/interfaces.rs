@@ -36,10 +36,17 @@ impl InterfaceResolver for SystemInterfaceResolver {
 }
 
 pub fn resolve_configured(names: &[String]) -> Result<Vec<ResolvedInterface>, InterfaceError> {
+    resolve_configured_with(names, if_addrs::get_if_addrs)
+}
+
+fn resolve_configured_with(
+    names: &[String],
+    inspect: impl FnOnce() -> io::Result<Vec<if_addrs::Interface>>,
+) -> Result<Vec<ResolvedInterface>, InterfaceError> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let interfaces = if_addrs::get_if_addrs().map_err(inspect_error)?;
+    let interfaces = inspect().map_err(inspect_error)?;
     names
         .iter()
         .map(|name| resolve_from(name, interfaces.clone()))
@@ -143,3 +150,6 @@ impl FairInterfaceSelector {
         self.state.get(interface).map_or(0, |state| state.attempts)
     }
 }
+
+#[cfg(test)]
+mod tests;

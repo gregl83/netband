@@ -4,14 +4,13 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{Sink, Stream, StreamExt};
-use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
@@ -26,14 +25,14 @@ use url::Url;
 
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
-use crate::journal::{Journal, JournalError, OutputCoordinator};
+use crate::journal::{Journal, JournalError, OutputCoordinator, RunContext};
 use crate::model::{
-    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestStage,
-    TriggerReason,
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestDirection,
+    RequestId, RequestStage, RunId, RunKind, TriggerReason,
 };
 use crate::provider::{
-    EndpointCandidate, FailureDisposition, RequestFailure, USER_AGENT as NETBAND_USER_AGENT,
-    parse_retry_after_value, resolve_endpoints, retry_until,
+    EndpointCandidate, FailureDisposition, RequestFailure, RetryAfter,
+    USER_AGENT as NETBAND_USER_AGENT, parse_retry_after_value, resolve_endpoints,
 };
 use crate::scheduler::{BandwidthOpportunity, ManualDecision, Scheduler, SchedulerError};
 
@@ -87,33 +86,90 @@ impl AddressResolver for SystemAddressResolver {
 pub struct TcpMetrics {
     pub min_rtt_ms: Option<f64>,
     pub rtt_ms: Option<f64>,
-    pub retransmissions: Option<u64>,
+    pub retransmitted_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DirectionMeasurement {
+    pub request_id: RequestId,
     pub bytes: u64,
     pub elapsed: Duration,
     pub remote_ip: IpAddr,
-    pub source_ip: IpAddr,
+    pub local_ip: IpAddr,
     pub metrics: TcpMetrics,
 }
 
 #[derive(Debug)]
-struct DirectionResult {
-    measurement: Option<DirectionMeasurement>,
-    failures: Vec<RequestFailure>,
-}
-
-#[derive(Debug)]
-struct CandidateResult {
+struct AttemptProgress {
+    started_monotonic: tokio::time::Instant,
+    stage_started_monotonic: tokio::time::Instant,
+    started_at_utc: DateTime<Utc>,
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
     failures: Vec<RequestFailure>,
-    server: String,
-    provider_id: String,
-    provider_kind: ProviderKind,
-    terminal_outcome: Option<Outcome>,
+    server_name: Option<String>,
+    active: RequestFailure,
+}
+
+impl AttemptProgress {
+    fn new(stage: RequestStage) -> Self {
+        let active = RequestFailure::simple(stage, ErrorKind::Internal, "", None, RequestId::new());
+        Self {
+            started_monotonic: active.finished_monotonic,
+            stage_started_monotonic: active.finished_monotonic,
+            started_at_utc: active.started_at_utc,
+            download: None,
+            upload: None,
+            failures: Vec::new(),
+            server_name: None,
+            active,
+        }
+    }
+
+    fn begin_stage(&mut self, stage: RequestStage) {
+        self.active.stage = stage;
+        self.active.started_at_utc = Utc::now();
+        self.stage_started_monotonic = tokio::time::Instant::now();
+    }
+
+    fn record_failure(&mut self, mut failure: RequestFailure) {
+        failure.started_at_utc = self.active.started_at_utc;
+        failure.elapsed = failure
+            .finished_monotonic
+            .saturating_duration_since(self.stage_started_monotonic);
+        failure.direction = self.active.direction;
+        failure.request_id = self.active.request_id;
+        if failure.server_name.is_none() {
+            failure.server_name.clone_from(&self.active.server_name);
+        }
+        self.failures.push(failure);
+    }
+
+    fn interrupt(
+        &mut self,
+        outcome: Outcome,
+        timeout: Duration,
+        finished_at: DateTime<Utc>,
+        finished_monotonic: tokio::time::Instant,
+    ) {
+        let mut failure = self.active.clone();
+        failure.finished_at_utc = finished_at;
+        failure.finished_monotonic = finished_monotonic;
+        failure.elapsed =
+            finished_monotonic.saturating_duration_since(self.stage_started_monotonic);
+        failure.outcome = outcome;
+        (failure.error_kind, failure.message) = match outcome {
+            Outcome::Timeout => (
+                ErrorKind::Timeout,
+                format!(
+                    "NDT7 test timed out after {}",
+                    humantime::format_duration(timeout)
+                ),
+            ),
+            _ => (ErrorKind::Cancelled, "NDT7 test was cancelled".to_owned()),
+        };
+        self.failures.push(failure);
+    }
 }
 
 #[derive(Debug)]
@@ -152,7 +208,10 @@ pub enum BandwidthCommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionReservation {
     Untracked,
-    Reserved { daily_runs_used: u32 },
+    Reserved {
+        accounting_date: NaiveDate,
+        daily_bandwidth_starts: u32,
+    },
 }
 
 pub trait ReservationGate {
@@ -181,13 +240,9 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let started_at = Utc::now();
-    let run_number = next_run_number();
-    let run_id = format!(
-        "{}-{}-{run_number}",
-        started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        std::process::id()
-    );
-    let (journal, output_path) = Journal::open_at(&config.output, started_at)?;
+    let session = RunId::new();
+    let run_id = RunId::new();
+    let journal = Journal::open_at(&config.output, config.rotate_max_bytes, started_at)?;
     let console = Console::spawn(
         config.console,
         console_writer,
@@ -195,47 +250,73 @@ where
         trace_console_diagnostic,
     );
     let mut scheduler = Scheduler::open(&config.state_file, &config.bandwidth, started_at)?;
-    let mut report = match scheduler.preflight_manual(&run_id, started_at)? {
-        ManualDecision::Allowed => {
-            let opportunity = BandwidthOpportunity {
-                reason: TriggerReason::Manual,
-                scheduled_at_utc: started_at,
-                interface: config.interfaces.first().cloned(),
-            };
-            let mut report =
-                measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
-            if report.reservation_error.is_none() {
-                let scheduler_events =
-                    scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
-                report.events.extend(scheduler_events);
-            }
-            report
-        }
-        ManualDecision::Blocked(event) => BandwidthReport {
-            events: vec![*event],
-            outcome: Outcome::Suppressed,
-            reserved: false,
-            reservation_error: None,
-        },
-    };
-    scheduler.flush()?;
-    let reservation_error = report.reservation_error.take();
     let mut coordinator = OutputCoordinator::new(journal, console);
-    let publish_result = coordinator.publish_batch(&report.events);
+    let result = async {
+        coordinator.start_session(session, "once bandwidth")?;
+        let mut report = match scheduler.preflight_manual(&session, started_at)? {
+            ManualDecision::Allowed => {
+                let opportunity = BandwidthOpportunity {
+                    reason: TriggerReason::Manual,
+                    scheduled_at_utc: None,
+                    requested_at_utc: started_at,
+                    interface: config.interfaces.first().cloned(),
+                };
+                coordinator.start_run_with_context(
+                    run_id,
+                    session,
+                    RunKind::Bandwidth,
+                    bandwidth_run_context(config, opportunity.reason),
+                )?;
+                let mut report =
+                    measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
+                opportunity.apply_timing(&mut report);
+                if report.reservation_error.is_none() {
+                    let scheduler_events =
+                        scheduler.finish_attempt(&run_id, Utc::now(), opportunity, &mut report)?;
+                    report.events.extend(scheduler_events);
+                }
+                coordinator.publish_batch(&report.events)?;
+                coordinator.finish_run(run_id, report.outcome, None)?;
+                report
+            }
+            ManualDecision::Blocked(event) => {
+                let report = BandwidthReport {
+                    events: vec![*event],
+                    outcome: Outcome::Suppressed,
+                    reserved: false,
+                    reservation_error: None,
+                };
+                coordinator.publish_batch(&report.events)?;
+                report
+            }
+        };
+        scheduler.flush()?;
+        if let Some(message) = report.reservation_error.take() {
+            return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
+                message,
+            )));
+        }
+        Ok::<_, BandwidthCommandError>(report)
+    }
+    .await;
+    let finish_result = coordinator.finish_session(
+        session,
+        result
+            .as_ref()
+            .map_or(Outcome::Error, |report| report.outcome),
+        result.as_ref().err().map(ToString::to_string).as_deref(),
+    );
     let flush_result = coordinator.flush();
+    let (journal, console) = coordinator.into_parts();
+    let output_path = journal.path().to_owned();
     if flush_result.is_ok() {
         tracing::info!(path = %output_path.display(), "measurement journal flushed");
     }
-    let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    publish_result?;
+    let report = result?;
+    finish_result?;
     flush_result?;
-    if let Some(message) = reservation_error {
-        return Err(BandwidthCommandError::Scheduler(SchedulerError::Admission(
-            message,
-        )));
-    }
     Ok(BandwidthExecution {
         output_path,
         report,
@@ -245,7 +326,7 @@ where
 
 pub async fn measure_bandwidth(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
 ) -> BandwidthReport {
     let mut reservation = UntrackedReservation;
@@ -262,7 +343,7 @@ pub async fn measure_bandwidth(
 
 pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     reservation: &mut G,
 ) -> BandwidthReport {
@@ -279,7 +360,7 @@ pub async fn measure_bandwidth_with_gate<G: ReservationGate>(
 
 pub async fn measure_bandwidth_with_gate_and_phase<G: ReservationGate>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     reservation: &mut G,
     phase: watch::Sender<LoadPhase>,
@@ -298,7 +379,7 @@ pub async fn measure_bandwidth_with_gate_and_phase<G: ReservationGate>(
 
 pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
 ) -> BandwidthReport {
@@ -316,7 +397,7 @@ pub async fn measure_bandwidth_with_connector<C: TcpConnector>(
 
 pub async fn measure_bandwidth_with_network<C: TcpConnector, R: AddressResolver>(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -339,7 +420,7 @@ pub async fn measure_bandwidth_with_network_and_gate<
     G: ReservationGate,
 >(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -363,7 +444,7 @@ async fn measure_bandwidth_with_network_and_gate_observed<
     G: ReservationGate,
 >(
     config: &ResolvedConfig,
-    run_id: &str,
+    run_id: &RunId,
     mut shutdown: watch::Receiver<bool>,
     connector: &C,
     resolver: &R,
@@ -372,156 +453,115 @@ async fn measure_bandwidth_with_network_and_gate_observed<
 ) -> BandwidthReport {
     report_phase(phase, LoadPhase::Setup);
     let interface = config.interfaces.first().map(String::as_str);
-    let whole_timeout = tokio::time::sleep(config.bandwidth.whole_test_timeout);
-    tokio::pin!(whole_timeout);
-    let resolution = tokio::select! {
-        _ = &mut whole_timeout => {
-            return command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Timeout,
-                ErrorKind::Timeout,
-                format!(
-                    "NDT7 test timed out after {}",
-                    humantime::format_duration(config.bandwidth.whole_test_timeout)
-                ),
-            );
-        }
-        _ = cancellation_requested(&mut shutdown) => {
-            return command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Cancelled,
-                ErrorKind::Cancelled,
-                "NDT7 test was cancelled".to_owned(),
-            );
-        }
-        resolution = resolve_endpoints(&config.bandwidth, interface) => resolution,
-    };
-    let mut failures = resolution.failures;
-    if let Some(terminal) = resolution.terminal {
-        let outcome = terminal.outcome;
-        failures.push(terminal);
-        return report_from_result(ReportInput {
-            run_id,
-            interface,
-            provider_id: &config.bandwidth.provider_id,
-            provider_kind: provider_kind(config),
-            server: None,
-            failures,
-            download: None,
-            upload: None,
-            outcome,
-        });
-    }
-
-    let reservation = match reservation.reserve(Utc::now()) {
-        Ok(reservation) => reservation,
-        Err(message) => {
-            let mut report = command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Error,
-                ErrorKind::Internal,
-                format!("cannot persist bandwidth reservation: {message}"),
-            );
-            report.reservation_error = Some(message);
-            return report;
-        }
-    };
-
-    let test = run_candidates(
-        &resolution.candidates,
-        interface,
-        connector,
-        resolver,
-        phase,
-    );
-    let candidate = tokio::select! {
-        _ = &mut whole_timeout => {
-            return apply_admission(command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Timeout,
-                ErrorKind::Timeout,
-                format!(
-                    "NDT7 test timed out after {}",
-                    humantime::format_duration(config.bandwidth.whole_test_timeout)
-                ),
-            ), reservation);
-        }
-        _ = cancellation_requested(&mut shutdown) => {
-            return apply_admission(command_failure_report(
-                config,
-                run_id,
-                interface,
-                Outcome::Cancelled,
-                ErrorKind::Cancelled,
-                "NDT7 test was cancelled".to_owned(),
-            ), reservation);
-        },
-        result = test => result,
-    };
-    failures.extend(candidate.failures);
-    let outcome = candidate.terminal_outcome.unwrap_or_else(|| {
-        match (candidate.download.is_some(), candidate.upload.is_some()) {
-            (true, true) => Outcome::Success,
-            (true, false) | (false, true) => Outcome::Partial,
-            (false, false) => Outcome::Error,
-        }
+    let mut progress = AttemptProgress::new(match provider_kind(config) {
+        ProviderKind::Mlab => RequestStage::Locate,
+        ProviderKind::Direct => RequestStage::Dns,
     });
-    let report = report_from_result(ReportInput {
+    if let crate::config::ProviderConfig::Mlab(mlab) = &config.bandwidth.provider {
+        progress.active.request_url = Some(mlab.locate_url.to_string());
+    }
+    let mut admission = AdmissionReservation::Untracked;
+    let mut reservation_error = None;
+    let result = {
+        let attempt = async {
+            let mut resolution = resolve_endpoints(&config.bandwidth, interface).await;
+            for failure in resolution
+                .failures
+                .iter_mut()
+                .chain(resolution.terminal.iter_mut())
+            {
+                failure.request_id = progress.active.request_id;
+            }
+            progress.failures.extend(resolution.failures);
+            if let Some(terminal) = resolution.terminal {
+                let outcome = terminal.outcome;
+                progress.failures.push(terminal);
+                return outcome;
+            }
+            progress.begin_stage(RequestStage::Connect);
+            admission = match reservation.reserve(Utc::now()) {
+                Ok(admission) => admission,
+                Err(message) => {
+                    let mut failure = RequestFailure::simple(
+                        RequestStage::Connect,
+                        ErrorKind::Internal,
+                        format!("cannot persist bandwidth reservation: {message}"),
+                        None,
+                        RequestId::new(),
+                    );
+                    failure.outcome = Outcome::Error;
+                    progress.record_failure(failure);
+                    reservation_error = Some(message);
+                    return Outcome::Error;
+                }
+            };
+            run_candidates(
+                &resolution.candidates,
+                interface,
+                connector,
+                resolver,
+                phase,
+                &mut progress,
+            )
+            .await
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation_requested(&mut shutdown) => Err(Outcome::Cancelled),
+            _ = tokio::time::sleep(config.bandwidth.whole_test_timeout) => Err(Outcome::Timeout),
+            outcome = attempt => Ok(outcome),
+        }
+    };
+    // The attempt and its sockets are dropped before finalizing retained results.
+    let finished_at = Utc::now();
+    let finished_monotonic = tokio::time::Instant::now();
+    let outcome = result.unwrap_or_else(|outcome| {
+        progress.interrupt(
+            outcome,
+            config.bandwidth.whole_test_timeout,
+            finished_at,
+            finished_monotonic,
+        );
+        outcome
+    });
+    let mut report = report_from_result(ReportInput {
+        elapsed: finished_monotonic.saturating_duration_since(progress.started_monotonic),
+        started_at_utc: progress.started_at_utc,
+        finished_at_utc: finished_at,
         run_id,
         interface,
-        provider_id: &candidate.provider_id,
-        provider_kind: candidate.provider_kind,
-        server: Some(candidate.server),
-        failures,
-        download: candidate.download,
-        upload: candidate.upload,
+        provider_id: &config.bandwidth.provider_id,
+        provider_kind: provider_kind(config),
+        server_name: progress.server_name,
+        failures: progress.failures,
+        download: progress.download,
+        upload: progress.upload,
         outcome,
     });
-    apply_admission(report, reservation)
+    report.reservation_error = reservation_error;
+    apply_admission(report, admission)
 }
 
 fn apply_admission(
     mut report: BandwidthReport,
     reservation: AdmissionReservation,
 ) -> BandwidthReport {
-    if let AdmissionReservation::Reserved { daily_runs_used } = reservation {
-        report.reserved = true;
-        for event in &mut report.events {
-            event.daily_runs_used = Some(daily_runs_used);
+    report.reserved = matches!(reservation, AdmissionReservation::Reserved { .. });
+    for event in &mut report.events {
+        if event.event_kind != EventKind::Bandwidth {
+            continue;
+        }
+        event.bandwidth_start_reserved = Some(report.reserved);
+        if let AdmissionReservation::Reserved {
+            accounting_date,
+            daily_bandwidth_starts,
+        } = reservation
+        {
+            event.provider_accounting_date = Some(accounting_date);
+            event.provider_daily_starts = Some(daily_bandwidth_starts);
         }
     }
     report
-}
-
-fn command_failure_report(
-    config: &ResolvedConfig,
-    run_id: &str,
-    interface: Option<&str>,
-    outcome: Outcome,
-    error_kind: ErrorKind,
-    message: String,
-) -> BandwidthReport {
-    let mut failure = RequestFailure::simple(RequestStage::Connect, error_kind, message, None, 1);
-    failure.outcome = outcome;
-    report_from_result(ReportInput {
-        run_id,
-        interface,
-        provider_id: &config.bandwidth.provider_id,
-        provider_kind: provider_kind(config),
-        server: None,
-        failures: vec![failure],
-        download: None,
-        upload: None,
-        outcome,
-    })
 }
 
 async fn run_candidates<C: TcpConnector, R: AddressResolver>(
@@ -530,60 +570,41 @@ async fn run_candidates<C: TcpConnector, R: AddressResolver>(
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> CandidateResult {
-    let mut all_failures = Vec::new();
+    progress: &mut AttemptProgress,
+) -> Outcome {
     for candidate in candidates {
+        progress.server_name = Some(candidate.logical_server.clone());
         report_phase(phase, LoadPhase::Setup);
-        let download = run_download(candidate, interface, connector, resolver, phase).await;
-        let download_retry = download.measurement.is_none()
-            && download
+        progress.download =
+            run_download(candidate, interface, connector, resolver, phase, progress).await;
+        if let Some(outcome) = progress.failures.last().and_then(provider_stop_outcome) {
+            return outcome;
+        }
+        if progress.download.is_none()
+            && progress
                 .failures
                 .last()
-                .is_some_and(|failure| failure.disposition == FailureDisposition::TryNextTarget);
-        let provider_stop = download.failures.last().and_then(provider_stop_outcome);
-        all_failures.extend(download.failures);
-        if let Some(outcome) = provider_stop {
-            return failed_candidate(candidate, all_failures, outcome);
-        }
-        if download_retry {
+                .is_some_and(|failure| failure.disposition == FailureDisposition::TryNextTarget)
+        {
             continue;
         }
 
         report_phase(phase, LoadPhase::Setup);
-        let upload = run_upload(candidate, interface, connector, resolver, phase).await;
-        let provider_stop = upload.failures.last().and_then(provider_stop_outcome);
-        all_failures.extend(upload.failures);
-        let outcome = provider_stop;
-        return CandidateResult {
-            download: download.measurement,
-            upload: upload.measurement,
-            failures: all_failures,
-            server: candidate.logical_server.clone(),
-            provider_id: candidate.provider_id.clone(),
-            provider_kind: candidate.provider_kind,
-            terminal_outcome: outcome,
-        };
+        progress.upload =
+            run_upload(candidate, interface, connector, resolver, phase, progress).await;
+        return progress
+            .failures
+            .last()
+            .and_then(provider_stop_outcome)
+            .unwrap_or_else(
+                || match (progress.download.is_some(), progress.upload.is_some()) {
+                    (true, true) => Outcome::Success,
+                    (true, false) | (false, true) => Outcome::Partial,
+                    (false, false) => Outcome::Error,
+                },
+            );
     }
-    let candidate = candidates
-        .first()
-        .expect("endpoint resolution returned candidates");
-    failed_candidate(candidate, all_failures, Outcome::NoCapacity)
-}
-
-fn failed_candidate(
-    candidate: &EndpointCandidate,
-    failures: Vec<RequestFailure>,
-    outcome: Outcome,
-) -> CandidateResult {
-    CandidateResult {
-        download: None,
-        upload: None,
-        failures,
-        server: candidate.logical_server.clone(),
-        provider_id: candidate.provider_id.clone(),
-        provider_kind: candidate.provider_kind,
-        terminal_outcome: Some(outcome),
-    }
+    Outcome::NoCapacity
 }
 
 fn provider_stop_outcome(failure: &RequestFailure) -> Option<Outcome> {
@@ -596,31 +617,29 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> DirectionResult {
+    progress: &mut AttemptProgress,
+) -> Option<DirectionMeasurement> {
+    let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.download_url,
+        RequestDirection::Download,
         candidate,
         interface,
         connector,
         resolver,
-        1,
+        progress,
     )
     .await
     {
         Ok(connected) => connected,
-        Err(failures) => {
-            return DirectionResult {
-                measurement: None,
-                failures,
-            };
-        }
+        Err(()) => return None,
     };
     let ConnectedSocket {
         mut socket,
         remote_ip,
-        source_ip,
-        mut failures,
+        local_ip,
     } = connected;
+    progress.begin_stage(RequestStage::Download);
     report_phase(phase, LoadPhase::Download);
     let started = Instant::now();
     let mut bytes = 0_u64;
@@ -639,11 +658,11 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
             }
             Ok(_) => {}
             Err(error) => {
-                failures.push(stream_failure(
+                progress.record_failure(stream_failure(
                     candidate,
                     RequestStage::Download,
                     remote_ip,
-                    source_ip,
+                    local_ip,
                     error.to_string(),
                     websocket_os_error(&error),
                 ));
@@ -654,41 +673,36 @@ async fn run_download<C: TcpConnector, R: AddressResolver>(
     let elapsed = started.elapsed();
     report_phase(phase, LoadPhase::Setup);
     if bytes == 0 {
-        if failures.is_empty() {
-            failures.push(stream_failure(
+        if progress.failures.len() == failures_before {
+            progress.record_failure(stream_failure(
                 candidate,
                 RequestStage::Download,
                 remote_ip,
-                source_ip,
+                local_ip,
                 "download ended without measurement bytes".to_owned(),
                 None,
             ));
         }
-        return DirectionResult {
-            measurement: None,
-            failures,
-        };
+        return None;
     }
-    if !completed && failures.is_empty() {
-        failures.push(stream_failure(
+    if !completed && progress.failures.len() == failures_before {
+        progress.record_failure(stream_failure(
             candidate,
             RequestStage::Download,
             remote_ip,
-            source_ip,
+            local_ip,
             "download connection ended without a close frame".to_owned(),
             None,
         ));
     }
-    DirectionResult {
-        measurement: Some(DirectionMeasurement {
-            bytes,
-            elapsed,
-            remote_ip,
-            source_ip,
-            metrics,
-        }),
-        failures,
-    }
+    Some(DirectionMeasurement {
+        request_id: progress.active.request_id,
+        bytes,
+        elapsed,
+        remote_ip,
+        local_ip,
+        metrics,
+    })
 }
 
 async fn run_upload<C: TcpConnector, R: AddressResolver>(
@@ -697,79 +711,94 @@ async fn run_upload<C: TcpConnector, R: AddressResolver>(
     connector: &C,
     resolver: &R,
     phase: Option<&watch::Sender<LoadPhase>>,
-) -> DirectionResult {
+    progress: &mut AttemptProgress,
+) -> Option<DirectionMeasurement> {
+    let failures_before = progress.failures.len();
     let connected = match connect_websocket(
         &candidate.upload_url,
+        RequestDirection::Upload,
         candidate,
         interface,
         connector,
         resolver,
-        1,
+        progress,
     )
     .await
     {
         Ok(connected) => connected,
-        Err(failures) => {
-            return DirectionResult {
-                measurement: None,
-                failures,
-            };
-        }
+        Err(()) => return None,
     };
     let ConnectedSocket {
         socket,
         remote_ip,
-        source_ip,
-        mut failures,
+        local_ip,
     } = connected;
+    progress.begin_stage(RequestStage::Upload);
+    let upload_started = (
+        progress.active.started_at_utc,
+        progress.stage_started_monotonic,
+    );
     report_phase(phase, LoadPhase::Upload);
     let UploadTransfer {
         bytes,
         elapsed,
         metrics,
         error,
-    } = transfer_upload(socket).await;
+    } = transfer_upload(socket, |bytes, elapsed, metrics| {
+        // Later TCP metric updates reuse this callback without restarting cleanup timing.
+        if progress.active.stage != RequestStage::Cleanup {
+            progress.begin_stage(RequestStage::Cleanup);
+        }
+        progress.upload = (bytes > 0).then_some(DirectionMeasurement {
+            request_id: progress.active.request_id,
+            bytes,
+            elapsed,
+            metrics,
+            local_ip,
+            remote_ip,
+        });
+    })
+    .await;
     report_phase(phase, LoadPhase::Setup);
     if let Some(error) = error {
         let os_error = match &error {
             UploadError::Transport(error) => websocket_os_error(error),
             _ => None,
         };
-        failures.push(stream_failure(
+        progress.record_failure(stream_failure(
             candidate,
-            RequestStage::Upload,
+            progress.active.stage,
             remote_ip,
-            source_ip,
+            local_ip,
             error.to_string(),
             os_error,
         ));
     }
     if bytes == 0 {
-        if failures.is_empty() {
-            failures.push(stream_failure(
+        if progress.failures.len() == failures_before {
+            // No measurement bytes is a transfer failure, even after a clean close.
+            progress.active.stage = RequestStage::Upload;
+            progress.active.started_at_utc = upload_started.0;
+            progress.stage_started_monotonic = upload_started.1;
+            progress.record_failure(stream_failure(
                 candidate,
                 RequestStage::Upload,
                 remote_ip,
-                source_ip,
+                local_ip,
                 "upload ended without measurement bytes".to_owned(),
                 None,
             ));
         }
-        return DirectionResult {
-            measurement: None,
-            failures,
-        };
+        return None;
     }
-    DirectionResult {
-        measurement: Some(DirectionMeasurement {
-            bytes,
-            elapsed,
-            remote_ip,
-            source_ip,
-            metrics,
-        }),
-        failures,
-    }
+    Some(DirectionMeasurement {
+        request_id: progress.active.request_id,
+        bytes,
+        elapsed,
+        remote_ip,
+        local_ip,
+        metrics,
+    })
 }
 
 fn report_phase(phase: Option<&watch::Sender<LoadPhase>>, value: LoadPhase) {
@@ -829,7 +858,10 @@ where
     Poll::Pending
 }
 
-async fn transfer_upload<S>(mut socket: WebSocketStream<S>) -> UploadTransfer
+async fn transfer_upload<S>(
+    mut socket: WebSocketStream<S>,
+    mut completed: impl FnMut(u64, Duration, TcpMetrics),
+) -> UploadTransfer
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -862,6 +894,7 @@ where
                 // The rate describes local payload acceptance during the active
                 // window, not delivery of the buffered tail or handshake waiting.
                 elapsed = Some(started.elapsed());
+                completed(bytes, elapsed.unwrap(), metrics);
                 deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
                 continue;
             }
@@ -870,10 +903,14 @@ where
         match progress {
             Ok(UploadProgress::Incoming(Some(Message::Text(text)))) => {
                 update_metrics(&mut metrics, text.as_ref());
+                if let Some(elapsed) = elapsed {
+                    completed(bytes, elapsed, metrics);
+                }
             }
             Ok(UploadProgress::Incoming(Some(Message::Close(_)))) => {
                 if elapsed.is_none() {
                     elapsed = Some(started.elapsed());
+                    completed(bytes, elapsed.unwrap(), metrics);
                     deadline = tokio::time::Instant::now() + UPLOAD_CLOSE_TIMEOUT;
                 }
                 peer_closed = true;
@@ -917,46 +954,66 @@ where
 struct ConnectedSocket {
     socket: NdtSocket,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
-    failures: Vec<RequestFailure>,
+    local_ip: IpAddr,
 }
 
 async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
     url: &Url,
+    direction: RequestDirection,
     candidate: &EndpointCandidate,
     interface: Option<&str>,
     connector: &C,
     resolver: &R,
-    attempt: u32,
-) -> Result<ConnectedSocket, Vec<RequestFailure>> {
+    progress: &mut AttemptProgress,
+) -> Result<ConnectedSocket, ()> {
+    let request_id = RequestId::new();
+    progress.active = RequestFailure::simple(
+        RequestStage::Dns,
+        ErrorKind::Internal,
+        "",
+        Some(url.to_string()),
+        request_id,
+    );
+    progress.stage_started_monotonic = progress.active.finished_monotonic;
+    progress.active.direction = Some(direction);
+    progress.active.server_name = Some(candidate.logical_server.clone());
     let host = match url.host_str() {
         Some(host) => host,
         None => {
-            return Err(vec![RequestFailure::simple(
+            progress.record_failure(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 "NDT7 URL has no host",
                 Some(url.to_string()),
-                attempt,
-            )]);
+                request_id,
+            ));
+            return Err(());
         }
     };
     let port = url.port_or_known_default().unwrap_or(443);
     let addresses = match resolver.resolve(host, port).await {
         Ok(addresses) => addresses,
         Err(message) => {
-            return Err(vec![RequestFailure::simple(
+            progress.record_failure(RequestFailure::simple(
                 RequestStage::Dns,
                 ErrorKind::Dns,
                 message,
                 Some(url.to_string()),
-                attempt,
-            )]);
+                request_id,
+            ));
+            return Err(());
         }
     };
-    let mut failures = Vec::new();
     for (address_index, remote) in addresses.into_iter().enumerate() {
-        let request_attempt = attempt + address_index as u32;
+        let request_id = if address_index == 0 {
+            request_id
+        } else {
+            RequestId::new()
+        };
+        progress.begin_stage(RequestStage::Connect);
+        progress.active.request_id = request_id;
+        progress.active.remote_ip = Some(remote.ip());
+        progress.active.local_ip = None;
         let tcp = match connector.connect(remote, interface).await {
             Ok(tcp) => tcp,
             Err(error) => {
@@ -965,15 +1022,15 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     ErrorKind::Connect,
                     format!("TCP connect failed: {error}"),
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 );
                 failure.remote_ip = Some(remote.ip());
                 failure.os_error_code = error.raw_os_error();
-                failures.push(failure);
+                progress.record_failure(failure);
                 continue;
             }
         };
-        let source_ip = tcp
+        let local_ip = tcp
             .local_addr()
             .map(|address| address.ip())
             .unwrap_or_else(|_| {
@@ -983,6 +1040,8 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
                 }
             });
+        progress.active.local_ip = Some(local_ip);
+        progress.begin_stage(RequestStage::Tls);
         let stream = match wrap_stream(tcp, url, candidate).await {
             Ok(stream) => stream,
             Err(message) => {
@@ -991,25 +1050,26 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     ErrorKind::Tls,
                     message,
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 );
-                failure.source_ip = Some(source_ip);
+                failure.local_ip = Some(local_ip);
                 failure.remote_ip = Some(remote.ip());
-                failures.push(failure);
+                progress.record_failure(failure);
                 continue;
             }
         };
+        progress.begin_stage(RequestStage::WebsocketHandshake);
         let request = match websocket_request(url, candidate) {
             Ok(request) => request,
             Err(message) => {
-                failures.push(RequestFailure::simple(
+                progress.record_failure(RequestFailure::simple(
                     RequestStage::WebsocketHandshake,
                     ErrorKind::WebsocketHandshake,
                     message,
                     Some(url.to_string()),
-                    request_attempt,
+                    request_id,
                 ));
-                return Err(failures);
+                return Err(());
             }
         };
         let websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -1022,60 +1082,64 @@ async fn connect_websocket<C: TcpConnector, R: AddressResolver>(
                     .get(SEC_WEBSOCKET_PROTOCOL)
                     .and_then(|value| value.to_str().ok());
                 if selected != Some(NDT7_SUBPROTOCOL) {
-                    failures.push(handshake_failure(
+                    progress.record_failure(handshake_failure(
                         candidate,
                         url,
                         remote.ip(),
-                        source_ip,
-                        request_attempt,
+                        local_ip,
+                        &request_id,
                         None,
                         "server did not select the NDT7 WebSocket subprotocol".to_owned(),
                     ));
-                    return Err(failures);
+                    return Err(());
                 }
                 return Ok(ConnectedSocket {
                     socket,
                     remote_ip: remote.ip(),
-                    source_ip,
-                    failures,
+                    local_ip,
                 });
             }
             Err(WebSocketError::Http(response)) => {
+                let received_at = Utc::now();
+                let received_monotonic = tokio::time::Instant::now();
                 let status = response.status().as_u16();
                 let retry_header = response.headers().get("retry-after");
                 let retry_after = retry_header
                     .and_then(|value| value.to_str().ok())
-                    .and_then(|value| parse_retry_after_value(value, std::time::SystemTime::now()));
+                    .and_then(|value| parse_retry_after_value(value, received_at));
                 let retry_detail = match (retry_header.is_some(), retry_after.is_some()) {
                     (true, true) => "Retry-After parsed",
                     (true, false) => "Retry-After malformed",
                     (false, _) => "Retry-After missing",
                 };
-                failures.push(handshake_failure(
+                let mut failure = handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
-                    source_ip,
-                    request_attempt,
+                    local_ip,
+                    &request_id,
                     Some((status, retry_after)),
                     format!("WebSocket handshake returned HTTP {status}; {retry_detail}"),
-                ));
-                return Err(failures);
+                );
+                failure.finished_at_utc = received_at;
+                failure.finished_monotonic = received_monotonic;
+                progress.record_failure(failure);
+                return Err(());
             }
             Err(error) => {
-                failures.push(handshake_failure(
+                progress.record_failure(handshake_failure(
                     candidate,
                     url,
                     remote.ip(),
-                    source_ip,
-                    request_attempt,
+                    local_ip,
+                    &request_id,
                     None,
                     format!("WebSocket handshake failed: {error}"),
                 ));
             }
         }
     }
-    Err(failures)
+    Err(())
 }
 
 async fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
@@ -1145,7 +1209,7 @@ async fn wrap_stream(
     match url.scheme() {
         "ws" if candidate.allow_insecure => Ok(Box::new(tcp)),
         "wss" => {
-            let roots = tls_roots(candidate.ca_cert.as_deref())?;
+            let roots = crate::tls::root_store(candidate.ca_cert.as_deref())?;
             let config = ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
@@ -1168,31 +1232,6 @@ async fn wrap_stream(
         }
         scheme => Err(format!("unsupported WebSocket scheme: {scheme}")),
     }
-}
-
-fn tls_roots(ca_cert: Option<&std::path::Path>) -> Result<RootCertStore, String> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(path) = ca_cert {
-        let contents = std::fs::read(path)
-            .map_err(|error| format!("cannot read private CA {}: {error}", path.display()))?;
-        let mut found = false;
-        for certificate in CertificateDer::pem_slice_iter(&contents) {
-            let certificate = certificate
-                .map_err(|error| format!("invalid private CA {}: {error}", path.display()))?;
-            roots
-                .add(certificate)
-                .map_err(|error| format!("invalid private CA {}: {error}", path.display()))?;
-            found = true;
-        }
-        if !found {
-            return Err(format!(
-                "private CA {} contains no certificates",
-                path.display()
-            ));
-        }
-    }
-    Ok(roots)
 }
 
 fn websocket_request(
@@ -1229,23 +1268,30 @@ fn handshake_failure(
     candidate: &EndpointCandidate,
     url: &Url,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
-    attempt: u32,
-    response: Option<(u16, Option<Duration>)>,
+    local_ip: IpAddr,
+    request_id: &RequestId,
+    response: Option<(u16, Option<RetryAfter>)>,
     message: String,
 ) -> RequestFailure {
     let (http_status, retry_after) = response.unzip();
     let (outcome, disposition) = classify_handshake_status(candidate.provider_kind, http_status);
+    let now = Utc::now();
     RequestFailure {
+        elapsed: Duration::ZERO,
+        finished_monotonic: tokio::time::Instant::now(),
+        started_at_utc: now,
+        finished_at_utc: now,
+        direction: None,
         stage: RequestStage::WebsocketHandshake,
         outcome,
         error_kind: ErrorKind::WebsocketHandshake,
         message,
-        server: Some(url.to_string()),
-        source_ip: Some(source_ip),
+        server_name: Some(candidate.logical_server.clone()),
+        request_url: Some(url.to_string()),
+        local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code: None,
-        attempt,
+        request_id: request_id.to_owned(),
         http_status,
         retry_after: retry_after.flatten(),
         disposition,
@@ -1270,24 +1316,34 @@ fn stream_failure(
     candidate: &EndpointCandidate,
     stage: RequestStage,
     remote_ip: IpAddr,
-    source_ip: IpAddr,
+    local_ip: IpAddr,
     message: String,
     os_error_code: Option<i32>,
 ) -> RequestFailure {
+    let now = Utc::now();
     RequestFailure {
+        elapsed: Duration::ZERO,
+        finished_monotonic: tokio::time::Instant::now(),
+        started_at_utc: now,
+        finished_at_utc: now,
+        direction: None,
         stage,
         outcome: Outcome::Error,
         error_kind: match stage {
             RequestStage::Download => ErrorKind::DownloadFailed,
-            RequestStage::Upload => ErrorKind::UploadFailed,
+            RequestStage::Upload | RequestStage::Cleanup => ErrorKind::UploadFailed,
             _ => ErrorKind::Io,
         },
         message,
-        server: Some(candidate.logical_server.clone()),
-        source_ip: Some(source_ip),
+        server_name: Some(candidate.logical_server.clone()),
+        request_url: Some(match stage {
+            RequestStage::Upload | RequestStage::Cleanup => candidate.upload_url.to_string(),
+            _ => candidate.download_url.to_string(),
+        }),
+        local_ip: Some(local_ip),
         remote_ip: Some(remote_ip),
         os_error_code,
-        attempt: 1,
+        request_id: RequestId::new(),
         http_status: None,
         retry_after: None,
         disposition: FailureDisposition::Terminal,
@@ -1302,11 +1358,14 @@ fn websocket_os_error(error: &WebSocketError) -> Option<i32> {
 }
 
 struct ReportInput<'a> {
-    run_id: &'a str,
+    elapsed: Duration,
+    started_at_utc: DateTime<Utc>,
+    finished_at_utc: DateTime<Utc>,
+    run_id: &'a RunId,
     interface: Option<&'a str>,
     provider_id: &'a str,
     provider_kind: ProviderKind,
-    server: Option<String>,
+    server_name: Option<String>,
     failures: Vec<RequestFailure>,
     download: Option<DirectionMeasurement>,
     upload: Option<DirectionMeasurement>,
@@ -1315,71 +1374,52 @@ struct ReportInput<'a> {
 
 fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
     let ReportInput {
+        elapsed,
+        started_at_utc,
+        finished_at_utc,
         run_id,
         interface,
         provider_id,
         provider_kind,
-        server,
+        server_name,
         failures,
         download,
         upload,
         outcome,
     } = input;
-    let now = Utc::now();
+    let now = finished_at_utc;
     let mut events = failures
         .iter()
-        .enumerate()
-        .map(|(index, failure)| {
-            failure_event(
-                run_id,
-                index,
-                interface,
-                provider_id,
-                provider_kind,
-                failure,
-                now,
-            )
-        })
+        .map(|failure| failure_event(run_id, interface, provider_id, provider_kind, failure))
         .collect::<Vec<_>>();
-    let mut bandwidth = MeasurementEvent::new(
-        run_id,
-        format!("{run_id}:bandwidth"),
-        EventKind::Bandwidth,
-        outcome,
-        now,
-    );
-    bandwidth.started_at_utc = download
-        .as_ref()
-        .or(upload.as_ref())
-        .map(|measurement| now - chrono_duration(measurement.elapsed));
+    let mut bandwidth = MeasurementEvent::new(run_id, EventKind::Bandwidth, outcome, now);
+    bandwidth.started_at_utc = Some(started_at_utc);
     bandwidth.interface = interface.map(str::to_owned);
-    bandwidth.source_ip = upload
-        .as_ref()
-        .or(download.as_ref())
-        .map(|measurement| measurement.source_ip);
     bandwidth.trigger_reason = Some(TriggerReason::Manual);
     bandwidth.provider_id = Some(provider_id.to_owned());
     bandwidth.provider_kind = Some(provider_kind);
-    bandwidth.server = server;
-    bandwidth.remote_ip = upload
-        .as_ref()
-        .or(download.as_ref())
-        .map(|measurement| measurement.remote_ip);
+    bandwidth.server_name = server_name;
     bandwidth.download_mbps = download
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
     bandwidth.upload_mbps = upload
         .as_ref()
         .and_then(|measurement| throughput_mbps(measurement.bytes, measurement.elapsed));
-    bandwidth.bytes_received = download.as_ref().map(|measurement| measurement.bytes);
-    bandwidth.bytes_sent = upload.as_ref().map(|measurement| measurement.bytes);
-    bandwidth.duration_ms = Some(
-        download.as_ref().map_or(0.0, |measurement| {
-            measurement.elapsed.as_secs_f64() * 1_000.0
-        }) + upload.as_ref().map_or(0.0, |measurement| {
-            measurement.elapsed.as_secs_f64() * 1_000.0
-        }),
-    );
+    bandwidth.download_request_id = download.as_ref().map(|measurement| measurement.request_id);
+    bandwidth.upload_request_id = upload.as_ref().map(|measurement| measurement.request_id);
+    bandwidth.download_bytes = download.as_ref().map(|measurement| measurement.bytes);
+    bandwidth.upload_bytes = upload.as_ref().map(|measurement| measurement.bytes);
+    bandwidth.download_measurement_duration_ms = download
+        .as_ref()
+        .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
+    bandwidth.download_local_ip = download.as_ref().map(|measurement| measurement.local_ip);
+    bandwidth.download_remote_ip = download.as_ref().map(|measurement| measurement.remote_ip);
+    bandwidth.upload_measurement_duration_ms = upload
+        .as_ref()
+        .map(|measurement| measurement.elapsed.as_secs_f64() * 1_000.0);
+    bandwidth.upload_local_ip = upload.as_ref().map(|measurement| measurement.local_ip);
+    bandwidth.upload_remote_ip = upload.as_ref().map(|measurement| measurement.remote_ip);
+    bandwidth.elapsed_ms = Some(elapsed.as_secs_f64() * 1_000.0);
     let download_metrics = download
         .as_ref()
         .map(|measurement| measurement.metrics)
@@ -1388,14 +1428,15 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
         .as_ref()
         .map(|measurement| measurement.metrics)
         .unwrap_or_default();
-    bandwidth.tcp_min_rtt_ms = upload_metrics.min_rtt_ms.or(download_metrics.min_rtt_ms);
-    bandwidth.tcp_rtt_ms = upload_metrics.rtt_ms.or(download_metrics.rtt_ms);
-    bandwidth.tcp_retransmissions = upload_metrics
-        .retransmissions
-        .or(download_metrics.retransmissions);
+    bandwidth.download_server_tcp_min_rtt_ms = download_metrics.min_rtt_ms;
+    bandwidth.download_server_tcp_rtt_ms = download_metrics.rtt_ms;
+    bandwidth.download_server_tcp_retransmitted_bytes = download_metrics.retransmitted_bytes;
+    bandwidth.upload_server_tcp_min_rtt_ms = upload_metrics.min_rtt_ms;
+    bandwidth.upload_server_tcp_rtt_ms = upload_metrics.rtt_ms;
+    bandwidth.upload_server_tcp_retransmitted_bytes = upload_metrics.retransmitted_bytes;
     if outcome != Outcome::Success {
         bandwidth.error_kind = failures.last().map(|failure| failure.error_kind);
-        bandwidth.error_message = failures.last().map(|failure| failure.message.clone());
+        bandwidth.message = failures.last().map(|failure| failure.message.clone());
     }
     events.push(bandwidth);
     BandwidthReport {
@@ -1407,37 +1448,38 @@ fn report_from_result(input: ReportInput<'_>) -> BandwidthReport {
 }
 
 fn failure_event(
-    run_id: &str,
-    index: usize,
+    run_id: &RunId,
     interface: Option<&str>,
     provider_id: &str,
     provider_kind: ProviderKind,
     failure: &RequestFailure,
-    now: DateTime<Utc>,
 ) -> MeasurementEvent {
     let mut event = MeasurementEvent::new(
         run_id,
-        format!("{run_id}:request-failure:{index}"),
         EventKind::RequestFailure,
         failure.outcome,
-        now,
+        failure.finished_at_utc,
     );
+    event.started_at_utc = Some(failure.started_at_utc);
+    event.elapsed_ms = Some(failure.elapsed.as_secs_f64() * 1_000.0);
     event.interface = interface.map(str::to_owned);
     event.provider_id = Some(provider_id.to_owned());
     event.provider_kind = Some(provider_kind);
-    event.server.clone_from(&failure.server);
-    event.source_ip = failure.source_ip;
-    event.remote_ip = failure.remote_ip;
+    event.server_name.clone_from(&failure.server_name);
+    event.request_url.clone_from(&failure.request_url);
+    event.request_local_ip = failure.local_ip;
+    event.request_remote_ip = failure.remote_ip;
+    event.request_direction = failure.direction;
     event.request_stage = Some(failure.stage);
-    event.request_attempt = Some(failure.attempt);
-    event.http_status = failure.http_status;
-    event.retry_after_ms = failure
+    event.request_id = Some(failure.request_id);
+    event.request_http_status = failure.http_status;
+    event.request_retry_after_ms = failure
         .retry_after
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
-    event.rate_limit_until_utc = retry_until(now, failure.retry_after);
+        .and_then(|retry| u64::try_from(retry.delay.as_millis()).ok());
+    event.request_retry_at_utc = failure.retry_after.map(|retry| retry.deadline);
     event.error_kind = Some(failure.error_kind);
     event.os_error_code = failure.os_error_code;
-    event.error_message = Some(failure.message.clone());
+    event.message = Some(failure.message.clone());
     event
 }
 
@@ -1456,7 +1498,7 @@ fn update_metrics(metrics: &mut TcpMetrics, text: &str) {
     {
         metrics.min_rtt_ms = tcp.min_rtt.map(|value| value as f64 / 1_000.0);
         metrics.rtt_ms = tcp.rtt.map(|value| value as f64 / 1_000.0);
-        metrics.retransmissions = tcp.bytes_retrans;
+        metrics.retransmitted_bytes = tcp.bytes_retrans;
     }
 }
 
@@ -1487,8 +1529,14 @@ fn upload_payload_with_size(size: usize) -> Vec<u8> {
     payload
 }
 
-fn chrono_duration(duration: Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+pub(crate) fn bandwidth_run_context(config: &ResolvedConfig, reason: TriggerReason) -> RunContext {
+    RunContext {
+        interface: config.interfaces.first().cloned(),
+        provider_id: Some(config.bandwidth.provider_id.clone()),
+        provider_kind: Some(provider_kind(config)),
+        trigger_reason: Some(reason),
+        ..RunContext::default()
+    }
 }
 
 fn provider_kind(config: &ResolvedConfig) -> ProviderKind {
@@ -1509,9 +1557,311 @@ mod tests {
     use tokio_tungstenite::tungstenite::{Message, protocol::Role};
 
     use super::{
-        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, UploadError,
+        INITIAL_UPLOAD_MESSAGE_SIZE, MAX_UPLOAD_MESSAGE_SIZE, TcpMetrics, UploadError,
         next_upload_message_size, transfer_upload, upload_payload,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn stage_transitions_and_interruptions_preserve_their_own_boundaries() {
+        use super::*;
+        let mut progress = AttemptProgress::new(RequestStage::Locate);
+        let attempt_start = progress.started_at_utc;
+        progress.active.request_id = RequestId::new();
+        let request_id = progress.active.request_id;
+        for stage in [
+            RequestStage::Locate,
+            RequestStage::Dns,
+            RequestStage::Connect,
+            RequestStage::Tls,
+            RequestStage::WebsocketHandshake,
+            RequestStage::Download,
+            RequestStage::Upload,
+            RequestStage::Cleanup,
+        ] {
+            let before = Utc::now();
+            progress.begin_stage(stage);
+            let stage_start = progress.active.started_at_utc;
+            assert!(before <= stage_start && stage_start <= Utc::now());
+            assert_eq!(progress.started_at_utc, attempt_start);
+            tokio::time::advance(Duration::from_secs(2)).await;
+            let failure =
+                RequestFailure::simple(stage, ErrorKind::Io, "fixture", None, RequestId::new());
+            let failure_finish = failure.finished_at_utc;
+            tokio::time::advance(Duration::from_secs(3)).await;
+            progress.record_failure(failure);
+            let recorded = progress.failures.last().unwrap();
+            assert_eq!(recorded.started_at_utc, stage_start);
+            assert_eq!(recorded.finished_at_utc, failure_finish);
+            assert_eq!(recorded.elapsed, Duration::from_secs(2));
+            assert_eq!(recorded.request_id, request_id);
+            for outcome in [Outcome::Timeout, Outcome::Cancelled] {
+                // A clock adjustment must not clamp or reconstruct observed termination.
+                let finish = stage_start - chrono::Duration::seconds(1);
+                progress.interrupt(
+                    outcome,
+                    Duration::from_secs(5),
+                    finish,
+                    tokio::time::Instant::now(),
+                );
+                let failure = progress.failures.last().unwrap();
+                assert_eq!(failure.stage, stage);
+                assert_eq!(failure.outcome, outcome);
+                assert_eq!(failure.started_at_utc, stage_start);
+                assert_eq!(failure.finished_at_utc, finish);
+                assert_eq!(failure.elapsed, Duration::from_secs(5));
+                assert_eq!(failure.request_id, request_id);
+            }
+        }
+    }
+
+    #[test]
+    fn report_preserves_observed_times_without_changing_measurement_calculations() {
+        use super::*;
+        let start = DateTime::from_timestamp(1_000, 0).unwrap();
+        let direction = |bytes, seconds| DirectionMeasurement {
+            request_id: RequestId::new(),
+            bytes,
+            elapsed: Duration::from_secs(seconds),
+            remote_ip: if seconds == 10 {
+                "192.0.2.1"
+            } else {
+                "198.51.100.1"
+            }
+            .parse()
+            .unwrap(),
+            local_ip: if seconds == 10 {
+                "192.0.2.2"
+            } else {
+                "198.51.100.2"
+            }
+            .parse()
+            .unwrap(),
+            metrics: TcpMetrics::default(),
+        };
+        // Includes delayed setup/cleanup and a wall-clock rollback. Neither changes rates.
+        for finish_offset in [22, 120, -10] {
+            for (download, upload, outcome) in [
+                (true, true, Outcome::Success),
+                (true, false, Outcome::Partial),
+                (false, true, Outcome::Partial),
+                (false, false, Outcome::Error),
+                (true, false, Outcome::Timeout),
+                (false, false, Outcome::Cancelled),
+            ] {
+                let finish = start + chrono::Duration::seconds(finish_offset);
+                let mut failure = RequestFailure::simple(
+                    RequestStage::Connect,
+                    ErrorKind::Connect,
+                    "fixture",
+                    None,
+                    RequestId::new(),
+                );
+                failure.started_at_utc = start + chrono::Duration::seconds(1);
+                failure.finished_at_utc = start + chrono::Duration::seconds(2);
+                failure.retry_after = parse_retry_after_value("60", failure.finished_at_utc);
+                let report = report_from_result(ReportInput {
+                    elapsed: Duration::from_secs(23),
+                    started_at_utc: start,
+                    finished_at_utc: finish,
+                    run_id: &crate::model::RunId::new(),
+                    interface: None,
+                    provider_id: "direct",
+                    provider_kind: ProviderKind::Direct,
+                    server_name: None,
+                    failures: vec![failure.clone()],
+                    download: download.then(|| direction(1_000_000, 10)),
+                    upload: upload.then(|| direction(2_000_000, 5)),
+                    outcome,
+                });
+                let request = &report.events[0];
+                assert_eq!(request.started_at_utc, Some(failure.started_at_utc));
+                assert_eq!(request.finished_at_utc, Some(failure.finished_at_utc));
+                assert_eq!(request.request_retry_after_ms, Some(60_000));
+                assert_eq!(
+                    request.request_retry_at_utc,
+                    Some(start + chrono::Duration::seconds(62))
+                );
+                let event = &report.events[1];
+                assert_eq!(event.started_at_utc, Some(start));
+                assert_eq!(event.finished_at_utc, Some(finish));
+                assert_eq!(event.download_mbps, download.then_some(0.8));
+                assert_eq!(event.upload_mbps, upload.then_some(3.2));
+                assert_eq!(event.download_bytes, download.then_some(1_000_000));
+                assert_eq!(event.upload_bytes, upload.then_some(2_000_000));
+                assert_eq!(
+                    event.download_measurement_duration_ms,
+                    download.then_some(10_000.0)
+                );
+                assert_eq!(
+                    event.upload_measurement_duration_ms,
+                    upload.then_some(5_000.0)
+                );
+                assert_eq!(
+                    event.download_local_ip,
+                    download.then(|| "192.0.2.2".parse().unwrap())
+                );
+                assert_eq!(
+                    event.upload_local_ip,
+                    upload.then(|| "198.51.100.2".parse().unwrap())
+                );
+                assert_eq!(
+                    event.download_remote_ip,
+                    download.then(|| "192.0.2.1".parse().unwrap())
+                );
+                assert_eq!(
+                    event.upload_remote_ip,
+                    upload.then(|| "198.51.100.1".parse().unwrap())
+                );
+                assert_eq!(event.ping_local_ip, None);
+                assert_eq!(event.request_remote_ip, None);
+                let mut writer = crate::journal::JournalWriter::from_writer(Vec::new()).unwrap();
+                writer.append_batch(std::slice::from_ref(event)).unwrap();
+                let encoded = writer.into_inner().unwrap();
+                let mut reader = csv::Reader::from_reader(encoded.as_slice());
+                let headers = reader.headers().unwrap().clone();
+                let row = reader.records().next().unwrap().unwrap();
+                let json: serde_json::Value =
+                    serde_json::from_str(&crate::console::render_jsonl(event).unwrap()).unwrap();
+                for (field, cell) in headers.iter().zip(row.iter()) {
+                    let value = &json[field];
+                    if value.is_null() {
+                        assert!(cell.is_empty(), "{field}");
+                    } else if let Some(text) = value.as_str() {
+                        assert_eq!(cell, text, "{field}");
+                    } else {
+                        assert_eq!(
+                            cell.parse::<f64>().unwrap(),
+                            value.as_f64().unwrap(),
+                            "{field}"
+                        );
+                    }
+                }
+                for (rate, bytes, duration) in [
+                    (
+                        "download_mbps",
+                        "download_bytes",
+                        "download_measurement_duration_ms",
+                    ),
+                    (
+                        "upload_mbps",
+                        "upload_bytes",
+                        "upload_measurement_duration_ms",
+                    ),
+                ] {
+                    if let Some(value) = json[rate].as_f64() {
+                        let calculated = 8.0 * json[bytes].as_f64().unwrap()
+                            / (1000.0 * json[duration].as_f64().unwrap());
+                        assert!((value - calculated).abs() <= value.abs() * 1e-12);
+                    }
+                }
+
+                assert_eq!(event.elapsed_ms, Some(23_000.0));
+            }
+        }
+    }
+
+    #[test]
+    fn request_retry_evidence_is_independent_of_reporting_time() {
+        use super::*;
+        let received = DateTime::from_timestamp(120, 500_000_000).unwrap();
+        for header in [
+            None,
+            Some("60"),
+            Some("0"),
+            Some("later"),
+            Some("Thu, 01 Jan 1970 00:01:00 GMT"),
+            Some("18446744073709551615"),
+        ] {
+            let mut failure = RequestFailure::simple(
+                RequestStage::WebsocketHandshake,
+                ErrorKind::HttpStatus,
+                "fixture",
+                None,
+                RequestId::new(),
+            );
+            failure.finished_at_utc = received;
+            failure.retry_after = header.and_then(|value| parse_retry_after_value(value, received));
+            let retry = failure.retry_after;
+            let event = failure_event(
+                &RunId::new(),
+                None,
+                "direct",
+                ProviderKind::Direct,
+                &failure,
+            );
+            assert_eq!(event.finished_at_utc, Some(received));
+            assert_eq!(
+                event.request_retry_at_utc,
+                retry.map(|value| value.deadline)
+            );
+            assert_eq!(
+                event.request_retry_after_ms,
+                retry.and_then(|value| u64::try_from(value.delay.as_millis()).ok())
+            );
+        }
+    }
+
+    #[test]
+    fn tcp_fields_never_borrow_from_the_other_direction() {
+        use super::*;
+        let now = Utc::now();
+        let measurement = |mask: u8, upload| DirectionMeasurement {
+            request_id: RequestId::new(),
+            bytes: 1_000_000,
+            elapsed: Duration::from_secs(1),
+            remote_ip: "192.0.2.1".parse().unwrap(),
+            local_ip: "192.0.2.2".parse().unwrap(),
+            metrics: TcpMetrics {
+                min_rtt_ms: (mask & 1 != 0).then_some(if upload { 9.0 } else { 1.0 }),
+                rtt_ms: (mask & 2 != 0).then_some(if upload { 12.0 } else { 2.0 }),
+                retransmitted_bytes: (mask & 4 != 0).then_some(if upload { u64::MAX } else { 0 }),
+            },
+        };
+        // Eight field combinations plus an entirely unavailable direction.
+        for download_mask in 0..=8 {
+            for upload_mask in 0..=8 {
+                let download = (download_mask < 8).then(|| measurement(download_mask, false));
+                let upload = (upload_mask < 8).then(|| measurement(upload_mask, true));
+                let expected = |value: &Option<DirectionMeasurement>| {
+                    value
+                        .as_ref()
+                        .map(|direction| direction.metrics)
+                        .unwrap_or_default()
+                };
+                let down = expected(&download);
+                let up = expected(&upload);
+                let report = report_from_result(ReportInput {
+                    elapsed: Duration::from_secs(23),
+                    started_at_utc: now,
+                    finished_at_utc: now,
+                    run_id: &crate::model::RunId::new(),
+                    interface: None,
+                    provider_id: "direct",
+                    provider_kind: ProviderKind::Direct,
+                    server_name: None,
+                    failures: Vec::new(),
+                    download,
+                    upload,
+                    outcome: Outcome::Partial,
+                });
+                let event = report.events.last().unwrap();
+                assert_eq!(event.download_server_tcp_min_rtt_ms, down.min_rtt_ms);
+                assert_eq!(event.download_server_tcp_rtt_ms, down.rtt_ms);
+                assert_eq!(
+                    event.download_server_tcp_retransmitted_bytes,
+                    down.retransmitted_bytes
+                );
+                assert_eq!(event.upload_server_tcp_min_rtt_ms, up.min_rtt_ms);
+                assert_eq!(event.upload_server_tcp_rtt_ms, up.rtt_ms);
+                assert_eq!(
+                    event.upload_server_tcp_retransmitted_bytes,
+                    up.retransmitted_bytes
+                );
+                assert_eq!(event.download_mbps, (download_mask < 8).then_some(8.0));
+                assert_eq!(event.upload_mbps, (upload_mask < 8).then_some(8.0));
+            }
+        }
+    }
 
     async fn upload_pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
         let (client, server) = duplex(64);
@@ -1557,7 +1907,7 @@ mod tests {
     async fn stalled_upload_stops_at_twelve_seconds_without_counting_cleanup_time() {
         let (client, _server) = upload_pair().await;
         let started = Instant::now();
-        let result = transfer_upload(client).await;
+        let result = transfer_upload(client, |_, _, _| {}).await;
         assert_eq!(started.elapsed(), Duration::from_secs(12));
         assert_eq!(result.elapsed, Duration::from_secs(10));
         assert_eq!(result.bytes, INITIAL_UPLOAD_MESSAGE_SIZE as u64);
@@ -1565,9 +1915,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn interrupted_upload_publishes_only_a_completed_window() {
+        for seconds in [5, 11] {
+            let (client, _server) = upload_pair().await;
+            let mut completed = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(seconds),
+                transfer_upload(client, |bytes, elapsed, metrics| {
+                    completed = Some((bytes, elapsed, metrics));
+                }),
+            )
+            .await;
+            assert!(result.is_err());
+            if seconds < 10 {
+                assert!(completed.is_none());
+            } else {
+                assert_eq!(
+                    completed,
+                    Some((
+                        INITIAL_UPLOAD_MESSAGE_SIZE as u64,
+                        Duration::from_secs(10),
+                        TcpMetrics::default(),
+                    ))
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn incoming_messages_do_not_requeue_or_recount_a_blocked_payload() {
         let (client, mut server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         tokio::task::yield_now().await;
         advance(Duration::from_secs(1)).await;
         server.send(Message::Ping(vec![1].into())).await.unwrap();
@@ -1588,7 +1966,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn upload_automatically_replies_to_ping_and_preserves_partial_frame_on_close() {
         let (client, mut server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         server.send(Message::Ping(vec![7].into())).await.unwrap();
         let mut received = 0;
         loop {
@@ -1618,7 +1996,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn abrupt_disconnect_retains_transport_error_and_accepted_bytes() {
         let (client, server) = upload_pair().await;
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         tokio::task::yield_now().await;
         drop(server);
         let result = upload.await.unwrap();
@@ -1630,7 +2008,7 @@ mod tests {
     async fn deadline_drains_only_the_pending_payload_and_excludes_close_waiting() {
         let (client, mut server) = upload_pair().await;
         let started = Instant::now();
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         let Message::Binary(first) = server.next().await.unwrap().unwrap() else {
             panic!("expected initial payload");
         };
@@ -1659,7 +2037,7 @@ mod tests {
     async fn immediate_peer_close_does_not_invent_measurement_bytes() {
         let (client, mut server) = upload_pair().await;
         server.close(None).await.unwrap();
-        let upload = tokio::spawn(transfer_upload(client));
+        let upload = tokio::spawn(transfer_upload(client, |_, _, _| {}));
         assert!(matches!(
             server.next().await.unwrap().unwrap(),
             Message::Close(_)
@@ -1681,11 +2059,6 @@ async fn cancellation_requested(shutdown: &mut watch::Receiver<bool>) {
 
 fn trace_console_diagnostic(diagnostic: ConsoleDiagnostic) {
     tracing::warn!(?diagnostic, "bandwidth console diagnostic");
-}
-
-fn next_run_number() -> u64 {
-    static RUN_NUMBER: AtomicU64 = AtomicU64::new(1);
-    RUN_NUMBER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug, Deserialize)]

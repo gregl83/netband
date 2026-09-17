@@ -1,3 +1,4 @@
+mod support;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -105,13 +106,12 @@ fn recovered() -> HealthDecision {
 
 fn success_report(reserved: bool) -> BandwidthReport {
     let mut bandwidth = MeasurementEvent::new(
-        "bandwidth",
-        "bandwidth:result",
+        support::id::<netband::model::RunId>("bandwidth"),
         EventKind::Bandwidth,
         Outcome::Success,
         at(30, 1, 0, 0),
     );
-    bandwidth.remote_ip = Some("192.0.2.1".parse().unwrap());
+    bandwidth.download_remote_ip = Some("192.0.2.1".parse().unwrap());
     BandwidthReport {
         events: vec![bandwidth],
         outcome: Outcome::Success,
@@ -127,8 +127,7 @@ fn rate_report(
     reserved: bool,
 ) -> BandwidthReport {
     let mut failure = MeasurementEvent::new(
-        "bandwidth",
-        "bandwidth:request",
+        support::id::<netband::model::RunId>("bandwidth"),
         EventKind::RequestFailure,
         if status == 204 {
             Outcome::NoCapacity
@@ -138,8 +137,10 @@ fn rate_report(
         at(30, 1, 0, 0),
     );
     failure.request_stage = Some(stage);
-    failure.http_status = Some(status);
-    failure.retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64);
+    failure.request_http_status = Some(status);
+    failure.request_retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64);
+    failure.request_retry_at_utc =
+        retry_after.map(|delay| at(30, 1, 0, 0) + TimeDelta::from_std(delay).unwrap());
     BandwidthReport {
         events: vec![failure],
         outcome: Outcome::RateLimited,
@@ -196,7 +197,9 @@ fn mlab_cap_is_global_and_survives_restart() {
     let mut restarted = Scheduler::open_seeded(&path, &mlab(), at(30, 6, 0, 0), 6).unwrap();
     assert_eq!(restarted.snapshot().runs.len(), 4);
     assert!(matches!(
-        restarted.preflight_manual("run", at(30, 6, 0, 0)).unwrap(),
+        restarted
+            .preflight_manual(&support::id("run"), at(30, 6, 0, 0))
+            .unwrap(),
         ManualDecision::Blocked(_)
     ));
 }
@@ -217,10 +220,18 @@ fn force_overrides_direct_limits_but_not_the_mlab_hard_cap() {
     let mut scheduler =
         Scheduler::open_seeded(&direct_path, &forced_direct, forced_at, 82).unwrap();
     assert_eq!(
-        scheduler.preflight_manual("forced", forced_at).unwrap(),
+        scheduler
+            .preflight_manual(&support::id("forced"), forced_at)
+            .unwrap(),
         ManualDecision::Allowed
     );
-    assert_eq!(scheduler.reserve_run(forced_at).unwrap().daily_runs_used, 2);
+    assert_eq!(
+        scheduler
+            .reserve_run(forced_at)
+            .unwrap()
+            .daily_bandwidth_starts,
+        2
+    );
 
     let mlab_root = TempDir::new().unwrap();
     let mlab_path = state_path(&mlab_root);
@@ -236,7 +247,9 @@ fn force_overrides_direct_limits_but_not_the_mlab_hard_cap() {
     let forced_at = at(30, 5, 0, 0);
     let mut scheduler = Scheduler::open_seeded(&mlab_path, &mlab_config, forced_at, 84).unwrap();
     assert!(matches!(
-        scheduler.preflight_manual("forced", forced_at).unwrap(),
+        scheduler
+            .preflight_manual(&support::id("forced"), forced_at)
+            .unwrap(),
         ManualDecision::Blocked(_)
     ));
     assert!(matches!(
@@ -276,7 +289,7 @@ fn a_runtime_clock_jump_coalesces_all_missed_slots_without_a_burst() {
     let jumped_to = slots[2] + TimeDelta::seconds(1);
     assert!(
         scheduler
-            .poll("run", jumped_to, true)
+            .poll(&support::id("run"), jumped_to, true)
             .unwrap()
             .opportunity
             .is_some()
@@ -290,7 +303,7 @@ fn a_runtime_clock_jump_coalesces_all_missed_slots_without_a_burst() {
     );
     assert!(
         scheduler
-            .poll("run", jumped_to, true)
+            .poll(&support::id("run"), jumped_to, true)
             .unwrap()
             .opportunity
             .is_none()
@@ -311,13 +324,15 @@ fn utc_rollover_keeps_cross_midnight_spacing_and_clock_rollback_fails_closed() {
     assert!(snapshot.runs.is_empty());
     assert!(snapshot.slots.iter().all(|slot| *slot >= at(31, 0, 26, 0)));
 
-    let rollback = restarted.poll("run", at(30, 23, 59, 0), true).unwrap();
+    let rollback = restarted
+        .poll(&support::id("run"), at(30, 23, 59, 0), true)
+        .unwrap();
     assert!(rollback.opportunity.is_none());
     assert!(rollback.events.iter().any(|event| {
         event
-            .error_message
+            .message
             .as_deref()
-            .is_some_and(|message| message.contains("clock_rollback"))
+            .is_some_and(|message| message.contains("previous="))
     }));
 }
 
@@ -330,16 +345,16 @@ fn one_degradation_episode_triggers_once_replans_and_rearms_after_recovery() {
     let original_slots = scheduler.snapshot().slots;
 
     let events = scheduler
-        .observe_health("run", now, degraded(DegradationReason::Loss))
+        .observe_health(&support::id("run"), now, degraded(DegradationReason::Loss))
         .unwrap();
     assert_eq!(events.len(), 1);
-    let action = scheduler.poll("run", now, true).unwrap();
+    let action = scheduler.poll(&support::id("run"), now, true).unwrap();
     let opportunity = action.opportunity.unwrap();
     assert_eq!(opportunity.reason, TriggerReason::PingLoss);
     scheduler.reserve_run(now).unwrap();
     let mut report = success_report(true);
     scheduler
-        .finish_attempt("run", now, opportunity, &mut report)
+        .finish_attempt(&support::id("run"), now, opportunity, &mut report)
         .unwrap();
     let after = scheduler.snapshot();
     assert_eq!(after.runs.len(), 1);
@@ -349,13 +364,15 @@ fn one_degradation_episode_triggers_once_replans_and_rearms_after_recovery() {
     assert!(after.pending_trigger.is_none());
 
     scheduler
-        .observe_health("run", now, degraded(DegradationReason::Loss))
+        .observe_health(&support::id("run"), now, degraded(DegradationReason::Loss))
         .unwrap();
     assert!(scheduler.snapshot().pending_trigger.is_none());
-    scheduler.observe_health("run", now, recovered()).unwrap();
+    scheduler
+        .observe_health(&support::id("run"), now, recovered())
+        .unwrap();
     assert!(!scheduler.snapshot().trigger_latched);
     scheduler
-        .observe_health("run", now, degraded(DegradationReason::Rtt))
+        .observe_health(&support::id("run"), now, degraded(DegradationReason::Rtt))
         .unwrap();
     assert_eq!(
         scheduler.snapshot().pending_trigger,
@@ -369,11 +386,16 @@ fn interface_trigger_latches_are_independent_and_keep_origin_attribution() {
     let now = at(30, 1, 0, 0);
     let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 19).unwrap();
     scheduler
-        .observe_interface_health("run", now, Some("eth-a"), degraded(DegradationReason::Loss))
+        .observe_interface_health(
+            &support::id("run"),
+            now,
+            Some("eth-a"),
+            degraded(DegradationReason::Loss),
+        )
         .unwrap();
     scheduler
         .observe_interface_health(
-            "run",
+            &support::id("run"),
             now + TimeDelta::seconds(1),
             Some("eth-b"),
             degraded(DegradationReason::Rtt),
@@ -382,7 +404,7 @@ fn interface_trigger_latches_are_independent_and_keep_origin_attribution() {
     let health = BTreeMap::from([("eth-a".to_owned(), true), ("eth-b".to_owned(), true)]);
 
     let first = scheduler
-        .poll_interfaces("run", now + TimeDelta::seconds(2), &health)
+        .poll_interfaces(&support::id("run"), now + TimeDelta::seconds(2), &health)
         .unwrap()
         .opportunity
         .unwrap();
@@ -390,11 +412,16 @@ fn interface_trigger_latches_are_independent_and_keep_origin_attribution() {
     assert_eq!(first.reason, TriggerReason::PingLoss);
     let mut report = success_report(false);
     scheduler
-        .finish_attempt("run", now + TimeDelta::seconds(2), first, &mut report)
+        .finish_attempt(
+            &support::id("run"),
+            now + TimeDelta::seconds(2),
+            first,
+            &mut report,
+        )
         .unwrap();
 
     let second = scheduler
-        .poll_interfaces("run", now + TimeDelta::seconds(3), &health)
+        .poll_interfaces(&support::id("run"), now + TimeDelta::seconds(3), &health)
         .unwrap()
         .opportunity
         .unwrap();
@@ -410,7 +437,7 @@ fn outage_on_one_interface_does_not_block_an_eligible_interface_trigger() {
     for (offset, interface) in [(0, "eth-down"), (1, "eth-ready")] {
         scheduler
             .observe_interface_health(
-                "run",
+                &support::id("run"),
                 now + TimeDelta::seconds(offset),
                 Some(interface),
                 degraded(DegradationReason::Loss),
@@ -422,7 +449,7 @@ fn outage_on_one_interface_does_not_block_an_eligible_interface_trigger() {
         ("eth-ready".to_owned(), true),
     ]);
     let opportunity = scheduler
-        .poll_interfaces("run", now + TimeDelta::seconds(2), &health)
+        .poll_interfaces(&support::id("run"), now + TimeDelta::seconds(2), &health)
         .unwrap()
         .opportunity
         .unwrap();
@@ -435,38 +462,51 @@ fn expired_trigger_stays_latched_until_recovery_then_rearms() {
     let mut scheduler =
         Scheduler::open_seeded(state_path(&root), &mlab(), at(30, 1, 0, 0), 21).unwrap();
     scheduler
-        .observe_health("run", at(30, 1, 0, 0), degraded(DegradationReason::Loss))
+        .observe_health(
+            &support::id("run"),
+            at(30, 1, 0, 0),
+            degraded(DegradationReason::Loss),
+        )
         .unwrap();
     assert!(
         scheduler
-            .poll("run", at(30, 1, 10, 0), false)
+            .poll(&support::id("run"), at(30, 1, 10, 0), false)
             .unwrap()
             .opportunity
             .is_none()
     );
-    let expired = scheduler.poll("run", at(30, 1, 30, 1), false).unwrap();
+    let expired = scheduler
+        .poll(&support::id("run"), at(30, 1, 30, 1), false)
+        .unwrap();
     assert!(expired.opportunity.is_none());
     assert!(expired.events.iter().any(|event| {
         event.outcome == Outcome::Expired
-            && event.error_message.as_deref()
-                == Some("decision=trigger_expired reason=ttl latch=retained rearm=health_recovery")
+            && event.message.as_deref() == Some("reason=ttl latch=retained rearm=health_recovery")
     }));
     let after_expiry = scheduler.snapshot();
     assert!(after_expiry.trigger_latched);
     assert!(after_expiry.pending_trigger.is_none());
 
     let repeated_degradation = scheduler
-        .observe_health("run", at(30, 1, 31, 0), degraded(DegradationReason::Loss))
+        .observe_health(
+            &support::id("run"),
+            at(30, 1, 31, 0),
+            degraded(DegradationReason::Loss),
+        )
         .unwrap();
     assert!(repeated_degradation.is_empty());
     assert!(scheduler.snapshot().pending_trigger.is_none());
 
     scheduler
-        .observe_health("run", at(30, 1, 32, 0), recovered())
+        .observe_health(&support::id("run"), at(30, 1, 32, 0), recovered())
         .unwrap();
     assert!(!scheduler.snapshot().trigger_latched);
     scheduler
-        .observe_health("run", at(30, 1, 33, 0), degraded(DegradationReason::Rtt))
+        .observe_health(
+            &support::id("run"),
+            at(30, 1, 33, 0),
+            degraded(DegradationReason::Rtt),
+        )
         .unwrap();
     assert_eq!(
         scheduler.snapshot().pending_trigger,
@@ -482,41 +522,41 @@ fn locate_rate_limits_persist_cooldown_defer_once_and_use_bounded_backoff() {
     let mut scheduler = Scheduler::open_seeded(&path, &mlab(), now, 31).unwrap();
     let opportunity = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
-        scheduled_at_utc: now,
+        scheduled_at_utc: Some(now),
+        requested_at_utc: now,
         interface: None,
     };
     let mut report = rate_report(RequestStage::Locate, 429, None, false);
     let events = scheduler
-        .finish_attempt("run", now, opportunity, &mut report)
+        .finish_attempt(&support::id("run"), now, opportunity, &mut report)
         .unwrap();
     let first = scheduler.snapshot();
     let deadline = first.cooldown_until_utc.unwrap();
     assert!(deadline >= now + TimeDelta::seconds(48));
     assert!(deadline <= now + TimeDelta::seconds(72));
     assert_eq!(first.deferred_attempts, Some(1));
-    assert!(
-        events[0]
-            .error_message
-            .as_deref()
-            .unwrap()
-            .contains("status=429")
-    );
+    assert!(events[0].message.as_deref().unwrap().contains("status=429"));
 
     drop(scheduler);
     let mut restarted = Scheduler::open_seeded(&path, &mlab(), now, 999).unwrap();
     assert_eq!(restarted.snapshot().cooldown_until_utc, Some(deadline));
     assert!(
         restarted
-            .poll("run", deadline - TimeDelta::seconds(1), true)
+            .poll(&support::id("run"), deadline - TimeDelta::seconds(1), true)
             .unwrap()
             .opportunity
             .is_none()
     );
-    let retry = restarted.poll("run", deadline, true).unwrap();
+    let retry = restarted.poll(&support::id("run"), deadline, true).unwrap();
     assert!(retry.opportunity.is_some());
     let mut second = rate_report(RequestStage::Locate, 204, None, false);
     restarted
-        .finish_attempt("run", deadline, retry.opportunity.unwrap(), &mut second)
+        .finish_attempt(
+            &support::id("run"),
+            deadline,
+            retry.opportunity.unwrap(),
+            &mut second,
+        )
         .unwrap();
     let second_delay = restarted.snapshot().cooldown_until_utc.unwrap() - deadline;
     assert!(second_delay >= TimeDelta::seconds(96));
@@ -532,7 +572,8 @@ fn retry_after_is_exact_and_post_reservation_limit_is_not_retried() {
     scheduler.reserve_run(now).unwrap();
     let opportunity = BandwidthOpportunity {
         reason: TriggerReason::PingLoss,
-        scheduled_at_utc: now,
+        scheduled_at_utc: None,
+        requested_at_utc: now,
         interface: None,
     };
     let mut report = rate_report(
@@ -542,7 +583,7 @@ fn retry_after_is_exact_and_post_reservation_limit_is_not_retried() {
         true,
     );
     scheduler
-        .finish_attempt("run", now, opportunity, &mut report)
+        .finish_attempt(&support::id("run"), now, opportunity, &mut report)
         .unwrap();
     let snapshot = scheduler.snapshot();
     assert_eq!(
@@ -584,42 +625,9 @@ fn provider_state_is_independent_and_policy_changes_preserve_used_runs() {
     let mut disabled = Scheduler::open_seeded(&path, &disabled, now, 101).unwrap();
     assert!(disabled.snapshot().slots.is_empty());
     assert!(matches!(
-        disabled.preflight_manual("run", now).unwrap(),
+        disabled.preflight_manual(&support::id("run"), now).unwrap(),
         ManualDecision::Blocked(_)
     ));
-}
-
-#[test]
-fn corrupt_initialized_state_fails_closed() {
-    let root = TempDir::new().unwrap();
-    let path = state_path(&root);
-    Scheduler::open_seeded(&path, &mlab(), at(30, 0, 0, 0), 47).unwrap();
-    std::fs::write(&path, b"not json").unwrap();
-    assert!(matches!(
-        Scheduler::open_seeded(&path, &mlab(), at(30, 1, 0, 0), 48),
-        Err(SchedulerError::Corrupt { .. })
-    ));
-}
-
-#[test]
-fn reservation_ledger_recovers_a_run_from_an_interrupted_state_replace() {
-    let root = TempDir::new().unwrap();
-    let path = state_path(&root);
-    let now = at(30, 1, 0, 0);
-    let mut scheduler = Scheduler::open_seeded(&path, &mlab(), now, 61).unwrap();
-    scheduler.reserve_run(now).unwrap();
-
-    std::fs::remove_file(&path).unwrap();
-    drop(scheduler);
-    assert!(matches!(
-        Scheduler::open_seeded(&path, &mlab(), now, 62),
-        Err(SchedulerError::Corrupt { .. })
-    ));
-    std::fs::copy(path.with_extension("bak"), &path).unwrap();
-    let recovered = Scheduler::open_seeded(&path, &mlab(), now, 62)
-        .unwrap()
-        .snapshot();
-    assert_eq!(recovered.runs, vec![now]);
 }
 
 #[test]
@@ -629,38 +637,36 @@ fn health_trigger_during_cooldown_merges_into_the_single_deferred_retry() {
     let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 67).unwrap();
     let scheduled = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
-        scheduled_at_utc: now,
+        scheduled_at_utc: Some(now),
+        requested_at_utc: now,
         interface: None,
     };
     let mut limited = rate_report(RequestStage::Locate, 429, None, false);
     scheduler
-        .finish_attempt("run", now, scheduled, &mut limited)
+        .finish_attempt(&support::id("run"), now, scheduled, &mut limited)
         .unwrap();
     let deadline = scheduler.snapshot().cooldown_until_utc.unwrap();
 
     let events = scheduler
         .observe_health(
-            "run",
+            &support::id("run"),
             now + TimeDelta::seconds(1),
             degraded(DegradationReason::Loss),
         )
         .unwrap();
-    assert!(
-        events[0]
-            .error_message
-            .as_deref()
-            .unwrap()
-            .contains("trigger_merged_with_deferred")
+    assert_eq!(
+        events[0].scheduler_action,
+        Some(netband::model::SchedulerAction::TriggerMergedWithDeferred)
     );
     assert!(scheduler.snapshot().pending_trigger.is_none());
     assert!(
         scheduler
-            .poll("run", deadline - TimeDelta::seconds(1), true)
+            .poll(&support::id("run"), deadline - TimeDelta::seconds(1), true)
             .unwrap()
             .opportunity
             .is_none()
     );
-    let retry = scheduler.poll("run", deadline, true).unwrap();
+    let retry = scheduler.poll(&support::id("run"), deadline, true).unwrap();
     assert_eq!(retry.opportunity.unwrap().reason, TriggerReason::PingLoss);
 }
 
@@ -671,19 +677,20 @@ fn five_consecutive_discovery_limits_expire_the_deferred_opportunity() {
     let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 71).unwrap();
     let mut opportunity = BandwidthOpportunity {
         reason: TriggerReason::Scheduled,
-        scheduled_at_utc: now,
+        scheduled_at_utc: Some(now),
+        requested_at_utc: now,
         interface: None,
     };
     for attempt in 1..=5 {
         let mut limited = rate_report(RequestStage::Locate, 503, None, false);
         scheduler
-            .finish_attempt("run", now, opportunity.clone(), &mut limited)
+            .finish_attempt(&support::id("run"), now, opportunity.clone(), &mut limited)
             .unwrap();
         if attempt < 5 {
             assert_eq!(scheduler.snapshot().deferred_attempts, Some(attempt));
             now = scheduler.snapshot().cooldown_until_utc.unwrap();
             opportunity = scheduler
-                .poll("run", now, true)
+                .poll(&support::id("run"), now, true)
                 .unwrap()
                 .opportunity
                 .unwrap();
@@ -693,7 +700,7 @@ fn five_consecutive_discovery_limits_expire_the_deferred_opportunity() {
     assert!(
         scheduler
             .poll(
-                "run",
+                &support::id("run"),
                 scheduler.snapshot().cooldown_until_utc.unwrap(),
                 true
             )
@@ -712,14 +719,16 @@ fn deterministic_multi_day_simulation_never_exceeds_provider_caps() {
         let start = at(day, 0, 0, 0);
         let mut scheduler = Scheduler::open_seeded(&path, &config, start, 53).unwrap();
         while let Some(slot) = scheduler.snapshot().slots.first().copied() {
-            let action = scheduler.poll("simulation", slot, true).unwrap();
+            let action = scheduler
+                .poll(&support::id("simulation"), slot, true)
+                .unwrap();
             let Some(opportunity) = action.opportunity else {
                 break;
             };
             scheduler.reserve_run(slot).unwrap();
             let mut report = success_report(true);
             scheduler
-                .finish_attempt("simulation", slot, opportunity, &mut report)
+                .finish_attempt(&support::id("simulation"), slot, opportunity, &mut report)
                 .unwrap();
         }
         let snapshot = scheduler.snapshot();
@@ -730,5 +739,448 @@ fn deterministic_multi_day_simulation_never_exceeds_provider_caps() {
                 .windows(2)
                 .all(|pair| { pair[1] - pair[0] >= TimeDelta::minutes(70) })
         );
+    }
+}
+
+#[test]
+fn provider_deadlines_survive_delayed_handling_and_never_shorten_existing_cooldowns() {
+    use netband::provider::parse_retry_after_value;
+    let received = at(30, 23, 59, 0);
+    for stage in [RequestStage::Locate, RequestStage::WebsocketHandshake] {
+        let reserved = stage == RequestStage::WebsocketHandshake;
+        for header in [
+            "300",
+            "172800",
+            "Mon, 31 Aug 2026 00:04:00 GMT",
+            "0",
+            "Sun, 30 Aug 2026 23:58:00 GMT",
+            "18446744073709551615",
+        ] {
+            for delay in [5, 600] {
+                for existing in [false, true] {
+                    let root = TempDir::new().unwrap();
+                    let path = state_path(&root);
+                    let mut scheduler =
+                        Scheduler::open_seeded(&path, &mlab(), received, 37).unwrap();
+                    if reserved {
+                        scheduler.reserve_run(received).unwrap();
+                    }
+                    let opportunity = || BandwidthOpportunity {
+                        reason: TriggerReason::Manual,
+                        scheduled_at_utc: None,
+                        requested_at_utc: received,
+                        interface: None,
+                    };
+                    let make_report = |deadline, delay| {
+                        let mut report = rate_report(stage, 429, None, reserved);
+                        let event = &mut report.events[0];
+                        event.finished_at_utc = Some(received);
+                        event.request_retry_at_utc = Some(deadline);
+                        event.request_retry_after_ms = delay;
+                        report
+                    };
+                    let existing_deadline = received + TimeDelta::hours(1);
+                    if existing {
+                        let mut report = make_report(existing_deadline, Some(3_600_000));
+                        scheduler
+                            .finish_attempt(
+                                &support::id("prior"),
+                                received,
+                                opportunity(),
+                                &mut report,
+                            )
+                            .unwrap();
+                    }
+                    let retry = parse_retry_after_value(header, received).unwrap();
+                    let mut report =
+                        make_report(retry.deadline, u64::try_from(retry.delay.as_millis()).ok());
+                    let handled = received + TimeDelta::seconds(delay);
+                    let events = scheduler
+                        .finish_attempt(
+                            &support::id("delayed"),
+                            handled,
+                            opportunity(),
+                            &mut report,
+                        )
+                        .unwrap();
+                    let expected = if existing {
+                        existing_deadline.max(retry.deadline)
+                    } else {
+                        retry.deadline
+                    };
+                    assert_eq!(report.events[0].request_retry_at_utc, Some(retry.deadline));
+                    assert_eq!(events[0].scheduler_not_before_utc, Some(expected));
+                    assert_eq!(scheduler.snapshot().cooldown_until_utc, Some(expected));
+                    assert_eq!(scheduler.snapshot().runs.len(), usize::from(reserved));
+                    if reserved {
+                        assert_eq!(scheduler.snapshot().deferred_attempts, None);
+                    }
+                    drop(scheduler);
+                    let mut scheduler =
+                        Scheduler::open_seeded(&path, &mlab(), handled, 37).unwrap();
+                    if expected > handled {
+                        assert!(matches!(
+                            scheduler
+                                .preflight_manual(&support::id("blocked"), handled)
+                                .unwrap(),
+                            ManualDecision::Blocked(_)
+                        ));
+                        assert_eq!(scheduler.snapshot().cooldown_until_utc, Some(expected));
+                    } else {
+                        assert!(
+                            scheduler
+                                .snapshot()
+                                .cooldown_until_utc
+                                .is_none_or(|deadline| deadline <= handled)
+                        );
+                        // Only minimum spacing from a reserved start can still block this case.
+                        if !reserved {
+                            assert!(matches!(
+                                scheduler
+                                    .preflight_manual(&support::id("expired"), handled)
+                                    .unwrap(),
+                                ManualDecision::Allowed
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn retained_direction_resets_backoff_even_when_the_attempt_is_interrupted() {
+    for outcome in [Outcome::Timeout, Outcome::Cancelled] {
+        for upload in [false, true] {
+            let root = TempDir::new().unwrap();
+            let now = at(30, 1, 0, 0);
+            let mut scheduler =
+                Scheduler::open_seeded(state_path(&root), &mlab(), now, 31).unwrap();
+            let opportunity = BandwidthOpportunity {
+                reason: TriggerReason::Scheduled,
+                scheduled_at_utc: Some(now),
+                requested_at_utc: now,
+                interface: None,
+            };
+            let mut limited = rate_report(RequestStage::Locate, 429, None, false);
+            scheduler
+                .finish_attempt(&support::id("run"), now, opportunity, &mut limited)
+                .unwrap();
+            let deadline = scheduler.snapshot().cooldown_until_utc.unwrap();
+            let retry = scheduler
+                .poll(&support::id("run"), deadline, true)
+                .unwrap()
+                .opportunity
+                .unwrap();
+            let mut report = success_report(true);
+            report.outcome = outcome;
+            report.events[0].outcome = outcome;
+            if upload {
+                report.events[0].upload_remote_ip = report.events[0].download_remote_ip.take();
+            }
+            scheduler
+                .finish_attempt(&support::id("run"), deadline, retry, &mut report)
+                .unwrap();
+            assert_eq!(scheduler.snapshot().cooldown_until_utc, None);
+        }
+    }
+}
+
+#[test]
+fn policy_decisions_are_structured_without_error_fields() {
+    use netband::model::{RunId, SchedulerAction};
+    let root = TempDir::new().unwrap();
+    let now = at(30, 0, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(
+        state_path(&root),
+        &direct("fixture", 1, Duration::from_secs(60)),
+        now,
+        1,
+    )
+    .unwrap();
+    scheduler.reserve_run(now).unwrap();
+    let ManualDecision::Blocked(event) = scheduler.preflight_manual(&RunId::new(), now).unwrap()
+    else {
+        panic!("zero allowance must block");
+    };
+    assert_eq!(event.scheduler_action, Some(SchedulerAction::Suppressed));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap()["scheduler_reason"],
+        "daily_cap"
+    );
+    assert_eq!(event.outcome, Outcome::Suppressed);
+    assert!(event.message.as_deref().unwrap().contains("daily_cap"));
+    assert!(event.error_kind.is_none());
+    assert_eq!(scheduler.snapshot().runs.len(), 1);
+}
+
+#[test]
+fn request_deadline_and_scheduler_eligibility_have_independent_columns() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 37).unwrap();
+    let opportunity = || BandwidthOpportunity {
+        reason: TriggerReason::Manual,
+        scheduled_at_utc: None,
+        requested_at_utc: now,
+        interface: None,
+    };
+    let mut prior = rate_report(
+        RequestStage::Locate,
+        429,
+        Some(Duration::from_secs(3600)),
+        false,
+    );
+    scheduler
+        .finish_attempt(&support::id("session"), now, opportunity(), &mut prior)
+        .unwrap();
+    let mut report = rate_report(
+        RequestStage::Locate,
+        429,
+        Some(Duration::from_secs(300)),
+        false,
+    );
+    let decisions = scheduler
+        .finish_attempt(
+            &support::id("session"),
+            now + TimeDelta::seconds(10),
+            opportunity(),
+            &mut report,
+        )
+        .unwrap();
+    let request = serde_json::to_value(&report.events[0]).unwrap();
+    let decision = serde_json::to_value(&decisions[0]).unwrap();
+    assert_eq!(
+        request["request_retry_at_utc"],
+        netband::model::timestamp_text(now + TimeDelta::seconds(300))
+    );
+    assert_eq!(
+        decision["scheduler_not_before_utc"],
+        netband::model::timestamp_text(now + TimeDelta::hours(1))
+    );
+    assert!(request["scheduler_not_before_utc"].is_null());
+    assert!(decision["request_retry_at_utc"].is_null());
+    assert_eq!(decision["scheduler_reason"], "provider_rate_limit");
+    assert!(decision["error_kind"].is_null());
+    assert!(decision["message"].is_string());
+    assert_eq!(scheduler.snapshot().runs.len(), 0);
+}
+
+#[test]
+fn minimum_spacing_uses_scheduler_eligibility_without_a_provider_response() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(
+        state_path(&root),
+        &direct("fixture", 4, Duration::from_secs(600)),
+        now,
+        37,
+    )
+    .unwrap();
+    scheduler.reserve_run(now).unwrap();
+    let ManualDecision::Blocked(event) = scheduler
+        .preflight_manual(&support::id("session"), now + TimeDelta::seconds(1))
+        .unwrap()
+    else {
+        panic!("spacing must block");
+    };
+    let json = serde_json::to_value(event).unwrap();
+    assert_eq!(
+        json["scheduler_not_before_utc"],
+        netband::model::timestamp_text(now + TimeDelta::seconds(600))
+    );
+    assert!(json["request_retry_at_utc"].is_null());
+    assert_eq!(json["scheduler_reason"], "minimum_spacing");
+    assert_eq!(json["provider_accounting_date"], "2026-08-30");
+    assert_eq!(json["provider_daily_starts"], 1);
+    assert!(json["bandwidth_start_reserved"].is_null());
+    assert!(json["request_retry_after_ms"].is_null());
+    assert!(json["error_kind"].is_null());
+}
+
+#[test]
+fn cooldown_reason_is_distinct_from_spacing_without_consuming_a_start() {
+    let root = TempDir::new().unwrap();
+    let now = at(30, 1, 0, 0);
+    let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 37).unwrap();
+    let mut report = rate_report(
+        RequestStage::Locate,
+        429,
+        Some(Duration::from_secs(300)),
+        false,
+    );
+    scheduler
+        .finish_attempt(
+            &support::id("session"),
+            now,
+            BandwidthOpportunity {
+                reason: TriggerReason::Manual,
+                scheduled_at_utc: None,
+                requested_at_utc: now,
+                interface: None,
+            },
+            &mut report,
+        )
+        .unwrap();
+    let ManualDecision::Blocked(event) = scheduler
+        .preflight_manual(&support::id("session"), now)
+        .unwrap()
+    else {
+        panic!("cooldown must block");
+    };
+    let json = serde_json::to_value(event).unwrap();
+    assert_eq!(json["scheduler_action"], "deferred");
+    assert_eq!(json["scheduler_reason"], "provider_cooldown");
+    assert!(json["error_kind"].is_null());
+    assert_eq!(scheduler.snapshot().runs.len(), 0);
+}
+
+#[test]
+fn completion_after_midnight_preserves_the_admission_count() {
+    let root = TempDir::new().unwrap();
+    let start = at(30, 23, 59, 0);
+    let finish = at(31, 0, 1, 0);
+    let mut scheduler = Scheduler::open_seeded(
+        state_path(&root),
+        &direct("fixture", 4, Duration::from_secs(1)),
+        start - TimeDelta::seconds(3),
+        37,
+    )
+    .unwrap();
+    for offset in 0..4 {
+        let reservation = scheduler
+            .reserve_run(start - TimeDelta::seconds(3 - offset))
+            .unwrap();
+        assert_eq!(reservation.accounting_date, start.date_naive());
+        assert_eq!(reservation.daily_bandwidth_starts, (offset + 1) as u32);
+    }
+    let mut report = success_report(true);
+    report.events[0].provider_daily_starts = Some(4);
+    report.events[0].provider_accounting_date = Some(start.date_naive());
+    report.events[0].bandwidth_start_reserved = Some(true);
+    scheduler
+        .finish_attempt(
+            &support::id("session"),
+            finish,
+            BandwidthOpportunity {
+                reason: TriggerReason::Scheduled,
+                scheduled_at_utc: Some(start),
+                requested_at_utc: start,
+                interface: None,
+            },
+            &mut report,
+        )
+        .unwrap();
+    assert_eq!(report.events[0].provider_daily_starts, Some(4));
+    assert_eq!(
+        report.events[0].provider_accounting_date,
+        Some(start.date_naive())
+    );
+    assert_eq!(report.events[0].bandwidth_start_reserved, Some(true));
+    assert_eq!(
+        scheduler
+            .snapshot()
+            .runs
+            .iter()
+            .filter(|time| time.date_naive() == start.date_naive())
+            .count(),
+        4
+    );
+    let decisions = scheduler
+        .observe_health(
+            &support::id("session"),
+            finish,
+            degraded(DegradationReason::Loss),
+        )
+        .unwrap();
+    let decision = decisions.last().unwrap();
+    assert_eq!(decision.provider_accounting_date, Some(finish.date_naive()));
+    assert_eq!(decision.provider_daily_starts, Some(0));
+    assert_eq!(decision.bandwidth_start_reserved, None);
+}
+
+#[test]
+fn scheduled_and_health_requests_have_distinct_timing() {
+    for health in [false, true] {
+        let root = TempDir::new().unwrap();
+        let now = at(30, 1, 0, 0);
+        let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 37).unwrap();
+        let requested = if health {
+            scheduler
+                .observe_health(
+                    &support::id("session"),
+                    now,
+                    degraded(DegradationReason::Loss),
+                )
+                .unwrap();
+            now
+        } else {
+            scheduler.snapshot().slots[0] + TimeDelta::seconds(1)
+        };
+        let polled = requested + TimeDelta::seconds(2);
+        let planned = (!health).then(|| scheduler.snapshot().slots[0]);
+        let opportunity = scheduler
+            .poll(&support::id("session"), polled, true)
+            .unwrap()
+            .opportunity
+            .unwrap();
+        let mut report = success_report(false);
+        scheduler
+            .finish_attempt(&support::id("attempt"), polled, opportunity, &mut report)
+            .unwrap();
+        let event = &report.events[0];
+        assert_eq!(event.scheduled_at_utc, planned);
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["requested_at_utc"],
+            netband::model::timestamp_text(if health { requested } else { polled })
+        );
+    }
+}
+
+#[test]
+fn deferred_retries_preserve_planned_and_requested_times_across_restart() {
+    for reason in [
+        TriggerReason::Scheduled,
+        TriggerReason::PingLoss,
+        TriggerReason::Manual,
+    ] {
+        let root = TempDir::new().unwrap();
+        let now = at(30, 1, 0, 0);
+        let planned = (reason == TriggerReason::Scheduled).then_some(now);
+        let requested = now + TimeDelta::seconds(2);
+        let mut scheduler = Scheduler::open_seeded(state_path(&root), &mlab(), now, 37).unwrap();
+        let opportunity = BandwidthOpportunity {
+            reason,
+            scheduled_at_utc: planned,
+            requested_at_utc: requested,
+            interface: None,
+        };
+        let mut report = rate_report(
+            RequestStage::Locate,
+            429,
+            Some(Duration::from_secs(300)),
+            false,
+        );
+        scheduler
+            .finish_attempt(&support::id("attempt"), requested, opportunity, &mut report)
+            .unwrap();
+        drop(scheduler);
+        let mut scheduler = Scheduler::open_seeded(
+            state_path(&root),
+            &mlab(),
+            requested + TimeDelta::seconds(1),
+            99,
+        )
+        .unwrap();
+        let retry = scheduler
+            .poll(&support::id("session"), now + TimeDelta::seconds(300), true)
+            .unwrap()
+            .opportunity
+            .unwrap();
+        assert_eq!(retry.scheduled_at_utc, planned);
+        assert_eq!(retry.requested_at_utc, requested);
+        assert_eq!(retry.reason, reason);
+        assert!(scheduler.snapshot().runs.is_empty());
     }
 }

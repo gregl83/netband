@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
@@ -12,8 +11,13 @@ use crate::bandwidth::{AdmissionReservation, BandwidthReport, ReservationGate};
 use crate::config::{BandwidthConfig, ProviderConfig};
 use crate::health::{DegradationReason, HealthDecision};
 use crate::model::{
-    ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, TriggerReason,
+    ErrorKind, EventKind, MeasurementEvent, Outcome, ProviderKind, RequestStage, RunId,
+    SchedulerAction, SchedulerReason, TriggerReason,
 };
+
+mod persistence;
+
+use persistence::{Checkpoint, Persistence};
 
 const STATE_SCHEMA_VERSION: u8 = 1;
 const DAY_SECONDS: i64 = 86_400;
@@ -44,6 +48,8 @@ impl SchedulerError {
 struct SchedulerStore {
     schema_version: u8,
     providers: BTreeMap<String, ProviderState>,
+    #[serde(default)]
+    checkpoint: Option<Checkpoint>,
 }
 
 impl Default for SchedulerStore {
@@ -51,6 +57,7 @@ impl Default for SchedulerStore {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             providers: BTreeMap::new(),
+            checkpoint: None,
         }
     }
 }
@@ -73,8 +80,9 @@ struct ProviderState {
     last_observed_utc: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DeferredOpportunity {
+    scheduled_at_utc: Option<DateTime<Utc>>,
     reason: TriggerReason,
     #[serde(default)]
     interface: Option<String>,
@@ -94,12 +102,6 @@ struct PendingTrigger {
 struct InterfaceTriggerState {
     pending: Option<PendingTrigger>,
     latched: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReservationLedgerEntry {
-    provider_id: String,
-    started_at_utc: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +151,7 @@ pub struct SchedulerSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SchedulerAction {
+pub struct SchedulerPoll {
     pub opportunity: Option<BandwidthOpportunity>,
     pub events: Vec<MeasurementEvent>,
 }
@@ -157,8 +159,21 @@ pub struct SchedulerAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BandwidthOpportunity {
     pub reason: TriggerReason,
-    pub scheduled_at_utc: DateTime<Utc>,
+    pub scheduled_at_utc: Option<DateTime<Utc>>,
+    pub requested_at_utc: DateTime<Utc>,
     pub interface: Option<String>,
+}
+
+impl BandwidthOpportunity {
+    pub(crate) fn apply_timing(&self, report: &mut BandwidthReport) {
+        for event in &mut report.events {
+            event.trigger_reason = Some(self.reason);
+            event.scheduled_at_utc = self.scheduled_at_utc;
+            if event.event_kind == EventKind::Bandwidth {
+                event.requested_at_utc = Some(self.requested_at_utc);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,16 +184,16 @@ pub enum ManualDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reservation {
-    pub daily_runs_used: u32,
+    pub accounting_date: NaiveDate,
+    pub daily_bandwidth_starts: u32,
 }
 
 #[derive(Debug)]
 pub struct Scheduler {
     path: PathBuf,
-    _lock: File,
+    persistence: Persistence,
     store: SchedulerStore,
     policy: SchedulerPolicy,
-    event_number: u64,
 }
 
 impl Scheduler {
@@ -197,25 +212,18 @@ impl Scheduler {
         seed: u64,
     ) -> Result<Self, SchedulerError> {
         let path = path.into();
-        let lock = acquire_state_lock(&path)?;
-        let store = load_store(&path)?;
-        if store.schema_version != STATE_SCHEMA_VERSION {
-            return Err(SchedulerError::UnsupportedSchema(store.schema_version));
-        }
+        let (persistence, store, recovered) = Persistence::open(&path)?;
         let mut scheduler = Self {
             path,
-            _lock: lock,
+            persistence,
             store,
             policy: SchedulerPolicy::from(config),
-            event_number: 0,
         };
-        let mut changed = scheduler.reconcile(now, seed);
-        let ledger_changed = scheduler.merge_reservation_ledger()?;
-        if ledger_changed {
+        let changed = scheduler.reconcile(now, seed);
+        if recovered {
             scheduler.replan_remaining(now);
-            changed = true;
         }
-        if changed || !scheduler.path.exists() {
+        if changed || recovered || scheduler.persistence.needs_snapshot(&scheduler.store) {
             scheduler.persist()?;
         }
         Ok(scheduler)
@@ -254,7 +262,7 @@ impl Scheduler {
 
     pub fn observe_health(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         decision: HealthDecision,
     ) -> Result<Vec<MeasurementEvent>, SchedulerError> {
@@ -263,7 +271,7 @@ impl Scheduler {
 
     pub fn observe_interface_health(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         interface: Option<&str>,
         decision: HealthDecision,
@@ -300,25 +308,26 @@ impl Scheduler {
                     })
                 };
                 self.persist()?;
-                let decision_text = if has_deferred {
-                    "trigger_merged_with_deferred"
+                let action = if has_deferred {
+                    SchedulerAction::TriggerMergedWithDeferred
                 } else {
-                    "trigger_pending"
+                    SchedulerAction::TriggerPending
                 };
+                let message = format!(
+                    "loss_pct={:.3} p95_rtt_ms={} expires_at={}",
+                    snapshot.loss_pct,
+                    snapshot
+                        .p95_rtt_ms
+                        .map_or_else(|| "none".to_owned(), |value| format!("{value:.3}")),
+                    expires_at.to_rfc3339()
+                );
                 events.push(self.event(
                     run_id,
                     now,
                     Outcome::Deferred,
                     trigger_reason,
                     EventContext::for_interface(interface),
-                    format!(
-                        "decision={decision_text} loss_pct={:.3} p95_rtt_ms={} expires_at={}",
-                        snapshot.loss_pct,
-                        snapshot
-                            .p95_rtt_ms
-                            .map_or_else(|| "none".to_owned(), |value| format!("{value:.3}")),
-                        expires_at.to_rfc3339()
-                    ),
+                    (action, SchedulerReason::HealthDegraded, message),
                 ));
             }
             HealthDecision::Recovered(_) => {
@@ -338,7 +347,11 @@ impl Scheduler {
                         Outcome::Expired,
                         pending.reason,
                         EventContext::for_interface(interface),
-                        "decision=trigger_cancelled reason=health_recovered".to_owned(),
+                        (
+                            SchedulerAction::TriggerCancelled,
+                            SchedulerReason::HealthRecovered,
+                            "reason=health_recovered".to_owned(),
+                        ),
                     ));
                 }
             }
@@ -349,23 +362,23 @@ impl Scheduler {
 
     pub fn poll(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         latest_round_has_success: bool,
-    ) -> Result<SchedulerAction, SchedulerError> {
+    ) -> Result<SchedulerPoll, SchedulerError> {
         let health = BTreeMap::from([(DEFAULT_INTERFACE_KEY.to_owned(), latest_round_has_success)]);
         self.poll_interfaces(run_id, now, &health)
     }
 
     pub fn poll_interfaces(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         latest_success: &BTreeMap<String, bool>,
-    ) -> Result<SchedulerAction, SchedulerError> {
+    ) -> Result<SchedulerPoll, SchedulerError> {
         let mut events = self.advance_clock(run_id, now)?;
         if now < self.state().last_observed_utc {
-            return Ok(SchedulerAction {
+            return Ok(SchedulerPoll {
                 opportunity: None,
                 events,
             });
@@ -394,17 +407,18 @@ impl Scheduler {
             }
             self.persist()?;
             for (key, trigger) in expired {
-                events.push(
-                    self.event(
-                        run_id,
-                        now,
-                        Outcome::Expired,
-                        trigger.reason,
-                        EventContext::for_interface(interface_from_key(&key)),
-                        "decision=trigger_expired reason=ttl latch=retained rearm=health_recovery"
-                            .to_owned(),
+                events.push(self.event(
+                    run_id,
+                    now,
+                    Outcome::Expired,
+                    trigger.reason,
+                    EventContext::for_interface(interface_from_key(&key)),
+                    (
+                        SchedulerAction::TriggerExpired,
+                        SchedulerReason::TriggerTtlExpired,
+                        "reason=ttl latch=retained rearm=health_recovery".to_owned(),
                     ),
-                );
+                ));
             }
         }
 
@@ -420,17 +434,26 @@ impl Scheduler {
                     Outcome::Expired,
                     deferred.reason,
                     EventContext::new(None, self.state().cooldown_until_utc),
-                    "decision=deferred_expired reason=day_or_attempt_limit".to_owned(),
+                    (
+                        SchedulerAction::DeferredExpired,
+                        if now >= deferred.expires_at_utc {
+                            SchedulerReason::DayLimit
+                        } else {
+                            SchedulerReason::AttemptLimit
+                        },
+                        "reason=day_or_attempt_limit".to_owned(),
+                    ),
                 ));
             } else if self
                 .state()
                 .cooldown_until_utc
                 .is_none_or(|deadline| now >= deadline)
             {
-                return Ok(SchedulerAction {
+                return Ok(SchedulerPoll {
                     opportunity: Some(BandwidthOpportunity {
                         reason: deferred.reason,
-                        scheduled_at_utc: deferred.created_at_utc,
+                        scheduled_at_utc: deferred.scheduled_at_utc,
+                        requested_at_utc: deferred.created_at_utc,
                         interface: deferred.interface,
                     }),
                     events,
@@ -451,17 +474,12 @@ impl Scheduler {
         let pending_interface = pending
             .as_ref()
             .and_then(|(key, _)| interface_from_key(key).map(str::to_owned));
-        let scheduled_at = pending
-            .as_ref()
-            .map(|(_, trigger)| trigger.created_at_utc)
-            .or(due_slot);
-
-        let Some(scheduled_at) = scheduled_at else {
-            return Ok(SchedulerAction {
+        if pending.is_none() && due_slot.is_none() {
+            return Ok(SchedulerPoll {
                 opportunity: None,
                 events,
             });
-        };
+        }
         let reason = reason.unwrap_or(TriggerReason::Scheduled);
         if let Some(blocked) = self.block_reason(now) {
             if due_slot.is_some() {
@@ -486,10 +504,10 @@ impl Scheduler {
                     reason,
                     EventContext::new(Some(blocked.kind), blocked.cooldown_until)
                         .with_interface(pending_interface.as_deref()),
-                    blocked.message,
+                    (blocked.action, blocked.reason, blocked.message),
                 ),
             );
-            return Ok(SchedulerAction {
+            return Ok(SchedulerPoll {
                 opportunity: None,
                 events,
             });
@@ -510,12 +528,19 @@ impl Scheduler {
             Outcome::Scheduled,
             reason,
             EventContext::NONE,
-            "decision=bandwidth_start".to_owned(),
+            (
+                SchedulerAction::BandwidthStart,
+                SchedulerReason::OpportunityReady,
+                "bandwidth start".to_owned(),
+            ),
         ));
-        Ok(SchedulerAction {
+        Ok(SchedulerPoll {
             opportunity: Some(BandwidthOpportunity {
                 reason,
-                scheduled_at_utc: scheduled_at,
+                scheduled_at_utc: if pending.is_none() { due_slot } else { None },
+                requested_at_utc: pending
+                    .as_ref()
+                    .map_or(now, |(_, trigger)| trigger.created_at_utc),
                 interface: pending_interface,
             }),
             events,
@@ -524,7 +549,7 @@ impl Scheduler {
 
     pub fn preflight_manual(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
     ) -> Result<ManualDecision, SchedulerError> {
         let mut clock_events = self.advance_clock(run_id, now)?;
@@ -540,7 +565,7 @@ impl Scheduler {
                 Outcome::Suppressed,
                 TriggerReason::Manual,
                 EventContext::new(Some(blocked.kind), blocked.cooldown_until),
-                blocked.message,
+                (blocked.action, blocked.reason, blocked.message),
             )))),
             None => Ok(ManualDecision::Allowed),
         }
@@ -554,22 +579,24 @@ impl Scheduler {
                 blocked.message
             )));
         }
-        append_reservation(&self.path, &self.policy.provider_id, now)?;
-        let daily_runs_used = {
+        let daily_bandwidth_starts = {
             let state = self.state_mut();
             state.runs.push(now);
             state.runs.sort_unstable();
-            state.last_started_at_utc = Some(now);
+            state.last_started_at_utc = state.last_started_at_utc.max(Some(now));
             state.last_observed_utc = state.last_observed_utc.max(now);
             runs_on_day(state, now.date_naive())
         };
         self.persist()?;
-        Ok(Reservation { daily_runs_used })
+        Ok(Reservation {
+            accounting_date: now.date_naive(),
+            daily_bandwidth_starts,
+        })
     }
 
     pub fn finish_attempt(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         opportunity: BandwidthOpportunity,
         report: &mut BandwidthReport,
@@ -578,16 +605,18 @@ impl Scheduler {
         let reserved = report.reserved;
         let rate_limit = rate_limit_from_report(report, self.policy.provider_kind);
         if let Some(rate_limit) = rate_limit {
-            let cooldown = rate_limit
-                .retry_after
-                .unwrap_or_else(|| self.next_backoff());
-            let deadline = add_duration(now, cooldown);
+            let deadline = rate_limit
+                .deadline
+                .unwrap_or_else(|| add_duration(now, self.next_backoff()));
+            let deadline = self
+                .state()
+                .cooldown_until_utc
+                .map_or(deadline, |existing| existing.max(deadline));
             let day_deadline = day_end(now.date_naive());
-            let deadline = deadline.min(day_deadline);
             {
                 let state = self.state_mut();
                 state.cooldown_until_utc = Some(deadline);
-                if rate_limit.retry_after.is_some() {
+                if rate_limit.deadline.is_some() {
                     state.backoff_step = state.backoff_step.saturating_add(1).min(4);
                 }
                 if !reserved {
@@ -600,7 +629,8 @@ impl Scheduler {
                         .then_some(DeferredOpportunity {
                             reason: opportunity.reason,
                             interface: opportunity.interface.clone(),
-                            created_at_utc: opportunity.scheduled_at_utc,
+                            created_at_utc: opportunity.requested_at_utc,
+                            scheduled_at_utc: opportunity.scheduled_at_utc,
                             expires_at_utc: day_deadline,
                             rate_limit_attempts: attempts,
                         });
@@ -612,37 +642,49 @@ impl Scheduler {
                 .pending = None;
             self.replan_remaining(now);
             self.persist()?;
-            events.push(self.event(
-                run_id,
-                now,
-                if reserved {
-                    Outcome::Suppressed
-                } else {
-                    Outcome::Deferred
-                },
-                opportunity.reason,
-                EventContext::new(Some(ErrorKind::ProviderCooldown), Some(deadline))
-                    .with_interface(opportunity.interface.as_deref()),
-                format!(
-                    "decision=rate_limit stage={} status={} retry_after={} reserved={} deferred_attempts={}",
-                    stage_text(rate_limit.stage),
-                    rate_limit
-                        .status
-                        .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-                    rate_limit
-                        .retry_after
-                        .map_or_else(|| "fallback".to_owned(), |value| format!("{}ms", value.as_millis())),
-                    reserved,
-                    self.state()
-                        .deferred
-                        .as_ref()
-                        .map_or(0, |deferred| deferred.rate_limit_attempts)
+            events.push(
+                self.event(
+                    run_id,
+                    now,
+                    if reserved {
+                        Outcome::Suppressed
+                    } else {
+                        Outcome::Deferred
+                    },
+                    opportunity.reason,
+                    EventContext::new(Some(ErrorKind::ProviderCooldown), Some(deadline))
+                        .with_interface(opportunity.interface.as_deref()),
+                    (
+                        SchedulerAction::RateLimit,
+                        SchedulerReason::ProviderRateLimit,
+                        format!(
+                            "stage={} status={} retry_after={} reserved={} deferred_attempts={}",
+                            stage_text(rate_limit.stage),
+                            rate_limit
+                                .status
+                                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                            rate_limit.retry_after.map_or_else(
+                                || if rate_limit.deadline.is_some() {
+                                    "unrepresentable".to_owned()
+                                } else {
+                                    "fallback".to_owned()
+                                },
+                                |value| format!("{}ms", value.as_millis()),
+                            ),
+                            reserved,
+                            self.state()
+                                .deferred
+                                .as_ref()
+                                .map_or(0, |deferred| deferred.rate_limit_attempts)
+                        ),
+                    ),
                 ),
-            ));
+            );
         } else {
             let successful_request = report.events.iter().any(|event| {
                 event.event_kind == EventKind::Bandwidth
-                    && (event.remote_ip.is_some()
+                    && (event.download_remote_ip.is_some()
+                        || event.upload_remote_ip.is_some()
                         || matches!(event.outcome, Outcome::Success | Outcome::Partial))
             });
             let state = self.state_mut();
@@ -662,12 +704,7 @@ impl Scheduler {
             self.persist()?;
         }
 
-        let used = runs_on_day(self.state(), now.date_naive());
-        for event in &mut report.events {
-            event.trigger_reason = Some(opportunity.reason);
-            event.scheduled_at_utc = Some(opportunity.scheduled_at_utc);
-            event.daily_runs_used = Some(used);
-        }
+        opportunity.apply_timing(report);
         Ok(events)
     }
 
@@ -726,7 +763,7 @@ impl Scheduler {
 
     fn advance_clock(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
     ) -> Result<Vec<MeasurementEvent>, SchedulerError> {
         let previous = self.state().last_observed_utc;
@@ -737,10 +774,14 @@ impl Scheduler {
                 Outcome::Suppressed,
                 TriggerReason::Scheduled,
                 EventContext::new(Some(ErrorKind::Internal), None),
-                format!(
-                    "decision=clock_rollback previous={} current={}",
-                    previous.to_rfc3339(),
-                    now.to_rfc3339()
+                (
+                    SchedulerAction::ClockRollback,
+                    SchedulerReason::ClockRollback,
+                    format!(
+                        "previous={} current={}",
+                        previous.to_rfc3339(),
+                        now.to_rfc3339()
+                    ),
                 ),
             )]);
         }
@@ -786,24 +827,6 @@ impl Scheduler {
         jitter_duration(state, base)
     }
 
-    fn merge_reservation_ledger(&mut self) -> Result<bool, SchedulerError> {
-        let entries = load_reservations(&self.path)?;
-        let provider_id = self.policy.provider_id.clone();
-        let state = self.state_mut();
-        let before = state.runs.len();
-        for entry in entries
-            .into_iter()
-            .filter(|entry| entry.provider_id == provider_id)
-        {
-            if !state.runs.contains(&entry.started_at_utc) {
-                state.runs.push(entry.started_at_utc);
-            }
-            state.last_started_at_utc = state.last_started_at_utc.max(Some(entry.started_at_utc));
-        }
-        state.runs.sort_unstable();
-        Ok(state.runs.len() != before)
-    }
-
     fn block_reason(&self, now: DateTime<Utc>) -> Option<BlockReason> {
         let state = self.state();
         let used = runs_on_day(state, now.date_naive());
@@ -817,12 +840,11 @@ impl Scheduler {
                     self.policy.daily_max
                 };
             return Some(BlockReason {
+                action: SchedulerAction::Suppressed,
+                reason: SchedulerReason::DailyCap,
                 kind: ErrorKind::DailyCap,
                 cooldown_until: None,
-                message: format!(
-                    "decision=suppressed reason=daily_cap used={} maximum={}",
-                    used, maximum
-                ),
+                message: format!("reason=daily_cap used={} maximum={}", used, maximum),
             });
         }
         if self.policy.force_limits {
@@ -832,24 +854,22 @@ impl Scheduler {
             && now < deadline
         {
             return Some(BlockReason {
+                action: SchedulerAction::Deferred,
+                reason: SchedulerReason::ProviderCooldown,
                 kind: ErrorKind::ProviderCooldown,
                 cooldown_until: Some(deadline),
-                message: format!(
-                    "decision=deferred reason=provider_cooldown until={}",
-                    deadline.to_rfc3339()
-                ),
+                message: format!("reason=provider_cooldown until={}", deadline.to_rfc3339()),
             });
         }
         if let Some(last) = state.last_started_at_utc {
             let eligible = add_duration(last, self.policy.min_spacing);
             if now < eligible {
                 return Some(BlockReason {
+                    action: SchedulerAction::Deferred,
+                    reason: SchedulerReason::MinimumSpacing,
                     kind: ErrorKind::ProviderCooldown,
                     cooldown_until: Some(eligible),
-                    message: format!(
-                        "decision=deferred reason=minimum_spacing until={}",
-                        eligible.to_rfc3339()
-                    ),
+                    message: format!("reason=minimum_spacing until={}", eligible.to_rfc3339()),
                 });
             }
         }
@@ -918,38 +938,35 @@ impl Scheduler {
 
     fn event(
         &mut self,
-        run_id: &str,
+        run_id: &RunId,
         now: DateTime<Utc>,
         outcome: Outcome,
         reason: TriggerReason,
         context: EventContext,
-        message: String,
+        decision: (SchedulerAction, SchedulerReason, String),
     ) -> MeasurementEvent {
-        let number = self.event_number;
-        self.event_number = self.event_number.wrapping_add(1);
-        let mut event = MeasurementEvent::new(
-            run_id,
-            format!("{run_id}:scheduler:{number}"),
-            EventKind::Scheduler,
-            outcome,
-            now,
-        );
+        let mut event = MeasurementEvent::new(run_id, EventKind::Scheduler, outcome, now);
         event.trigger_reason = Some(reason);
         event.provider_id = Some(self.policy.provider_id.clone());
         event.provider_kind = Some(self.policy.provider_kind);
         event.interface = context.interface;
-        event.rate_limit_until_utc = context.cooldown_until;
-        event.daily_runs_used = Some(runs_on_day(self.state(), now.date_naive()));
-        event.error_kind = context.error_kind;
-        event.error_message = Some(message);
+        event.scheduler_not_before_utc = context.cooldown_until;
+        event.provider_accounting_date = Some(now.date_naive());
+        event.provider_daily_starts = Some(runs_on_day(self.state(), now.date_naive()));
+        event.scheduler_action = Some(decision.0);
+        event.scheduler_reason = Some(decision.1);
+        event.message = Some(decision.2);
+        event.error_kind = context
+            .error_kind
+            .filter(|kind| !matches!(kind, ErrorKind::DailyCap | ErrorKind::ProviderCooldown));
         event
     }
 
-    fn persist(&self) -> Result<(), SchedulerError> {
-        persist_store(&self.path, &self.store)
+    fn persist(&mut self) -> Result<(), SchedulerError> {
+        self.persistence.persist(&mut self.store)
     }
 
-    pub fn flush(&self) -> Result<(), SchedulerError> {
+    pub fn flush(&mut self) -> Result<(), SchedulerError> {
         self.persist()?;
         tracing::info!(path = %self.path.display(), "scheduler state flushed");
         Ok(())
@@ -960,7 +977,8 @@ impl ReservationGate for Scheduler {
     fn reserve(&mut self, started_at: DateTime<Utc>) -> Result<AdmissionReservation, String> {
         self.reserve_run(started_at)
             .map(|reservation| AdmissionReservation::Reserved {
-                daily_runs_used: reservation.daily_runs_used,
+                accounting_date: reservation.accounting_date,
+                daily_bandwidth_starts: reservation.daily_bandwidth_starts,
             })
             .map_err(|error| error.to_string())
     }
@@ -968,6 +986,8 @@ impl ReservationGate for Scheduler {
 
 #[derive(Debug)]
 struct BlockReason {
+    action: SchedulerAction,
+    reason: SchedulerReason,
     kind: ErrorKind,
     cooldown_until: Option<DateTime<Utc>>,
     message: String,
@@ -1015,6 +1035,7 @@ fn interface_from_key(key: &str) -> Option<&str> {
 
 #[derive(Debug, Clone, Copy)]
 struct RateLimit {
+    deadline: Option<DateTime<Utc>>,
     stage: RequestStage,
     status: Option<u16>,
     retry_after: Option<Duration>,
@@ -1028,7 +1049,7 @@ fn rate_limit_from_report(
         if event.event_kind != EventKind::RequestFailure {
             return None;
         }
-        let status = event.http_status;
+        let status = event.request_http_status;
         let stage = event.request_stage?;
         let rate_limited = event.outcome == Outcome::RateLimited
             || status == Some(429)
@@ -1039,9 +1060,10 @@ fn rate_limit_from_report(
                 && provider_kind == ProviderKind::Direct
                 && status == Some(503));
         rate_limited.then_some(RateLimit {
+            deadline: event.request_retry_at_utc,
             stage,
             status,
-            retry_after: event.retry_after_ms.map(Duration::from_millis),
+            retry_after: event.request_retry_after_ms.map(Duration::from_millis),
         })
     })
 }
@@ -1178,253 +1200,6 @@ fn stage_text(stage: RequestStage) -> &'static str {
         RequestStage::WebsocketHandshake => "websocket_handshake",
         RequestStage::Download => "download",
         RequestStage::Upload => "upload",
+        RequestStage::Cleanup => "cleanup",
     }
-}
-
-fn load_store(path: &Path) -> Result<SchedulerStore, SchedulerError> {
-    if !path.exists() {
-        if marker_path(path).exists() {
-            return Err(SchedulerError::Corrupt {
-                path: path.to_path_buf(),
-                message: format!(
-                    "initialized state is missing; stop Netband and recover explicitly from {}",
-                    backup_path(path).display()
-                ),
-            });
-        }
-        return Ok(SchedulerStore::default());
-    }
-    let bytes = fs::read(path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    parse_store(path, &bytes)
-}
-
-fn parse_store(path: &Path, bytes: &[u8]) -> Result<SchedulerStore, SchedulerError> {
-    serde_json::from_slice(bytes).map_err(|source| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: source.to_string(),
-    })
-}
-
-fn persist_store(path: &Path, store: &SchedulerStore) -> Result<(), SchedulerError> {
-    let parent = path.parent().ok_or_else(|| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: "state file has no parent".to_owned(),
-    })?;
-    fs::create_dir_all(parent).map_err(|source| SchedulerError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let bytes = serde_json::to_vec_pretty(store).expect("scheduler state serializes");
-    let temporary = temporary_path(path);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    drop(file);
-
-    preserve_backup(path)?;
-    replace_state_file(&temporary, path)?;
-    sync_parent(parent)?;
-    let marker = marker_path(path);
-    if !marker.exists() {
-        File::create(&marker)
-            .and_then(|file| file.sync_all())
-            .map_err(|source| SchedulerError::Io {
-                path: marker,
-                source,
-            })?;
-        sync_parent(parent)?;
-    }
-    Ok(())
-}
-
-fn acquire_state_lock(path: &Path) -> Result<File, SchedulerError> {
-    let parent = path.parent().ok_or_else(|| SchedulerError::Corrupt {
-        path: path.to_path_buf(),
-        message: "state file has no parent".to_owned(),
-    })?;
-    fs::create_dir_all(parent).map_err(|source| SchedulerError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    let lock_path = lock_path(path);
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| SchedulerError::Io {
-            path: lock_path.clone(),
-            source,
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(SchedulerError::Locked(lock_path)),
-        Err(std::fs::TryLockError::Error(source)) => Err(SchedulerError::Io {
-            path: lock_path,
-            source,
-        }),
-    }
-}
-
-fn preserve_backup(path: &Path) -> Result<(), SchedulerError> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let backup = backup_path(path);
-    let temporary = backup.with_extension(format!("bak.tmp.{}", std::process::id()));
-    let contents = fs::read(path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    file.write_all(&contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: temporary.clone(),
-            source,
-        })?;
-    drop(file);
-    if backup.exists() {
-        fs::remove_file(&backup).map_err(|source| SchedulerError::Io {
-            path: backup.clone(),
-            source,
-        })?;
-    }
-    fs::rename(&temporary, &backup).map_err(|source| SchedulerError::Io {
-        path: backup,
-        source,
-    })
-}
-
-#[cfg(unix)]
-fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
-    fs::rename(temporary, path).map_err(|source| SchedulerError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-fn replace_state_file(temporary: &Path, path: &Path) -> Result<(), SchedulerError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|source| SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
-    if let Err(source) = fs::rename(temporary, path) {
-        let backup = backup_path(path);
-        if backup.exists() {
-            let _ = fs::copy(&backup, path);
-        }
-        return Err(SchedulerError::Io {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> Result<(), SchedulerError> {
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| SchedulerError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> Result<(), SchedulerError> {
-    Ok(())
-}
-
-fn append_reservation(
-    state_path: &Path,
-    provider_id: &str,
-    started_at_utc: DateTime<Utc>,
-) -> Result<(), SchedulerError> {
-    let path = reservation_path(state_path);
-    let entry = ReservationLedgerEntry {
-        provider_id: provider_id.to_owned(),
-        started_at_utc,
-    };
-    let mut bytes = serde_json::to_vec(&entry).expect("reservation entry serializes");
-    bytes.push(b'\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|source| SchedulerError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|source| SchedulerError::Io { path, source })
-}
-
-fn load_reservations(state_path: &Path) -> Result<Vec<ReservationLedgerEntry>, SchedulerError> {
-    let path = reservation_path(state_path);
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(SchedulerError::Io { path, source }),
-    };
-    contents
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, line)| {
-            serde_json::from_str(line).map_err(|source| SchedulerError::Corrupt {
-                path: path.clone(),
-                message: format!("reservation ledger line {}: {source}", index + 1),
-            })
-        })
-        .collect()
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    path.with_extension(format!("tmp.{}", std::process::id()))
-}
-
-fn backup_path(path: &Path) -> PathBuf {
-    path.with_extension("bak")
-}
-
-fn marker_path(path: &Path) -> PathBuf {
-    path.with_extension("initialized")
-}
-
-fn reservation_path(path: &Path) -> PathBuf {
-    path.with_extension("reservations.jsonl")
-}
-
-fn lock_path(path: &Path) -> PathBuf {
-    path.with_extension("lock")
 }

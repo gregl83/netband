@@ -1,7 +1,16 @@
 # Scheduling, health, cooldowns, and fairness
 
-Netband maintains one persisted schedule per canonical provider ID. The cap is global
-to the provider, not per process, command, or interface. A reservation is recorded
+A bandwidth test can be scheduled, requested by degraded ping health, or started
+manually with `once bandwidth`. Each uses the same provider allowance. A request is
+not a guaranteed start: spacing, cooldowns, and daily caps can delay or suppress it.
+For commands, see [quick tests and monitoring](usage.md).
+
+[Scheduled tests](#planned-opportunities) · [Health triggers](#ping-health-trigger) ·
+[Rate limits](#rate-limits) · [Multiple interfaces](#multiple-interfaces)
+
+Netband maintains one persisted schedule per canonical provider ID. The cap is shared
+by processes, commands, and interfaces using that state file. Independent state files
+and hosts do not coordinate allowances. A reservation is recorded
 before the first NDT7 network connection, so crashes and restarts cannot restore it.
 
 ## Planned opportunities
@@ -53,9 +62,14 @@ Four reservations suppress any fifth manual, scheduled, or triggered start.
 
 ## Rate limits
 
-Provider-wide limits are retained in scheduler state. A valid `Retry-After` value is
-used exactly, bounded by the end of the UTC day. Without one, backoff starts at 60
-seconds, doubles through the configured 16-minute ceiling, and adds persisted random
+Provider-wide limits are retained in scheduler state. A numeric `Retry-After` delay
+starts when the response arrives; an HTTP-date retains its absolute deadline.
+Report processing never restarts that countdown. An expired deadline adds no waiting,
+and an existing later cooldown is preserved. Deadlines survive UTC day boundaries,
+restarts, and backup recovery. A valid numeric delay that exceeds the representable
+UTC range is capped at the latest representable timestamp.
+Without a valid value, backoff starts at 60 seconds, doubles through the configured
+16-minute ceiling, and adds persisted random
 jitter. Locate `204`, `429`, and relevant `503` responses and direct WebSocket `503`
 responses are classified according to provider scope. Deferred discovery is attempted
 at most five times; a run already reserved is never refunded.
@@ -76,5 +90,5 @@ block another interface. Netband records only interface/source bindings actually
 While NDT7 is active, ping rounds temporarily stay on its selected interface so each
 loaded sample has direct interface attribution. Normal rotation resumes afterward.
 
-Scheduler state, its initialization marker, backup, reservation ledger, and lock are
+Scheduler state, its accounting checkpoint, backup, accounting log, and lock are
 operational data. See [Service operation](service.md#state-recovery) before recovery.

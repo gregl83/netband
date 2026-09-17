@@ -1,3 +1,4 @@
+mod support;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
@@ -16,7 +17,7 @@ use netband::interfaces::{
     FairInterfaceSelector, InterfaceError, InterfaceResolver, ResolvedInterface,
 };
 use netband::journal::{JournalError, JournalSink, OutputCoordinator};
-use netband::model::{EventKind, MeasurementEvent, Outcome};
+use netband::model::{EventKind, MeasurementEvent, Outcome, SchedulerReason};
 use netband::monitor::{
     PingMonitorConfig, PingTransportFactory, cancellation_channel, monitor_multi_interface,
 };
@@ -100,7 +101,7 @@ impl PingTransportFactory for RecordingFactory {
         };
         Arc::new(InterfaceTransport {
             interface: interface.to_owned(),
-            source_ip: address.parse().unwrap(),
+            local_ip: address.parse().unwrap(),
             active: Arc::clone(&self.active),
             max_interfaces: Arc::clone(&self.max_interfaces),
         })
@@ -109,7 +110,7 @@ impl PingTransportFactory for RecordingFactory {
 
 struct InterfaceTransport {
     interface: String,
-    source_ip: IpAddr,
+    local_ip: IpAddr,
     active: Arc<Mutex<HashSet<String>>>,
     max_interfaces: Arc<AtomicUsize>,
 }
@@ -128,7 +129,7 @@ impl PingTransport for InterfaceTransport {
             ProbeAttemptResult {
                 binding: ProbeBinding {
                     interface: Some(self.interface.clone()),
-                    source_ip: Some(self.source_ip),
+                    local_ip: Some(self.local_ip),
                 },
                 sent: true,
                 result: Ok(ProbeReply {
@@ -212,7 +213,8 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
     let journal = RecordingJournal::default();
     let mut coordinator = OutputCoordinator::new(journal.clone(), ConsoleOff);
     let settings = PingMonitorConfig {
-        run_id: "multi-run".into(),
+        interface: None,
+        run_id: support::id("multi-run"),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
         timeout: Duration::from_secs(30),
@@ -255,12 +257,14 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
         event.event_kind == EventKind::Scheduler
             && event.interface.as_deref() == Some("eth-b")
             && event.outcome == Outcome::Deferred
-            && event.source_ip.is_none()
+            && event.scheduler_reason == Some(SchedulerReason::InterfaceUnavailable)
+            && event.ping_local_ip.is_none()
     }));
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::Scheduler
             && event.interface.as_deref() == Some("eth-b")
             && event.outcome == Outcome::Success
+            && event.scheduler_reason == Some(SchedulerReason::InterfaceAvailable)
     }));
     for event in events
         .iter()
@@ -272,7 +276,14 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
             "eth-c" => "192.0.2.30",
             other => panic!("unexpected interface {other}"),
         };
-        assert_eq!(event.source_ip, Some(expected.parse().unwrap()));
+        assert_eq!(event.ping_local_ip, Some(expected.parse().unwrap()));
+        let start = events
+            .iter()
+            .find(|start| start.event_kind == EventKind::RunStarted && start.run_id == event.run_id)
+            .unwrap();
+        assert_eq!(start.interface, event.interface);
+        assert!(start.ping_local_ip.is_none());
+        assert!(start.ping_packets_sent.is_none());
     }
 }
 
@@ -331,7 +342,7 @@ mod loaded_tests {
         fn probe(&self, request: ProbeRequest) -> ProbeFuture<'_> {
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(2)).await;
-                let source_ip = if self.interface == "lo" {
+                let local_ip = if self.interface == "lo" {
                     "127.0.0.1"
                 } else {
                     "192.0.2.20"
@@ -354,7 +365,7 @@ mod loaded_tests {
                 ProbeAttemptResult {
                     binding: ProbeBinding {
                         interface: Some(self.interface.clone()),
-                        source_ip: Some(source_ip),
+                        local_ip: Some(local_ip),
                     },
                     sent: true,
                     result,
@@ -471,7 +482,8 @@ mod loaded_tests {
         let scheduler =
             Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
         let settings = PingMonitorConfig {
-            run_id: "multi-loaded-run".into(),
+            interface: None,
+            run_id: support::id("multi-loaded-run"),
             targets: config.ping.targets.clone(),
             interval: config.ping.interval,
             timeout: Duration::from_secs(1),
@@ -512,7 +524,7 @@ mod loaded_tests {
         assert!(!loaded.is_empty());
         assert!(loaded.iter().all(|event| {
             event.interface.as_deref() == Some("lo")
-                && event.source_ip == Some("127.0.0.1".parse().unwrap())
+                && event.ping_local_ip == Some("127.0.0.1".parse().unwrap())
         }));
         assert!(
             loaded

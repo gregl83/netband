@@ -1,3 +1,4 @@
+mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -14,7 +15,9 @@ use netband::bandwidth::{
 };
 use netband::cli::{Cli, ConsoleMode};
 use netband::config::{OutputTarget, ResolveContext, resolve};
-use netband::model::{ErrorKind, EventKind, LoadPhase, Outcome, ProviderKind, RequestStage};
+use netband::model::{
+    ErrorKind, EventKind, LoadPhase, Outcome, ProviderKind, RequestDirection, RequestStage,
+};
 use netband::provider::FailureDisposition;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::ServerConfig;
@@ -30,6 +33,103 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 const PROTOCOL: &str = "net.measurementlab.ndt.v7";
 const METRICS: &str = r#"{"TCPInfo":{"MinRTT":1200,"RTT":2500,"BytesRetrans":7}}"#;
+
+fn assert_report_timestamps(report: &netband::bandwidth::BandwidthReport) {
+    let bandwidth = report.events.last().unwrap();
+    let start = bandwidth.started_at_utc.expect("attempt start");
+    let finish = bandwidth.finished_at_utc.expect("attempt finish");
+    assert!(start <= finish);
+    let mut previous_finish = start;
+    for event in &report.events[..report.events.len() - 1] {
+        let request_start = event.started_at_utc.expect("request start");
+        let request_finish = event.finished_at_utc.expect("request finish");
+        assert!(start <= request_start && request_start <= request_finish);
+        assert!(previous_finish <= request_finish && request_finish <= finish);
+        previous_finish = request_finish;
+    }
+}
+
+struct TimedResolver {
+    address: std::net::SocketAddr,
+    fail: bool,
+    boundaries: Mutex<Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>>,
+}
+
+impl AddressResolver for TimedResolver {
+    fn resolve<'a>(&'a self, _: &'a str, _: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            let start = chrono::Utc::now();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let finish = chrono::Utc::now();
+            self.boundaries.lock().unwrap().push((start, finish));
+            if self.fail {
+                Err("timed DNS failure".to_owned())
+            } else {
+                Ok(vec![self.address])
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn attempt_and_request_timestamps_include_setup_on_success_and_failure() {
+    for fail in [false, true] {
+        let (address, server) = successful_server().await;
+        let dir = tempdir().unwrap();
+        let config = direct_config(dir.path(), address, "5s");
+        let resolver = TimedResolver {
+            address,
+            fail,
+            boundaries: Mutex::new(Vec::new()),
+        };
+        let (_sender, shutdown) = cancellation_channel();
+        let before = chrono::Utc::now();
+        let report = measure_bandwidth_with_network(
+            &config,
+            &support::id("timed"),
+            shutdown,
+            &netband::bandwidth::SystemTcpConnector,
+            &resolver,
+        )
+        .await;
+        let after = chrono::Utc::now();
+        assert_report_timestamps(&report);
+        let bandwidth = report.events.last().unwrap();
+        let boundaries = resolver.boundaries.lock().unwrap().clone();
+        assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
+        let measured = bandwidth.download_measurement_duration_ms.unwrap_or(0.0)
+            + bandwidth.upload_measurement_duration_ms.unwrap_or(0.0);
+        assert!(bandwidth.elapsed_ms.unwrap() >= measured + 95.0);
+        for request in report
+            .events
+            .iter()
+            .filter(|event| event.event_kind == EventKind::RequestFailure)
+        {
+            if request.request_stage == Some(RequestStage::Dns) {
+                assert!(request.elapsed_ms.unwrap() >= 50.0);
+            }
+            assert!(request.elapsed_ms.unwrap() >= 0.0);
+            assert!(request.elapsed_ms.unwrap() <= bandwidth.elapsed_ms.unwrap());
+        }
+        assert!(before <= bandwidth.started_at_utc.unwrap());
+        assert!(bandwidth.started_at_utc.unwrap() <= boundaries[0].0);
+        assert!(boundaries.last().unwrap().1 <= bandwidth.finished_at_utc.unwrap());
+        assert!(bandwidth.finished_at_utc.unwrap() <= after);
+        if fail {
+            assert_eq!(report.outcome, Outcome::Error);
+            let failure = &report.events[0];
+            assert_eq!(failure.request_stage, Some(RequestStage::Dns));
+            assert!(failure.started_at_utc.unwrap() <= boundaries[0].0);
+            assert!(failure.finished_at_utc.unwrap() >= boundaries[0].1);
+            assert!(bandwidth.download_mbps.is_none());
+            server.abort();
+        } else {
+            assert_eq!(report.outcome, Outcome::Success);
+            assert_eq!(boundaries.len(), 2);
+            server.await.unwrap();
+        }
+    }
+}
 
 fn context(root: PathBuf) -> ResolveContext {
     ResolveContext {
@@ -149,9 +249,9 @@ async fn download_replies_to_ping_with_the_same_payload() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "5s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "download-pong", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("download-pong"), shutdown).await;
     assert_eq!(report.outcome, Outcome::Success);
-    assert_eq!(report.events.last().unwrap().bytes_received, Some(1024));
+    assert_eq!(report.events.last().unwrap().download_bytes, Some(1024));
     server.await.unwrap();
 }
 
@@ -207,7 +307,7 @@ async fn download_continues_while_pong_writes_are_backpressured() {
     let (_shutdown_tx, shutdown) = cancellation_channel();
     let report = measure_bandwidth_with_network(
         &config,
-        "download-pong-backpressure",
+        &support::id("download-pong-backpressure"),
         shutdown,
         &SmallSendBuffer,
         &netband::bandwidth::SystemAddressResolver,
@@ -215,7 +315,7 @@ async fn download_continues_while_pong_writes_are_backpressured() {
     .await;
     assert_eq!(report.outcome, Outcome::Success, "{:?}", report.events);
     assert_eq!(
-        report.events.last().unwrap().bytes_received,
+        report.events.last().unwrap().download_bytes,
         Some(MESSAGES * PAYLOAD_SIZE)
     );
     server.await.unwrap();
@@ -248,11 +348,11 @@ async fn upload_size_server(
 }
 
 fn tls_material(root: &std::path::Path) -> (PathBuf, Arc<ServerConfig>) {
-    let CertifiedKey { cert, key_pair } =
+    let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let ca_path = root.join("local-ca.pem");
     std::fs::write(&ca_path, cert.pem()).unwrap();
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
     let server = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], key)
@@ -330,25 +430,28 @@ async fn direct_download_and_upload_produce_attributed_bandwidth_result() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "5s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-success", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("run-success"), shutdown).await;
     server.await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(report.exit_code(), 0);
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert_eq!(bandwidth.event_kind, EventKind::Bandwidth);
     assert_eq!(
         bandwidth.provider_id.as_deref(),
         Some(config.bandwidth.provider_id.as_str())
     );
-    assert!(bandwidth.remote_ip.is_some());
-    assert_eq!(bandwidth.bytes_received, Some(16 * 1024));
-    assert!(bandwidth.bytes_sent.unwrap() >= 16 * 1024);
+    assert!(bandwidth.download_remote_ip.is_some());
+    assert!(bandwidth.upload_remote_ip.is_some());
+    assert!(bandwidth.request_remote_ip.is_none());
+    assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
+    assert!(bandwidth.upload_bytes.unwrap() >= 16 * 1024);
     assert!(bandwidth.download_mbps.unwrap() > 0.0);
     assert!(bandwidth.upload_mbps.unwrap() > 0.0);
-    assert_eq!(bandwidth.tcp_min_rtt_ms, Some(1.2));
-    assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5));
-    assert_eq!(bandwidth.tcp_retransmissions, Some(7));
+    assert_eq!(bandwidth.upload_server_tcp_min_rtt_ms, Some(1.2));
+    assert_eq!(bandwidth.upload_server_tcp_rtt_ms, Some(2.5));
+    assert_eq!(bandwidth.upload_server_tcp_retransmitted_bytes, Some(7));
     assert!(!format!("{bandwidth:?}").contains("download-secret"));
 }
 
@@ -358,7 +461,7 @@ async fn upload_messages_scale_at_ndt7_boundaries() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "5s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-upload-scaling", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("run-upload-scaling"), shutdown).await;
     let sizes = server.await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Success);
@@ -395,7 +498,7 @@ async fn upload_stops_after_ten_seconds_and_completes_the_close_handshake() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "14s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "upload-deadline", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("upload-deadline"), shutdown).await;
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(report.events.len(), 1, "{:?}", report.events);
     let (elapsed, largest) = server.await.unwrap();
@@ -429,7 +532,7 @@ async fn upload_acknowledges_peer_close_before_disconnecting() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "5s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "upload-peer-close", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("upload-peer-close"), shutdown).await;
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(report.events.len(), 1, "{:?}", report.events);
     server.await.unwrap();
@@ -457,21 +560,25 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
     let (_shutdown_tx, shutdown) = cancellation_channel();
     let report = tokio::time::timeout(
         Duration::from_secs(4),
-        measure_bandwidth(&config, "upload-backpressure", shutdown),
+        measure_bandwidth(&config, &support::id("upload-backpressure"), shutdown),
     )
     .await
     .expect("peer Close must start bounded cleanup even behind a blocked Pong write");
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
-    assert!(bandwidth.bytes_sent.unwrap() > 0);
-    assert_eq!(bandwidth.tcp_rtt_ms, Some(2.5), "read metrics after Ping");
+    assert!(bandwidth.upload_bytes.unwrap() > 0);
+    assert_eq!(
+        bandwidth.upload_server_tcp_rtt_ms,
+        Some(2.5),
+        "read metrics after Ping"
+    );
     assert!(
         report.events.iter().any(|event| {
-            event.request_stage == Some(RequestStage::Upload)
+            serde_json::to_value(event).unwrap()["request_stage"] == "cleanup"
                 && event.error_kind == Some(ErrorKind::UploadFailed)
                 && event.outcome == Outcome::Error
                 && event.os_error_code.is_none()
-                && event.error_message.as_deref()
-                    == Some("upload close handshake timed out after 2s")
+                && event.message.as_deref() == Some("upload close handshake timed out after 2s")
         }),
         "{:?}",
         report.events
@@ -515,7 +622,7 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
         let task = tokio::spawn(async move {
             measure_bandwidth_with_gate_and_phase(
                 &config,
-                "upload-cleanup-cancel",
+                &support::id("upload-cleanup-cancel"),
                 shutdown,
                 &mut gate,
                 phase_tx,
@@ -538,6 +645,44 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
             .unwrap()
             .unwrap();
         assert_eq!(report.outcome, outcome);
+        let bandwidth = report.events.last().unwrap();
+        assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
+        assert!(
+            bandwidth.elapsed_ms.unwrap()
+                > bandwidth.download_measurement_duration_ms.unwrap_or(0.0)
+                    + bandwidth.upload_measurement_duration_ms.unwrap_or(0.0)
+        );
+        assert!(bandwidth.download_request_id.is_some());
+        assert!(bandwidth.upload_request_id.is_some());
+        assert_ne!(bandwidth.download_request_id, bandwidth.upload_request_id);
+        assert!(report.events.iter().any(|event| event.request_direction
+            == Some(RequestDirection::Upload)
+            && event.request_id == bandwidth.upload_request_id));
+        assert_eq!(report.exit_code(), 1);
+        assert!(report.reserved);
+        assert_reserved_accounting(&report);
+        assert_eq!(
+            report
+                .events
+                .iter()
+                .filter(|event| event.event_kind == EventKind::Bandwidth)
+                .count(),
+            1
+        );
+        assert_report_timestamps(&report);
+        let bandwidth = report.events.last().unwrap();
+        assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
+        assert!(bandwidth.upload_bytes.unwrap() >= 8192);
+        assert!(bandwidth.download_mbps.unwrap() > 0.0);
+        assert!(bandwidth.upload_mbps.unwrap() > 0.0);
+        let terminal = &report.events[report.events.len() - 2];
+        assert_eq!(
+            serde_json::to_value(terminal).unwrap()["request_stage"],
+            "cleanup"
+        );
+        assert_eq!(terminal.request_id, bandwidth.upload_request_id);
+        assert_eq!(terminal.request_direction, Some(RequestDirection::Upload));
+        assert_eq!(terminal.outcome, outcome);
         let _ = release_tx.send(());
         server.await.unwrap();
     }
@@ -549,7 +694,7 @@ async fn upload_handshake_failure_preserves_partial_download() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "5s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-partial", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("run-partial"), shutdown).await;
     server.await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Partial);
@@ -557,8 +702,9 @@ async fn upload_handshake_failure_preserves_partial_download() {
     assert!(report.events.iter().any(|event| {
         event.event_kind == EventKind::RequestFailure
             && event.request_stage == Some(RequestStage::WebsocketHandshake)
-            && event.http_status == Some(500)
+            && event.request_http_status == Some(500)
     }));
+    assert_report_timestamps(&report);
     let bandwidth = report.events.last().unwrap();
     assert!(bandwidth.download_mbps.is_some());
     assert!(bandwidth.upload_mbps.is_none());
@@ -593,7 +739,7 @@ async fn whole_test_timeout_and_cancellation_always_write_bandwidth_result() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "20ms");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let timed_out = measure_bandwidth(&config, "run-timeout", shutdown).await;
+    let timed_out = measure_bandwidth(&config, &support::id("run-timeout"), shutdown).await;
     server.abort();
     assert_eq!(timed_out.outcome, Outcome::Timeout);
     assert_eq!(
@@ -603,7 +749,7 @@ async fn whole_test_timeout_and_cancellation_always_write_bandwidth_result() {
 
     let (shutdown_tx, shutdown) = cancellation_channel();
     shutdown_tx.send(true).unwrap();
-    let cancelled = measure_bandwidth(&config, "run-cancelled", shutdown).await;
+    let cancelled = measure_bandwidth(&config, &support::id("run-cancelled"), shutdown).await;
     assert_eq!(cancelled.outcome, Outcome::Cancelled);
     assert_eq!(cancelled.events.last().unwrap().outcome, Outcome::Cancelled);
 }
@@ -630,13 +776,18 @@ async fn provider_wide_handshake_rate_limit_stops_before_upload() {
     let dir = tempdir().unwrap();
     let config = direct_config(dir.path(), address, "1s");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-limited", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("run-limited"), shutdown).await;
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::RateLimited);
     let failure = &report.events[0];
-    assert_eq!(failure.http_status, Some(429));
-    assert_eq!(failure.retry_after_ms, Some(60_000));
-    assert!(failure.rate_limit_until_utc.is_some());
+    assert_eq!(failure.request_http_status, Some(429));
+    assert_eq!(failure.request_retry_after_ms, Some(60_000));
+    assert_eq!(
+        failure.request_retry_at_utc,
+        failure
+            .finished_at_utc
+            .map(|time| time + chrono::Duration::seconds(60))
+    );
 }
 
 #[derive(Default)]
@@ -667,6 +818,20 @@ impl TcpConnector for RecordingConnector {
     }
 }
 
+fn assert_reserved_accounting(report: &netband::bandwidth::BandwidthReport) {
+    for event in &report.events {
+        if event.event_kind == EventKind::Bandwidth {
+            assert_eq!(event.bandwidth_start_reserved, Some(true));
+            assert_eq!(event.provider_daily_starts, Some(1));
+            assert!(event.provider_accounting_date.is_some());
+        } else {
+            assert_eq!(event.bandwidth_start_reserved, None);
+            assert_eq!(event.provider_daily_starts, None);
+            assert_eq!(event.provider_accounting_date, None);
+        }
+    }
+}
+
 struct RecordingGate {
     reserved: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
@@ -675,11 +840,14 @@ struct RecordingGate {
 impl ReservationGate for RecordingGate {
     fn reserve(
         &mut self,
-        _started_at: chrono::DateTime<chrono::Utc>,
+        started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<AdmissionReservation, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.reserved.store(true, Ordering::SeqCst);
-        Ok(AdmissionReservation::Reserved { daily_runs_used: 1 })
+        Ok(AdmissionReservation::Reserved {
+            accounting_date: started_at.date_naive(),
+            daily_bandwidth_starts: 1,
+        })
     }
 }
 
@@ -722,7 +890,7 @@ async fn daily_allowance_is_reserved_once_before_the_first_ndt_connection() {
     let (_shutdown_tx, shutdown) = cancellation_channel();
     let report = measure_bandwidth_with_network_and_gate(
         &config,
-        "run-reservation",
+        &support::id("run-reservation"),
         shutdown,
         &connector,
         &resolver,
@@ -733,12 +901,72 @@ async fn daily_allowance_is_reserved_once_before_the_first_ndt_connection() {
     assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
     assert_eq!(connector_calls.load(Ordering::SeqCst), 2);
     assert!(report.reserved);
-    assert!(
-        report
+    assert_reserved_accounting(&report);
+}
+
+#[tokio::test]
+async fn retry_attempts_link_failures_and_retained_measurements_across_directions() {
+    struct RetryConnector;
+    impl TcpConnector for RetryConnector {
+        fn connect<'a>(
+            &'a self,
+            remote: std::net::SocketAddr,
+            interface: Option<&'a str>,
+        ) -> ConnectFuture<'a> {
+            Box::pin(async move {
+                if remote.ip().is_loopback() {
+                    netband::bandwidth::SystemTcpConnector
+                        .connect(remote, interface)
+                        .await
+                } else {
+                    Err(std::io::Error::other("injected first-address failure"))
+                }
+            })
+        }
+    }
+    let (address, server) = successful_server().await;
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let resolver = FixedResolver(vec!["192.0.2.1:443".parse().unwrap(), address]);
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth_with_network(
+        &config,
+        &support::id("retry-links"),
+        shutdown,
+        &RetryConnector,
+        &resolver,
+    )
+    .await;
+    server.await.unwrap();
+    let result = report.events.last().unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    let download_id = result.download_request_id.unwrap();
+    let upload_id = result.upload_request_id.unwrap();
+    assert_ne!(download_id, upload_id);
+    let mut ids = std::collections::BTreeSet::from([download_id, upload_id]);
+    for direction in [RequestDirection::Download, RequestDirection::Upload] {
+        let failure = report
             .events
             .iter()
-            .all(|event| event.daily_runs_used == Some(1))
-    );
+            .find(|event| {
+                event.request_direction == Some(direction)
+                    && event.request_stage == Some(RequestStage::Connect)
+            })
+            .unwrap();
+        assert!(ids.insert(failure.request_id.unwrap()));
+    }
+    assert_eq!(ids.len(), 4);
+    // Later diagnostics correlate to the retained measurement, not the failed retry.
+    for event in &report.events[..report.events.len() - 1] {
+        if event.request_stage != Some(RequestStage::Connect) {
+            let expected = match event.request_direction {
+                Some(RequestDirection::Download) => download_id,
+                Some(RequestDirection::Upload) => upload_id,
+                _ => panic!("unexpected failure"),
+            };
+            assert_eq!(event.request_id, Some(expected));
+        }
+    }
 }
 
 #[tokio::test]
@@ -753,11 +981,25 @@ async fn every_direct_connection_receives_the_selected_interface() {
         "192.0.2.11:443".parse().unwrap(),
     ];
     let resolver = FixedResolver(addresses.clone());
-    let report =
-        measure_bandwidth_with_network(&config, "run-binding", shutdown, &connector, &resolver)
-            .await;
+    let report = measure_bandwidth_with_network(
+        &config,
+        &support::id("run-binding"),
+        shutdown,
+        &connector,
+        &resolver,
+    )
+    .await;
 
     assert_eq!(report.outcome, Outcome::Error);
+    assert_eq!(
+        report
+            .events
+            .iter()
+            .filter_map(|event| event.request_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        4
+    );
     let calls = connector.calls.lock().unwrap();
     assert_eq!(
         calls
@@ -823,11 +1065,11 @@ async fn tls_download_preserves_large_messages_and_replies_to_ping() {
     });
     let config = tls_direct_config(dir.path(), address, &ca_path, "localhost");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "tls-buffered-download", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("tls-buffered-download"), shutdown).await;
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(
-        report.events.last().unwrap().bytes_received,
+        report.events.last().unwrap().download_bytes,
         Some(1024 * 1024 + 8192)
     );
 }
@@ -847,11 +1089,22 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
     });
     let config = tls_direct_config(dir.path(), address, &ca_path, "localhost");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&config, "run-tls", shutdown).await;
+    let report = measure_bandwidth(&config, &support::id("run-tls"), shutdown).await;
+    assert_eq!(
+        report.events.last().unwrap().server_name.as_deref(),
+        Some("localhost")
+    );
+    assert!(report.events.last().unwrap().request_url.is_none());
     server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Success);
     assert_eq!(
-        report.events.last().unwrap().remote_ip.unwrap().to_string(),
+        report
+            .events
+            .last()
+            .unwrap()
+            .upload_remote_ip
+            .unwrap()
+            .to_string(),
         "127.0.0.1"
     );
 
@@ -867,13 +1120,34 @@ async fn ip_connect_uses_separate_tls_name_and_private_ca_without_disabling_vali
     });
     let mismatch = tls_direct_config(dir.path(), address, &ca_path, "wrong.example");
     let (_shutdown_tx, shutdown) = cancellation_channel();
-    let report = measure_bandwidth(&mismatch, "run-mismatch", shutdown).await;
+    let report = measure_bandwidth(&mismatch, &support::id("run-mismatch"), shutdown).await;
     mismatch_server.await.unwrap();
     assert_eq!(report.outcome, Outcome::Error);
     assert!(report.events.iter().any(|event| {
         event.event_kind == EventKind::RequestFailure
             && event.request_stage == Some(RequestStage::Tls)
     }));
+    let failures = report
+        .events
+        .iter()
+        .filter(|event| event.event_kind == EventKind::RequestFailure)
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 2);
+    for (failure, direction) in failures.iter().zip(["download", "upload"]) {
+        assert_eq!(
+            failure.request_direction,
+            Some(if direction == "download" {
+                RequestDirection::Download
+            } else {
+                RequestDirection::Upload
+            })
+        );
+        assert_eq!(failure.server_name.as_deref(), Some("wrong.example"));
+        assert_eq!(
+            failure.request_url.as_deref(),
+            Some(format!("wss://{address}/ndt/v7/{direction}").as_str())
+        );
+    }
 }
 
 async fn execute_mode(mode: ConsoleMode) -> (String, Vec<csv::StringRecord>) {
@@ -906,7 +1180,20 @@ async fn one_shot_pipeline_keeps_csv_authoritative_across_console_modes() {
     assert_eq!(human.lines().count(), 1);
     assert!(human.contains("bandwidth"));
     assert!(human.contains("outcome=success"));
-    assert_eq!(human_csv.last().unwrap().get(8), Some("bandwidth"));
+    assert_eq!(
+        human_csv
+            .iter()
+            .find(|row| row.iter().any(|cell| cell == "bandwidth")
+                && row.iter().any(|cell| cell == "success"))
+            .unwrap()
+            .get(
+                netband::journal::CSV_HEADER
+                    .split(',')
+                    .position(|field| field == "event_kind")
+                    .unwrap()
+            ),
+        Some("bandwidth")
+    );
 
     let (jsonl, jsonl_csv) = execute_mode(ConsoleMode::Jsonl).await;
     assert_eq!(jsonl.lines().count(), jsonl_csv.len());
@@ -919,5 +1206,574 @@ async fn one_shot_pipeline_keeps_csv_authoritative_across_console_modes() {
 
     let (off, off_csv) = execute_mode(ConsoleMode::Off).await;
     assert!(off.is_empty());
-    assert_eq!(off_csv.last().unwrap().get(8), Some("bandwidth"));
+    assert_eq!(
+        off_csv
+            .iter()
+            .find(|row| row.iter().any(|cell| cell == "bandwidth")
+                && row.iter().any(|cell| cell == "success"))
+            .unwrap()
+            .get(
+                netband::journal::CSV_HEADER
+                    .split(',')
+                    .position(|field| field == "event_kind")
+                    .unwrap()
+            ),
+        Some("bandwidth")
+    );
+}
+
+struct InterruptNetwork {
+    stage: RequestStage,
+    after_download: bool,
+    resolutions: AtomicUsize,
+    connections: AtomicUsize,
+    address: std::net::SocketAddr,
+    ready: Arc<tokio::sync::Notify>,
+}
+
+impl AddressResolver for InterruptNetwork {
+    fn resolve<'a>(&'a self, _host: &'a str, _port: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            let call = self.resolutions.fetch_add(1, Ordering::SeqCst);
+            if self.stage == RequestStage::Dns && call == usize::from(self.after_download) {
+                self.ready.notify_one();
+                return std::future::pending().await;
+            }
+            // An injected failed address tests retention of earlier diagnostics.
+            Ok(vec!["127.0.0.1:0".parse().unwrap(), self.address])
+        })
+    }
+}
+
+impl TcpConnector for InterruptNetwork {
+    fn connect<'a>(
+        &'a self,
+        remote: std::net::SocketAddr,
+        interface: Option<&'a str>,
+    ) -> ConnectFuture<'a> {
+        Box::pin(async move {
+            if remote.port() == 0 {
+                return Err(std::io::Error::other("injected address failure"));
+            }
+            let call = self.connections.fetch_add(1, Ordering::SeqCst);
+            if self.stage == RequestStage::Connect && call == usize::from(self.after_download) {
+                self.ready.notify_one();
+                return std::future::pending().await;
+            }
+            netband::bandwidth::SystemTcpConnector
+                .connect(remote, interface)
+                .await
+        })
+    }
+}
+
+#[tokio::test]
+async fn interruption_preserves_completed_directions_diagnostics_and_admission() {
+    for after_download in [false, true] {
+        for stage in [
+            RequestStage::Dns,
+            RequestStage::Connect,
+            RequestStage::Tls,
+            RequestStage::WebsocketHandshake,
+            if after_download {
+                RequestStage::Upload
+            } else {
+                RequestStage::Download
+            },
+        ] {
+            for cancel in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let ready = Arc::new(tokio::sync::Notify::new());
+                let server_ready = Arc::clone(&ready);
+                let server = tokio::spawn(async move {
+                    if after_download {
+                        serve_download(listener.accept().await.unwrap().0).await;
+                    }
+                    if matches!(stage, RequestStage::Dns | RequestStage::Connect) {
+                        return;
+                    }
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    if matches!(stage, RequestStage::Tls | RequestStage::WebsocketHandshake) {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap();
+                        server_ready.notify_one();
+                        // EOF proves cancellation dropped the connection, with no detached I/O.
+                        let _ = stream.read_to_end(&mut Vec::new()).await;
+                    } else {
+                        let mut socket = accept_hdr_async(stream, accept_protocol).await.unwrap();
+                        if after_download {
+                            assert!(matches!(
+                                socket.next().await.unwrap().unwrap(),
+                                Message::Binary(_)
+                            ));
+                        } else {
+                            socket.send(Message::Ping(vec![1].into())).await.unwrap();
+                            assert!(matches!(
+                                socket.next().await.unwrap().unwrap(),
+                                Message::Pong(_)
+                            ));
+                        }
+                        server_ready.notify_one();
+                        while let Some(Ok(_)) = socket.next().await {}
+                    }
+                });
+                let dir = tempdir().unwrap();
+                let mut config =
+                    direct_config(dir.path(), address, if cancel { "5s" } else { "500ms" });
+                if stage == RequestStage::Tls {
+                    let netband::config::ProviderConfig::Direct(direct) =
+                        &mut config.bandwidth.provider
+                    else {
+                        unreachable!();
+                    };
+                    let url = if after_download {
+                        &mut direct.upload_url
+                    } else {
+                        &mut direct.download_url
+                    };
+                    url.set_scheme("wss").unwrap();
+                }
+                let network = InterruptNetwork {
+                    stage,
+                    after_download,
+                    address,
+                    ready: Arc::clone(&ready),
+                    resolutions: AtomicUsize::new(0),
+                    connections: AtomicUsize::new(0),
+                };
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mut gate = RecordingGate {
+                    reserved: Arc::new(AtomicBool::new(false)),
+                    calls: Arc::clone(&calls),
+                };
+                let (shutdown_tx, shutdown) = cancellation_channel();
+                let task = tokio::spawn(async move {
+                    measure_bandwidth_with_network_and_gate(
+                        &config,
+                        &support::id("interrupted"),
+                        shutdown,
+                        &network,
+                        &network,
+                        &mut gate,
+                    )
+                    .await
+                });
+                tokio::time::timeout(Duration::from_secs(2), ready.notified())
+                    .await
+                    .unwrap();
+                let stage_observed = chrono::Utc::now();
+                if cancel {
+                    shutdown_tx.send(true).unwrap();
+                }
+                let report = tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let outcome = if cancel {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Timeout
+                };
+                assert_eq!(
+                    report.outcome, outcome,
+                    "{stage:?}, after download: {after_download}"
+                );
+                assert_eq!(report.exit_code(), 1);
+                assert!(report.reserved);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_reserved_accounting(&report);
+                assert_eq!(
+                    report
+                        .events
+                        .iter()
+                        .filter(|event| event.event_kind == EventKind::Bandwidth)
+                        .count(),
+                    1
+                );
+                assert_report_timestamps(&report);
+                let bandwidth = report.events.last().unwrap();
+                assert_eq!(
+                    bandwidth.download_bytes,
+                    after_download.then_some(16 * 1024)
+                );
+                assert_eq!(bandwidth.download_mbps.is_some(), after_download);
+                assert!(bandwidth.upload_mbps.is_none());
+                assert!(bandwidth.upload_bytes.is_none());
+                if after_download {
+                    assert!(bandwidth.download_mbps.unwrap() > 0.0);
+                    assert!(bandwidth.elapsed_ms.unwrap() > 0.0);
+                    assert!(bandwidth.download_server_tcp_rtt_ms.is_some());
+                    assert!(bandwidth.upload_server_tcp_rtt_ms.is_none());
+                }
+                let terminal = &report.events[report.events.len() - 2];
+                assert_eq!(terminal.event_kind, EventKind::RequestFailure);
+                assert_eq!(terminal.request_stage, Some(stage));
+                assert_eq!(terminal.outcome, outcome);
+                assert_eq!(
+                    terminal.request_direction,
+                    Some(if after_download {
+                        RequestDirection::Upload
+                    } else {
+                        RequestDirection::Download
+                    })
+                );
+                assert!(bandwidth.request_direction.is_none());
+                assert!(terminal.server_name.is_some());
+                let request_url = terminal.request_url.as_deref().unwrap();
+                assert!(request_url.contains(if after_download {
+                    "/upload"
+                } else {
+                    "/download"
+                }));
+                assert!(bandwidth.request_url.is_none());
+                assert!(terminal.started_at_utc.unwrap() <= stage_observed);
+                assert!(terminal.finished_at_utc.unwrap() >= stage_observed);
+                assert_eq!(terminal.finished_at_utc, bandwidth.finished_at_utc);
+                if after_download || stage != RequestStage::Dns {
+                    assert!(report.events.iter().any(|event| {
+                        event
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| message.contains("injected address failure"))
+                    }));
+                }
+                tokio::time::timeout(Duration::from_secs(1), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reservation_failure_and_prior_cancellation_never_start_connections() {
+    struct RejectGate(usize);
+    impl ReservationGate for RejectGate {
+        fn reserve(
+            &mut self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<AdmissionReservation, String> {
+            self.0 += 1;
+            Err("injected reservation failure".to_owned())
+        }
+    }
+    for cancel in [false, true] {
+        let dir = tempdir().unwrap();
+        let address = "127.0.0.1:443".parse().unwrap();
+        let config = direct_config(dir.path(), address, "1s");
+        let connector = RecordingConnector::default();
+        let mut gate = RejectGate(0);
+        let (shutdown_tx, shutdown) = cancellation_channel();
+        if cancel {
+            shutdown_tx.send(true).unwrap();
+        }
+        let report = measure_bandwidth_with_network_and_gate(
+            &config,
+            &support::id("not-admitted"),
+            shutdown,
+            &connector,
+            &FixedResolver(vec![address]),
+            &mut gate,
+        )
+        .await;
+        assert!(connector.calls.lock().unwrap().is_empty());
+        assert_eq!(gate.0, usize::from(!cancel));
+        assert!(!report.reserved);
+        assert_eq!(
+            report.outcome,
+            if cancel {
+                Outcome::Cancelled
+            } else {
+                Outcome::Error
+            }
+        );
+        assert_eq!(
+            report.reservation_error.as_deref(),
+            (!cancel).then_some("injected reservation failure")
+        );
+        assert_eq!(report.events.len(), 2);
+        let summary = report
+            .events
+            .iter()
+            .find(|event| event.event_kind == EventKind::Bandwidth)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(summary).unwrap()["bandwidth_start_reserved"],
+            false
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.provider_daily_starts.is_none())
+        );
+        assert_report_timestamps(&report);
+        let bandwidth = report.events.last().unwrap();
+        assert!(bandwidth.download_mbps.is_none());
+        assert!(bandwidth.upload_mbps.is_none());
+    }
+}
+
+#[tokio::test]
+async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
+    use netband::journal::JournalWriter;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        download
+            .send(Message::Binary(vec![3; 1024].into()))
+            .await
+            .unwrap();
+        download
+            .send(Message::Text(
+                r#"{"TCPInfo":{"MinRTT":1200,"BytesRetrans":7}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        download.close(None).await.unwrap();
+
+        let mut upload = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        assert!(matches!(
+            upload.next().await.unwrap().unwrap(),
+            Message::Binary(_)
+        ));
+        upload
+            .send(Message::Text(
+                r#"{"TCPInfo":{"RTT":9000,"BytesRetrans":29}}"#.into(),
+            ))
+            .await
+            .unwrap();
+        upload.close(None).await.unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, &support::id("tcp-directions"), shutdown).await;
+    server.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    let event = report.events.last().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&netband::console::render_jsonl(event).unwrap()).unwrap();
+    let mut journal = JournalWriter::from_writer(Vec::new()).unwrap();
+    journal.append_batch(&report.events).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut csv = csv::Reader::from_reader(bytes.as_slice());
+    let header = csv.headers().unwrap().clone();
+    let row = csv.records().last().unwrap().unwrap();
+    for (field, expected) in [
+        (
+            "download_server_tcp_min_rtt_ms",
+            Some(serde_json::json!(1.2)),
+        ),
+        ("download_server_tcp_rtt_ms", None),
+        (
+            "download_server_tcp_retransmitted_bytes",
+            Some(serde_json::json!(7)),
+        ),
+        ("upload_server_tcp_min_rtt_ms", None),
+        ("upload_server_tcp_rtt_ms", Some(serde_json::json!(9.0))),
+        (
+            "upload_server_tcp_retransmitted_bytes",
+            Some(serde_json::json!(29)),
+        ),
+    ] {
+        assert_eq!(
+            json[field],
+            expected.clone().unwrap_or(serde_json::Value::Null)
+        );
+        let index = header.iter().position(|column| column == field).unwrap();
+        assert_eq!(
+            &row[index],
+            expected.map(|value| value.to_string()).unwrap_or_default()
+        );
+    }
+    for field in ["tcp_min_rtt_ms", "tcp_rtt_ms", "tcp_retransmissions"] {
+        assert!(json.get(field).is_none());
+        assert!(!header.iter().any(|column| column == field));
+    }
+}
+
+#[tokio::test]
+async fn tls_rechecks_private_ca_changed_after_preflight() {
+    for removed in [false, true] {
+        let dir = tempdir().unwrap();
+        let (ca, _) = tls_material(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config =
+            tls_direct_config(dir.path(), listener.local_addr().unwrap(), &ca, "localhost");
+        netband::config::validate_environment(&config).unwrap();
+        if removed {
+            std::fs::remove_file(&ca).unwrap();
+        } else {
+            std::fs::write(&ca, "invalid replacement").unwrap();
+        }
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let (_sender, shutdown) = cancellation_channel();
+        let report = measure_bandwidth(&config, &support::id("changed-ca"), shutdown).await;
+        server.abort();
+        assert_eq!(report.outcome, Outcome::Error);
+        assert!(report.events.iter().any(|event| {
+            event.request_stage == Some(RequestStage::Tls)
+                && event.error_kind == Some(ErrorKind::Tls)
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("private CA"))
+        }));
+        assert!(report.events.last().unwrap().download_mbps.is_none());
+        assert!(report.events.last().unwrap().upload_mbps.is_none());
+    }
+}
+
+#[tokio::test]
+async fn mixed_scheme_directions_apply_ca_and_server_name_only_to_tls() {
+    for secure_download in [false, true] {
+        let root = tempdir().unwrap();
+        let (ca, tls) = tls_material(root.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let acceptor = TlsAcceptor::from(tls);
+            let (download, _) = listener.accept().await.unwrap();
+            if secure_download {
+                let stream = acceptor.accept(download).await.unwrap();
+                assert_eq!(stream.get_ref().1.server_name(), Some("localhost"));
+                serve_download(stream).await;
+            } else {
+                serve_download(download).await;
+            }
+            let (upload, _) = listener.accept().await.unwrap();
+            if secure_download {
+                serve_upload(upload).await;
+            } else {
+                let stream = acceptor.accept(upload).await.unwrap();
+                assert_eq!(stream.get_ref().1.server_name(), Some("localhost"));
+                serve_upload(stream).await;
+            }
+        });
+        let download = format!(
+            "{}://{address}/ndt/v7/download",
+            if secure_download { "wss" } else { "ws" }
+        );
+        let upload = format!(
+            "{}://{address}/ndt/v7/upload",
+            if secure_download { "ws" } else { "wss" }
+        );
+        let cli = Cli::try_parse_from([
+            "netband",
+            "--ndt-provider",
+            "direct",
+            "--ndt-download-url",
+            &download,
+            "--ndt-upload-url",
+            &upload,
+            "--allow-insecure-ndt",
+            "--ndt-ca-cert",
+            ca.to_str().unwrap(),
+            "--ndt-tls-server-name",
+            "localhost",
+            "--bandwidth-timeout",
+            "5s",
+            "once",
+            "bandwidth",
+        ])
+        .unwrap();
+        let config = resolve(&cli, &context(root.path().to_path_buf())).unwrap();
+        netband::config::validate_environment(&config).unwrap();
+        let (_sender, shutdown) = cancellation_channel();
+        let report = measure_bandwidth(&config, &support::id("mixed-tls"), shutdown).await;
+        server.await.unwrap();
+        assert_eq!(report.outcome, Outcome::Success);
+        let event = report.events.last().unwrap();
+        assert!(event.download_mbps.unwrap() > 0.0);
+        assert!(event.upload_mbps.unwrap() > 0.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn separate_endpoints_export_each_connections_window_and_addresses() {
+    let download_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upload_listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let download_addr = download_listener.local_addr().unwrap();
+    let upload_addr = upload_listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut download =
+            accept_hdr_async(download_listener.accept().await.unwrap().0, accept_protocol)
+                .await
+                .unwrap();
+        download
+            .send(Message::Binary(vec![3; 1024].into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        download.close(None).await.unwrap();
+        serve_upload(upload_listener.accept().await.unwrap().0).await;
+    });
+    let dir = tempdir().unwrap();
+    let download = format!("ws://{download_addr}/download");
+    let upload = format!("ws://{upload_addr}/upload");
+    let cli = Cli::try_parse_from([
+        "netband",
+        "--ndt-provider",
+        "direct",
+        "--ndt-download-url",
+        &download,
+        "--ndt-upload-url",
+        &upload,
+        "--allow-insecure-ndt",
+        "once",
+        "bandwidth",
+    ])
+    .unwrap();
+    let config = resolve(&cli, &context(dir.path().to_path_buf())).unwrap();
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, &support::id("separate-directions"), shutdown).await;
+    server.await.unwrap();
+    assert_eq!(report.outcome, Outcome::Success);
+    let event = report.events.last().unwrap();
+    assert_eq!(event.download_remote_ip, Some(download_addr.ip()));
+    assert_eq!(event.upload_remote_ip, Some(upload_addr.ip()));
+    assert!(event.download_local_ip.unwrap().is_loopback());
+    assert!(event.upload_local_ip.unwrap().is_loopback());
+    assert!(event.download_measurement_duration_ms.unwrap() >= 40.0);
+    let mut journal = netband::journal::JournalWriter::from_writer(Vec::new()).unwrap();
+    journal.append_batch(std::slice::from_ref(event)).unwrap();
+    let bytes = journal.into_inner().unwrap();
+    let mut reader = csv::Reader::from_reader(bytes.as_slice());
+    let headers = reader.headers().unwrap().clone();
+    let row = reader.records().next().unwrap().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&netband::console::render_jsonl(event).unwrap()).unwrap();
+    for (prefix, address, byte_field) in [
+        ("download", download_addr.ip(), "download_bytes"),
+        ("upload", upload_addr.ip(), "upload_bytes"),
+    ] {
+        let cell = |name: &str| &row[headers.iter().position(|field| field == name).unwrap()];
+        assert_eq!(cell(&format!("{prefix}_remote_ip")), address.to_string());
+        assert_eq!(json[format!("{prefix}_remote_ip")], address.to_string());
+        let rate = cell(&format!("{prefix}_mbps")).parse::<f64>().unwrap();
+        let duration = cell(&format!("{prefix}_measurement_duration_ms"))
+            .parse::<f64>()
+            .unwrap();
+        let bytes = cell(byte_field).parse::<u64>().unwrap();
+        let expected = 8.0 * bytes as f64 / (1000.0 * duration);
+        assert!((rate - expected).abs() <= rate.abs() * 1e-12);
+        assert!(
+            (json[format!("{prefix}_mbps")].as_f64().unwrap() - expected).abs()
+                <= rate.abs() * 1e-12
+        );
+    }
 }

@@ -7,7 +7,7 @@ After=network-online.target
 [Service]
 Type=simple
 DynamicUser=yes
-StateDirectory=netband
+StateDirectory=netband netband/measurements
 StateDirectoryMode=0700
 ConfigurationDirectory=netband
 ExecStart=/usr/local/bin/netband --config /etc/netband/netband.toml --console off run

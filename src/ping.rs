@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::io::AsyncWrite;
 
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
-use crate::journal::{Journal, JournalError, OutputCoordinator};
-use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome};
+use crate::journal::{Journal, JournalError, OutputCoordinator, RunContext};
+use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind};
 
 const CONSOLE_CAPACITY: usize = 256;
 const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
@@ -38,7 +38,7 @@ pub struct ProbeRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeBinding {
     pub interface: Option<String>,
-    pub source_ip: Option<IpAddr>,
+    pub local_ip: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,14 +82,14 @@ pub struct ProbeAttemptResult {
 
 #[derive(Debug, Clone)]
 pub struct PingRoundRequest {
-    pub run_id: String,
+    pub run_id: RunId,
     pub round_number: u64,
     pub targets: Vec<IpAddr>,
     pub timeout: Duration,
-    pub scheduled_at_utc: DateTime<Utc>,
+    pub scheduled_at_utc: Option<DateTime<Utc>>,
     pub identifier: u16,
     pub load_phase: Option<LoadPhase>,
-    pub load_run_id: Option<String>,
+    pub load_run_id: Option<RunId>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +100,16 @@ pub struct PingRoundReport {
 }
 
 impl PingRoundReport {
+    pub fn outcome(&self) -> Outcome {
+        if self.failed_targets == 0 {
+            Outcome::Success
+        } else if self.successful_targets > 0 {
+            Outcome::Partial
+        } else {
+            Outcome::Error
+        }
+    }
+
     pub fn exit_status(&self) -> PingExitStatus {
         if self.failed_targets == 0 {
             PingExitStatus::Success
@@ -166,11 +176,10 @@ where
             .wrapping_add(index as u64) as u16;
         let transport = Arc::clone(&transport);
         let context = MeasurementContext {
-            run_id: request.run_id.clone(),
-            round_number: request.round_number,
+            run_id: request.run_id,
             scheduled_at: request.scheduled_at_utc,
             load_phase: request.load_phase,
-            load_run_id: request.load_run_id.clone(),
+            load_run_id: request.load_run_id,
         };
         let probe_request = ProbeRequest {
             target,
@@ -185,7 +194,7 @@ where
         ));
     }
 
-    let mut events = Vec::with_capacity(request.targets.len() * 2);
+    let mut events = Vec::with_capacity(request.targets.len());
     let mut successful_targets = 0;
     let mut failed_targets = 0;
     for (target, sequence, task) in tasks {
@@ -203,7 +212,7 @@ where
         } else {
             failed_targets += 1;
         }
-        events.extend(measurement.events);
+        events.push(measurement.event);
     }
 
     Ok(PingRoundReport {
@@ -213,7 +222,7 @@ where
     })
 }
 
-fn validate_round_request(request: &PingRoundRequest) -> Result<(), PingRoundError> {
+pub(crate) fn validate_round_request(request: &PingRoundRequest) -> Result<(), PingRoundError> {
     if request.targets.is_empty() {
         return Err(PingRoundError::NoTargets);
     }
@@ -240,39 +249,57 @@ where
 {
     let scheduled_at = Utc::now();
     let run_number = next_run_number();
-    let run_id = run_id(scheduled_at, run_number);
+    let session = RunId::new();
+    let run_id = RunId::new();
     let identifier = (u64::from(std::process::id()) ^ run_number) as u16;
     let round_request = PingRoundRequest {
         run_id,
         round_number: 0,
         targets: config.ping.targets.clone(),
         timeout: config.ping.timeout,
-        scheduled_at_utc: scheduled_at,
+        scheduled_at_utc: None,
         identifier,
         load_phase: None,
         load_run_id: None,
     };
     validate_round_request(&round_request)?;
-    let (journal, output_path) = Journal::open_at(&config.output, scheduled_at)?;
+    let journal = Journal::open_at(&config.output, config.rotate_max_bytes, scheduled_at)?;
     let console = Console::spawn(
         config.console,
         console_writer,
         CONSOLE_CAPACITY,
         trace_console_diagnostic,
     );
-    let report = measure_round(transport, round_request).await?;
-    let exit_status = report.exit_status();
-
     let mut coordinator = OutputCoordinator::new(journal, console);
-    let publish_result = coordinator.publish_batch(&report.events);
+    let result = async {
+        coordinator.start_session(session, "once ping")?;
+        coordinator.start_run_with_context(
+            run_id,
+            session,
+            RunKind::PingRound,
+            RunContext {
+                interface: config.interfaces.first().cloned(),
+                ..RunContext::default()
+            },
+        )?;
+        let report = measure_round(transport, round_request).await?;
+        let outcome = report.outcome();
+        coordinator.publish_batch(&report.events)?;
+        coordinator.finish_run(run_id, outcome, None)?;
+        coordinator.finish_run(session, outcome, None)?;
+        Ok::<_, PingCommandError>(report.exit_status())
+    }
+    .await;
+
     let flush_result = coordinator.flush();
+    let (journal, console) = coordinator.into_parts();
+    let output_path = journal.path().to_owned();
     if flush_result.is_ok() {
         tracing::info!(path = %output_path.display(), "measurement journal flushed");
     }
-    let (journal, console) = coordinator.into_parts();
     drop(journal);
     let console_stats = console.shutdown(CONSOLE_SHUTDOWN_TIMEOUT).await;
-    publish_result?;
+    let exit_status = result?;
     flush_result?;
 
     Ok(PingExecution {
@@ -296,16 +323,15 @@ fn trace_console_diagnostic(diagnostic: ConsoleDiagnostic) {
 }
 
 struct TargetMeasurement {
-    events: [MeasurementEvent; 2],
+    event: MeasurementEvent,
     success: bool,
 }
 
 struct MeasurementContext {
-    run_id: String,
-    round_number: u64,
-    scheduled_at: DateTime<Utc>,
+    run_id: RunId,
+    scheduled_at: Option<DateTime<Utc>>,
     load_phase: Option<LoadPhase>,
-    load_run_id: Option<String>,
+    load_run_id: Option<RunId>,
 }
 
 async fn measure_target<T: PingTransport + ?Sized>(
@@ -341,31 +367,21 @@ fn build_measurement(
         .result
         .and_then(|reply| validate_reply(&request, reply));
     let success = validated.is_ok();
-    let (outcome, rtt, icmp_type, icmp_code, error_kind, os_error_code, error_message) =
-        match validated {
-            Ok(reply) => (
-                Outcome::Success,
-                Some(reply.rtt),
-                Some(reply.icmp_type),
-                Some(reply.icmp_code),
-                None,
-                None,
-                None,
-            ),
-            Err(failure) => failure_fields(failure, request.timeout),
-        };
+    let (outcome, rtt, icmp_type, icmp_code, error_kind, os_error_code, message) = match validated {
+        Ok(reply) => (
+            Outcome::Success,
+            Some(reply.rtt),
+            Some(reply.icmp_type),
+            Some(reply.icmp_code),
+            None,
+            None,
+            None,
+        ),
+        Err(failure) => failure_fields(failure, request.timeout),
+    };
 
     let target = request.target.to_string();
-    let mut probe = MeasurementEvent::new(
-        run_id,
-        format!(
-            "{run_id}:ping-round:{}:ping-probe:{}",
-            context.round_number, request.sequence
-        ),
-        EventKind::PingProbe,
-        outcome,
-        finished_at,
-    );
+    let mut probe = MeasurementEvent::new(run_id, EventKind::PingProbe, outcome, finished_at);
     apply_common(
         &mut probe,
         context,
@@ -374,43 +390,18 @@ fn build_measurement(
         &target,
         request.sequence,
     );
-    probe.duration_ms = Some(duration.as_secs_f64() * 1_000.0);
-    probe.rtt_ms = rtt.map(|value| value.as_secs_f64() * 1_000.0);
-    probe.icmp_type = icmp_type;
-    probe.icmp_code = icmp_code;
+    probe.elapsed_ms = Some(duration.as_secs_f64() * 1_000.0);
+    probe.ping_rtt_ms = rtt.map(|value| value.as_secs_f64() * 1_000.0);
+    probe.ping_icmp_type = icmp_type;
+    probe.ping_icmp_code = icmp_code;
     probe.os_error_code = os_error_code;
     probe.error_kind = error_kind;
-    probe.error_message = error_message.clone();
-
-    let mut summary = MeasurementEvent::new(
-        run_id,
-        format!(
-            "{run_id}:ping-round:{}:ping-summary:{}",
-            context.round_number, request.sequence
-        ),
-        EventKind::PingSummary,
-        outcome,
-        finished_at,
-    );
-    apply_common(
-        &mut summary,
-        context,
-        started_at,
-        &attempt.binding,
-        &target,
-        request.sequence,
-    );
-    summary.duration_ms = probe.duration_ms;
-    summary.rtt_ms = probe.rtt_ms;
-    summary.packets_sent = Some(u32::from(attempt.sent));
-    summary.packets_received = Some(u32::from(success));
-    summary.packet_loss_pct = Some(if success { 0.0 } else { 100.0 });
-    summary.os_error_code = os_error_code;
-    summary.error_kind = error_kind;
-    summary.error_message = error_message;
+    probe.message = message;
+    probe.ping_packets_sent = Some(u32::from(attempt.sent));
+    probe.ping_packets_received = Some(u32::from(success));
 
     TargetMeasurement {
-        events: [probe, summary],
+        event: probe,
         success,
     }
 }
@@ -423,14 +414,14 @@ fn apply_common(
     target: &str,
     sequence: u16,
 ) {
-    event.scheduled_at_utc = Some(context.scheduled_at);
+    event.scheduled_at_utc = context.scheduled_at;
     event.started_at_utc = Some(started_at);
     event.interface.clone_from(&binding.interface);
-    event.source_ip = binding.source_ip;
+    event.ping_local_ip = binding.local_ip;
     event.load_phase = context.load_phase;
-    event.load_run_id.clone_from(&context.load_run_id);
-    event.target = Some(target.to_owned());
-    event.sequence = Some(sequence);
+    event.load_run_id = context.load_run_id;
+    event.ping_target_ip = Some(target.to_owned());
+    event.ping_sequence = Some(sequence);
 }
 
 fn validate_reply(request: &ProbeRequest, reply: ProbeReply) -> Result<ProbeReply, ProbeFailure> {
@@ -569,11 +560,10 @@ fn internal_failure(
 ) -> TargetMeasurement {
     let now = Utc::now();
     let context = MeasurementContext {
-        run_id: request.run_id.clone(),
-        round_number: request.round_number,
+        run_id: request.run_id,
         scheduled_at: request.scheduled_at_utc,
         load_phase: request.load_phase,
-        load_run_id: request.load_run_id.clone(),
+        load_run_id: request.load_run_id,
     };
     build_measurement(
         &context,
@@ -597,14 +587,6 @@ fn internal_failure(
 fn next_run_number() -> u64 {
     static RUN_NUMBER: AtomicU64 = AtomicU64::new(1);
     RUN_NUMBER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn run_id(started_at: DateTime<Utc>, run_number: u64) -> String {
-    format!(
-        "{}-{}-{run_number}",
-        started_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
-        std::process::id()
-    )
 }
 
 #[derive(Clone)]
@@ -637,7 +619,7 @@ impl SurgePingTransport {
                 Ok(source) => {
                     let binding = ProbeBinding {
                         interface: interface.map(str::to_owned),
-                        source_ip: Some(source.address),
+                        local_ip: Some(source.address),
                     };
                     let client = clients
                         .entry(source.address)
@@ -655,7 +637,7 @@ impl SurgePingTransport {
                 Err(failure) => TargetTransport::Failed {
                     binding: ProbeBinding {
                         interface: interface.map(str::to_owned),
-                        source_ip: None,
+                        local_ip: None,
                     },
                     failure,
                 },
@@ -915,5 +897,205 @@ fn map_io_reference(error: &io::Error) -> ProbeFailure {
             os_error_code,
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use if_addrs::{IfAddr, IfOperStatus, Ifv4Addr, Ifv6Addr, Interface};
+
+    fn interface(address: &str) -> Interface {
+        let addr = match address.parse().unwrap() {
+            IpAddr::V4(ip) => IfAddr::V4(Ifv4Addr {
+                ip,
+                netmask: Ipv4Addr::UNSPECIFIED,
+                prefixlen: 0,
+                broadcast: None,
+            }),
+            IpAddr::V6(ip) => IfAddr::V6(Ifv6Addr {
+                ip,
+                netmask: Ipv6Addr::UNSPECIFIED,
+                prefixlen: 0,
+                broadcast: None,
+            }),
+        };
+        Interface {
+            name: "test0".to_owned(),
+            addr,
+            index: Some(7),
+            oper_status: IfOperStatus::Up,
+            is_p2p: false,
+            #[cfg(windows)]
+            adapter_name: "test0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn source_selection_preserves_family_scope_and_interface_index() {
+        let addresses = [
+            interface("192.0.2.1"),
+            interface("127.0.0.1"),
+            interface("2001:db8::1"),
+            interface("fe80::1"),
+        ];
+        for (target, expected) in [
+            ("192.0.2.2", "192.0.2.1"),
+            ("127.0.0.2", "127.0.0.1"),
+            ("2001:db8::2", "2001:db8::1"),
+            ("fe80::2", "fe80::1"),
+        ] {
+            let source =
+                resolve_source(target.parse().unwrap(), Some("test0"), Ok(&addresses)).unwrap();
+            assert_eq!(source.address, expected.parse::<IpAddr>().unwrap());
+            assert_eq!(source.index, Some(7));
+        }
+        let fallback = resolve_source(
+            "127.0.0.2".parse().unwrap(),
+            Some("test0"),
+            Ok(&addresses[..1]),
+        )
+        .unwrap();
+        assert_eq!(fallback.address, "192.0.2.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn default_route_selects_a_local_source_without_interface_enumeration() {
+        let unavailable = io::Error::other("interface enumeration unavailable");
+        let source =
+            resolve_source(IpAddr::V4(Ipv4Addr::LOCALHOST), None, Err(&unavailable)).unwrap();
+        assert_eq!(source.address, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(source.index, None);
+    }
+
+    #[test]
+    fn source_selection_reports_missing_down_wrong_family_and_enumeration_failures() {
+        let target = "192.0.2.2".parse().unwrap();
+        let mut down = interface("192.0.2.1");
+        down.oper_status = IfOperStatus::Down;
+        for (addresses, expected) in [
+            (vec![], "does not exist"),
+            (vec![down], "not up"),
+            (vec![interface("::1")], "no address matching"),
+        ] {
+            let failure = resolve_source(target, Some("test0"), Ok(&addresses)).unwrap_err();
+            assert!(
+                matches!(failure, ProbeFailure::Io { ref message, .. } if message.contains(expected))
+            );
+        }
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            let error = io::Error::new(kind, "enumeration failed");
+            let failure = resolve_source(target, Some("test0"), Err(&error)).unwrap_err();
+            assert_eq!(failure, map_io(io::Error::new(kind, "enumeration failed")));
+        }
+        assert!(matches!(
+            resolve_source("fe80::1".parse().unwrap(), None, Ok(&[])),
+            Err(ProbeFailure::Io { message, .. }) if message.contains("interface is required")
+        ));
+    }
+
+    #[test]
+    fn io_mapping_preserves_kind_os_code_and_diagnostic() {
+        for code in [13, 5] {
+            let error = io::Error::from_raw_os_error(code);
+            let expected = match error.kind() {
+                io::ErrorKind::PermissionDenied => ProbeFailure::PermissionDenied {
+                    os_error_code: Some(code),
+                    message: error.to_string(),
+                },
+                _ => ProbeFailure::Io {
+                    os_error_code: Some(code),
+                    message: error.to_string(),
+                },
+            };
+            assert_eq!(map_io_reference(&error), expected);
+            assert_eq!(map_io(error), expected);
+        }
+    }
+
+    #[test]
+    fn transport_error_mapping_distinguishes_sent_and_unsent_failures() {
+        use surge_ping::{PingSequence, SurgeError};
+        for (error, expected, sent) in [
+            (
+                SurgeError::Timeout {
+                    seq: PingSequence(1),
+                },
+                ProbeFailure::Timeout,
+                true,
+            ),
+            (SurgeError::ClientDestroyed, ProbeFailure::Cancelled, false),
+            (
+                SurgeError::NetworkError,
+                ProbeFailure::Io {
+                    os_error_code: None,
+                    message: "ICMP receive task stopped before a reply arrived".to_owned(),
+                },
+                true,
+            ),
+            (
+                SurgeError::IOError(io::Error::other("send failed")),
+                ProbeFailure::Io {
+                    os_error_code: None,
+                    message: "send failed".to_owned(),
+                },
+                false,
+            ),
+            (
+                SurgeError::IncorrectBufferSize,
+                ProbeFailure::Protocol {
+                    message: SurgeError::IncorrectBufferSize.to_string(),
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(map_surge_error(error), (expected, sent));
+        }
+    }
+
+    #[test]
+    fn packet_type_and_code_are_read_for_both_protocols() {
+        assert_eq!(
+            packet_type_code(&surge_ping::IcmpPacket::V4(Default::default())),
+            (0, 0)
+        );
+        assert_eq!(
+            packet_type_code(&surge_ping::IcmpPacket::V6(
+                surge_ping::Icmpv6Packet::decode(&[129, 3, 0, 0, 0, 7, 0, 8], Ipv6Addr::LOCALHOST)
+                    .unwrap(),
+            )),
+            (129, 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_and_failed_targets_never_claim_a_sent_probe() {
+        let target = "127.0.0.1".parse().unwrap();
+        let request = ProbeRequest {
+            target,
+            identifier: 7,
+            sequence: 8,
+            timeout: Duration::from_millis(100),
+        };
+        let transport = SurgePingTransport::new(Some("netband-missing-interface"), &[target]);
+        let failed = transport.probe(request.clone()).await;
+        assert!(!failed.sent);
+        assert_eq!(
+            failed.binding.interface.as_deref(),
+            Some("netband-missing-interface")
+        );
+        assert_eq!(failed.binding.local_ip, None);
+        assert!(
+            matches!(failed.result, Err(ProbeFailure::Io { message, .. }) if message.contains("does not exist"))
+        );
+        let unknown = transport
+            .probe(ProbeRequest {
+                target: "::1".parse().unwrap(),
+                ..request
+            })
+            .await;
+        assert!(!unknown.sent);
+        assert_eq!(unknown.binding, ProbeBinding::default());
+        assert!(matches!(unknown.result, Err(ProbeFailure::Protocol { .. })));
     }
 }

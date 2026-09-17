@@ -26,21 +26,23 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 outcome = ?event.outcome,
                 provider_id = event.provider_id.as_deref().unwrap_or("-"),
                 provider_kind = ?event.provider_kind,
-                server = event.server.as_deref().unwrap_or("-"),
-                remote_ip = ?event.remote_ip,
+                server_name = event.server_name.as_deref().unwrap_or("-"),
+                request_url = event.request_url.as_deref().unwrap_or("-"),
+                remote_ip = ?event.request_remote_ip,
+                direction = ?event.request_direction,
                 stage = ?event.request_stage,
-                http_status = ?event.http_status,
-                cooldown_until = ?event.rate_limit_until_utc,
-                error = event.error_message.as_deref().unwrap_or("-"),
+                http_status = ?event.request_http_status,
+                request_retry_at = ?event.request_retry_at_utc,
+                error = event.message.as_deref().unwrap_or("-"),
                 "network request failed"
             ),
             EventKind::PingProbe if event.outcome != Outcome::Success => tracing::warn!(
                 outcome = ?event.outcome,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
-                source_ip = ?event.source_ip,
-                target = event.target.as_deref().unwrap_or("-"),
+                local_ip = ?event.ping_local_ip,
+                target = event.ping_target_ip.as_deref().unwrap_or("-"),
                 error_kind = ?event.error_kind,
-                error = event.error_message.as_deref().unwrap_or("-"),
+                error = event.message.as_deref().unwrap_or("-"),
                 "ping probe failed"
             ),
             EventKind::Scheduler => tracing::info!(
@@ -49,9 +51,12 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 provider_kind = ?event.provider_kind,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
                 trigger = ?event.trigger_reason,
-                daily_runs_used = ?event.daily_runs_used,
-                cooldown_until = ?event.rate_limit_until_utc,
-                decision = event.error_message.as_deref().unwrap_or("-"),
+                provider_accounting_date = ?event.provider_accounting_date,
+                provider_daily_starts = ?event.provider_daily_starts,
+                scheduler_not_before = ?event.scheduler_not_before_utc,
+                action = ?event.scheduler_action,
+                reason = ?event.scheduler_reason,
+                decision = event.message.as_deref().unwrap_or("-"),
                 "scheduler decision"
             ),
             EventKind::Bandwidth => tracing::info!(
@@ -59,11 +64,12 @@ pub fn record_events(events: &[MeasurementEvent]) {
                 provider_id = event.provider_id.as_deref().unwrap_or("-"),
                 provider_kind = ?event.provider_kind,
                 interface = event.interface.as_deref().unwrap_or("default-route"),
-                server = event.server.as_deref().unwrap_or("-"),
-                remote_ip = ?event.remote_ip,
+                server_name = event.server_name.as_deref().unwrap_or("-"),
+                download_remote_ip = ?event.download_remote_ip,
+                upload_remote_ip = ?event.upload_remote_ip,
                 "bandwidth measurement finished"
             ),
-            EventKind::PingProbe | EventKind::PingSummary => {}
+            EventKind::PingProbe | EventKind::RunStarted | EventKind::RunFinished => {}
         }
     }
 }

@@ -52,9 +52,10 @@ import sys
 
 lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 events = [json.loads(line) for line in lines]
-assert len(events) == 2
+assert events[0]["event_kind"] == "run_started"
+assert events[-1]["event_kind"] == "run_finished"
 assert all(event["schema_version"] == 1 for event in events)
-assert {event["event_kind"] for event in events} == {"ping_probe", "bandwidth"}
+assert {event["event_kind"] for event in events} == {"run_started", "run_finished", "ping_probe", "bandwidth", "request_failure", "scheduler"}
 PY
 
 cargo test --locked --test documentation_contract

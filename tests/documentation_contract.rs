@@ -1,3 +1,4 @@
+mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -47,6 +48,16 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
 
     let service = load_config(&root().join("packaging/netband.toml"));
     assert_eq!(service.shutdown_grace, Duration::from_secs(30));
+    assert_eq!(
+        service.output,
+        netband::config::OutputTarget::Directory(PathBuf::from("/var/lib/netband/measurements"))
+    );
+    assert_eq!(service.rotate_max_bytes, Some(67_108_864));
+    assert!(
+        fs::read_to_string(root().join("packaging/netband.service"))
+            .unwrap()
+            .contains("StateDirectory=netband netband/measurements")
+    );
     assert!(!service.bandwidth.automatic_enabled);
 
     let mlab = load_config(&root().join("examples/mlab.toml"));
@@ -213,6 +224,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
         "--no-bandwidth",
         "--output",
         "--output-dir",
+        "--rotate-max-bytes",
         "--state-file",
         "--shutdown-grace",
         "--verbosity",
@@ -247,9 +259,188 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 42);
+    assert_eq!(CSV_HEADER.split(',').count(), 69);
+    for field in CSV_HEADER.split(',') {
+        assert!(
+            data.contains(&format!("| `{field}` |")),
+            "missing field documentation: {field}"
+        );
+    }
+    let examples = fs::read_to_string(root().join("docs/examples/console.jsonl")).unwrap();
+    let example_rows: Vec<serde_json::Value> = examples
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds = example_rows
+        .iter()
+        .map(|row| row["event_kind"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "run_started",
+            "run_finished",
+            "ping_probe",
+            "bandwidth",
+            "request_failure",
+            "scheduler"
+        ]
+        .into_iter()
+        .collect()
+    );
+    let ids = example_rows
+        .iter()
+        .map(|row| {
+            (
+                row["run_id"].as_str().unwrap(),
+                row["event_id"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), example_rows.len());
+    let mut active = std::collections::BTreeMap::new();
+    for (index, row) in example_rows.iter().enumerate() {
+        assert_eq!(row["event_sequence"], index + 1);
+        assert_eq!(row["root_run_id"], example_rows[0]["run_id"]);
+        let run = row["run_id"].as_str().unwrap();
+        let parent = row["parent_run_id"].as_str();
+        if let Some(parent) = parent {
+            assert!(active.contains_key(parent));
+        }
+        if row["event_kind"] == "run_started" {
+            assert!(active.insert(run, parent).is_none());
+        }
+        assert_eq!(active.get(run), Some(&parent));
+        for field in [
+            "run_id",
+            "event_id",
+            "parent_run_id",
+            "root_run_id",
+            "load_run_id",
+            "request_id",
+            "download_request_id",
+            "upload_request_id",
+        ] {
+            if let Some(value) = row[field].as_str() {
+                assert_eq!(uuid::Uuid::parse_str(value).unwrap().get_version_num(), 4);
+            }
+        }
+        if row["event_kind"] == "run_finished" {
+            assert!(!active.values().any(|parent| *parent == Some(run)));
+            active.remove(run);
+        }
+        if row["event_kind"] == "scheduler" {
+            assert!(row["scheduler_action"].is_string());
+            assert!(row["scheduler_reason"].is_string());
+            assert_eq!(
+                row["run_kind"],
+                if row["scheduler_action"] == "rate_limit" {
+                    "bandwidth"
+                } else {
+                    "session"
+                }
+            );
+            assert!(row["error_kind"].is_null());
+            assert!(row["message"].is_string());
+        }
+    }
+    assert!(active.is_empty());
+
+    assert!(
+        example_rows
+            .iter()
+            .any(|row| row["connection_details"].is_object())
+    );
+    for outcome in [
+        "success",
+        "timeout",
+        "permission_denied",
+        "partial",
+        "cancelled",
+        "rate_limited",
+        "scheduled",
+        "deferred",
+        "suppressed",
+    ] {
+        assert!(
+            example_rows.iter().any(|row| row["outcome"] == outcome),
+            "missing scenario: {outcome}"
+        );
+    }
+    for row in &example_rows {
+        if matches!(
+            row["event_kind"].as_str(),
+            Some("scheduler" | "run_started")
+        ) {
+            assert!(row["elapsed_ms"].is_null());
+        } else {
+            let elapsed = row["elapsed_ms"].as_f64().unwrap();
+            assert!(elapsed.is_finite() && elapsed >= 0.0);
+            if row["event_kind"] == "bandwidth" {
+                let active = row["download_measurement_duration_ms"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    + row["upload_measurement_duration_ms"]
+                        .as_f64()
+                        .unwrap_or(0.0);
+                assert!(elapsed >= active);
+            }
+        }
+        if row["event_kind"] != "request_failure" || row["request_stage"] == "locate" {
+            assert!(row["request_direction"].is_null());
+        } else {
+            assert!(matches!(
+                row["request_direction"].as_str(),
+                Some("download" | "upload")
+            ));
+        }
+        if row["event_kind"] == "request_failure" {
+            assert_eq!(
+                example_rows
+                    .iter()
+                    .filter(|candidate| candidate["event_kind"] == "bandwidth"
+                        && candidate["run_id"] == row["run_id"])
+                    .count(),
+                1
+            );
+        }
+        if !row["load_run_id"].is_null() {
+            assert!(
+                example_rows
+                    .iter()
+                    .any(|candidate| candidate["event_kind"] == "bandwidth"
+                        && candidate["run_id"] == row["load_run_id"])
+            );
+        }
+        assert_eq!(row.as_object().unwrap().len(), 69);
+        assert_eq!(row["schema_version"], 1);
+        for field in CSV_HEADER.split(',') {
+            assert!(row.get(field).is_some(), "missing example field: {field}");
+        }
+        for (direction, bytes) in [("download", "download_bytes"), ("upload", "upload_bytes")] {
+            let request_id = &row[format!("{direction}_request_id")];
+            assert_eq!(request_id.is_null(), row[bytes].is_null());
+            if !request_id.is_null() {
+                assert!(!request_id.as_str().unwrap().is_empty());
+            }
+
+            if let Some(rate) = row[format!("{direction}_mbps")].as_f64() {
+                let expected = 8.0 * row[bytes].as_f64().unwrap()
+                    / (1000.0
+                        * row[format!("{direction}_measurement_duration_ms")]
+                            .as_f64()
+                            .unwrap());
+                assert!((rate - expected).abs() <= rate.abs() * 1e-12);
+            }
+        }
+    }
+
+    let usage = fs::read_to_string(root().join("docs/usage.md")).unwrap();
     for mode in ["auto", "human", "jsonl", "off"] {
-        assert!(readme.contains(mode), "README omits console mode {mode}");
+        assert!(
+            usage.contains(mode),
+            "usage guide omits console mode {mode}"
+        );
     }
     assert!(readme.contains(">events.jsonl 2>netband.log"));
     assert!(privacy.contains("https://www.measurementlab.net/aup/"));
@@ -283,7 +474,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     let trigger_at = Utc.with_ymd_and_hms(2026, 8, 30, 1, 0, 0).unwrap();
     scheduler
         .observe_health(
-            "docs",
+            &support::id("docs"),
             trigger_at,
             HealthDecision::Degraded {
                 snapshot: HealthSnapshot {
@@ -298,20 +489,19 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         )
         .unwrap();
     let opportunity = scheduler
-        .poll("docs", trigger_at, true)
+        .poll(&support::id("docs"), trigger_at, true)
         .unwrap()
         .opportunity
         .unwrap();
     assert_eq!(opportunity.reason, TriggerReason::PingLoss);
     scheduler.reserve_run(trigger_at).unwrap();
     let mut success = MeasurementEvent::new(
-        "docs",
-        "bandwidth:success",
+        support::id::<netband::model::RunId>("docs"),
         EventKind::Bandwidth,
         Outcome::Success,
         trigger_at,
     );
-    success.remote_ip = Some("192.0.2.1".parse().unwrap());
+    success.download_remote_ip = Some("192.0.2.1".parse().unwrap());
     let mut report = BandwidthReport {
         events: vec![success],
         outcome: Outcome::Success,
@@ -319,7 +509,7 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         reservation_error: None,
     };
     scheduler
-        .finish_attempt("docs", trigger_at, opportunity, &mut report)
+        .finish_attempt(&support::id("docs"), trigger_at, opportunity, &mut report)
         .unwrap();
     assert_eq!(scheduler.snapshot().runs.len(), 1);
     assert_eq!(scheduler.snapshot().slots.len(), 3);
@@ -331,7 +521,10 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     }
     assert!(matches!(
         scheduler
-            .preflight_manual("docs", Utc.with_ymd_and_hms(2026, 8, 30, 5, 0, 0).unwrap())
+            .preflight_manual(
+                &support::id("docs"),
+                Utc.with_ymd_and_hms(2026, 8, 30, 5, 0, 0).unwrap()
+            )
             .unwrap(),
         ManualDecision::Blocked(_)
     ));
@@ -340,15 +533,15 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     let cooldown_state = work.path().join("cooldown.json");
     let mut scheduler = Scheduler::open_seeded(cooldown_state, &config.bandwidth, now, 7).unwrap();
     let mut failure = MeasurementEvent::new(
-        "docs",
-        "request:rate-limit",
+        support::id::<netband::model::RunId>("docs"),
         EventKind::RequestFailure,
         Outcome::RateLimited,
         trigger_at,
     );
     failure.request_stage = Some(RequestStage::Locate);
-    failure.http_status = Some(429);
-    failure.retry_after_ms = Some(120_000);
+    failure.request_http_status = Some(429);
+    failure.request_retry_after_ms = Some(120_000);
+    failure.request_retry_at_utc = Some(trigger_at + chrono::TimeDelta::seconds(120));
     let mut report = BandwidthReport {
         events: vec![failure],
         outcome: Outcome::RateLimited,
@@ -357,11 +550,12 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
     };
     scheduler
         .finish_attempt(
-            "docs",
+            &support::id("docs"),
             trigger_at,
             netband::scheduler::BandwidthOpportunity {
                 reason: TriggerReason::Scheduled,
-                scheduled_at_utc: trigger_at,
+                scheduled_at_utc: Some(trigger_at),
+                requested_at_utc: trigger_at,
                 interface: None,
             },
             &mut report,
@@ -371,4 +565,35 @@ fn documented_schedule_trigger_cap_and_cooldown_are_executable() {
         scheduler.snapshot().cooldown_until_utc,
         Some(Utc.with_ymd_and_hms(2026, 8, 30, 1, 2, 0).unwrap())
     );
+}
+
+#[test]
+fn csv_fixture_matches_the_complete_example_session() {
+    let examples = include_str!("../docs/examples/console.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let mut reader = csv::Reader::from_reader(include_bytes!("fixtures/v1-events.csv").as_slice());
+    let headers = reader.headers().unwrap().clone();
+    assert_eq!(headers.iter().collect::<Vec<_>>().join(","), CSV_HEADER);
+    let rows = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(rows.len(), examples.len());
+    for (row, example) in rows.iter().zip(&examples) {
+        for (field, cell) in headers.iter().zip(row) {
+            let expected = &example[field];
+            let actual = match expected {
+                serde_json::Value::Null => {
+                    assert!(cell.is_empty(), "{field} must be unavailable");
+                    serde_json::Value::Null
+                }
+                serde_json::Value::String(_) => serde_json::Value::String(cell.into()),
+                _ => serde_json::from_str(cell).unwrap(),
+            };
+            assert_eq!(
+                &actual, expected,
+                "event {} field {field}",
+                example["event_sequence"]
+            );
+        }
+    }
 }

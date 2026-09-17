@@ -524,7 +524,11 @@ fn explicit_direct_urls_support_nonstandard_paths_and_insecure_opt_in() {
 fn private_ca_is_validated_without_network_access() {
     let dir = tempdir().unwrap();
     let ca = dir.path().join("private-ca.pem");
-    std::fs::write(&ca, "test fixture").unwrap();
+    let certificate = rcgen::generate_simple_self_signed(vec!["ndt.example.net".to_owned()])
+        .unwrap()
+        .cert
+        .pem();
+    std::fs::write(&ca, &certificate).unwrap();
     let config = resolve(
         &parse(&[
             "netband",
@@ -544,7 +548,232 @@ fn private_ca_is_validated_without_network_access() {
     .unwrap();
     validate_environment(&config).unwrap();
 
+    std::fs::write(&ca, format!("{certificate}{certificate}")).unwrap();
+    validate_environment(&config).unwrap();
+    for contents in [
+        String::new(),
+        "test fixture".to_owned(),
+        "-----BEGIN CERTIFICATE-----\ninvalid!\n-----END CERTIFICATE-----".to_owned(),
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----".to_owned(),
+        format!("{certificate}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----"),
+    ] {
+        std::fs::write(&ca, contents).unwrap();
+        assert!(
+            validate_environment(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("private CA")
+        );
+    }
+    // Validation reads current contents on each call, including disappearance.
+    std::fs::write(&ca, certificate).unwrap();
+    validate_environment(&config).unwrap();
     std::fs::remove_file(&ca).unwrap();
-    let error = validate_environment(&config).unwrap_err();
-    assert!(error.to_string().contains("CA certificate"));
+    assert!(
+        validate_environment(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("private CA")
+    );
+    std::fs::create_dir(&ca).unwrap();
+    assert!(
+        validate_environment(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("private CA")
+    );
+}
+
+#[test]
+fn invalid_private_ca_stops_commands_before_output_state_or_network_activity() {
+    let root = tempdir().unwrap();
+    let ca = root.path().join("invalid.pem");
+    std::fs::write(&ca, "not a certificate").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for command in [["config", "check"], ["once", "bandwidth"]] {
+        let output = root.path().join("results.csv");
+        let state = root.path().join("scheduler.json");
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_netband"))
+            .args(["--ndt-provider", "direct", "--ndt-target"])
+            .arg(listener.local_addr().unwrap().to_string())
+            .arg("--ndt-ca-cert")
+            .arg(&ca)
+            .arg("--output")
+            .arg(&output)
+            .arg("--state-file")
+            .arg(&state)
+            .args(command)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("configuration=valid"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("private CA"));
+        assert!(!output.exists());
+        assert!(!state.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+fn direct_tls_options_apply_when_either_endpoint_is_secure() {
+    let root = tempdir().unwrap();
+    let ca = root.path().join("ca.pem");
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    std::fs::write(&ca, certificate.cert.pem()).unwrap();
+    for download in ["ws", "wss"] {
+        for upload in ["ws", "wss"] {
+            for options in 0..4 {
+                for allow_insecure in [false, true] {
+                    let down = format!("{download}://127.0.0.1/ndt/v7/download");
+                    let up = format!("{upload}://127.0.0.1/ndt/v7/upload");
+                    let mut args = vec![
+                        "netband",
+                        "--ndt-provider",
+                        "direct",
+                        "--ndt-download-url",
+                        &down,
+                        "--ndt-upload-url",
+                        &up,
+                    ];
+                    if options & 1 != 0 {
+                        args.extend(["--ndt-tls-server-name", "localhost"]);
+                    }
+                    if options & 2 != 0 {
+                        args.extend(["--ndt-ca-cert", ca.to_str().unwrap()]);
+                    }
+                    if allow_insecure {
+                        args.push("--allow-insecure-ndt");
+                    }
+                    args.extend(["config", "check"]);
+                    let result = resolve(&parse(&args), &context(root.path().to_path_buf(), false));
+                    let plaintext_allowed =
+                        allow_insecure || (download == "wss" && upload == "wss");
+                    let options_allowed = options == 0 || download == "wss" || upload == "wss";
+                    assert_eq!(
+                        result.is_ok(),
+                        plaintext_allowed && options_allowed,
+                        "{download}/{upload}, options={options}, insecure={allow_insecure}"
+                    );
+                    if let Ok(config) = result {
+                        validate_environment(&config).unwrap();
+                        let ProviderConfig::Direct(direct) = config.bandwidth.provider else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            direct.tls_server_name.as_deref(),
+                            (options & 1 != 0).then_some("localhost")
+                        );
+                        assert_eq!(direct.ca_cert.as_ref(), (options & 2 != 0).then_some(&ca));
+                    } else {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains(if plaintext_allowed {
+                            "requires wss://"
+                        } else {
+                            "allow-insecure-ndt"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rotating_output_defaults_precedence_and_validation() {
+    let dir = tempdir().unwrap();
+    let ctx = context(dir.path().to_owned(), false);
+    let defaults = resolve(&parse(&["netband", "run"]), &ctx).unwrap();
+    assert_eq!(
+        defaults.output,
+        OutputTarget::AutomaticDirectory(dir.path().join("state/journals/run"))
+    );
+    assert_eq!(defaults.rotate_max_bytes, None);
+    assert!(defaults.summary().contains("rotation=daily-utc"));
+    let config = dir.path().join("rotation.toml");
+    std::fs::write(
+        &config,
+        "output_dir = 'measurements'\nrotate_max_bytes = 4096\n",
+    )
+    .unwrap();
+    let args = ["netband", "--config", config.to_str().unwrap(), "run"];
+    let configured = resolve(&parse(&args), &ctx).unwrap();
+    assert_eq!(
+        configured.output,
+        OutputTarget::Directory(dir.path().join("measurements"))
+    );
+    assert_eq!(configured.rotate_max_bytes, Some(4096));
+    let overridden = resolve(
+        &parse(&[
+            "netband",
+            "--config",
+            config.to_str().unwrap(),
+            "--output-dir",
+            "other",
+            "--rotate-max-bytes",
+            "8192",
+            "run",
+        ]),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.output,
+        OutputTarget::Directory(dir.path().join("other"))
+    );
+    assert_eq!(overridden.rotate_max_bytes, Some(8192));
+    assert!(overridden.summary().contains("rotate_max_bytes=8192"));
+    assert!(
+        resolve(
+            &parse(&[
+                "netband",
+                "--config",
+                config.to_str().unwrap(),
+                "--output",
+                "fixed.csv",
+                "run",
+            ]),
+            &ctx
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("requires directory output")
+    );
+    for text in [
+        "rotate_max_bytes = 0",
+        "rotate_max_bytes = -1",
+        "rotate_max_bytes = '64MiB'",
+        "output = 'fixed.csv'\nrotate_max_bytes = 1024",
+    ] {
+        std::fs::write(&config, text).unwrap();
+        assert!(resolve(&parse(&args), &ctx).is_err(), "{text}");
+    }
+    assert!(resolve(&parse(&["netband", "--rotate-max-bytes", "0", "run"]), &ctx).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "netband",
+            "--output",
+            "fixed.csv",
+            "--rotate-max-bytes",
+            "1",
+            "run"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "netband",
+            "--rotate-max-bytes",
+            "18446744073709551616",
+            "run"
+        ])
+        .is_err()
+    );
+    assert!(!dir.path().join("measurements").exists());
+    assert!(!dir.path().join("fixed.csv").exists());
+    assert!(!dir.path().join("state").exists());
 }
