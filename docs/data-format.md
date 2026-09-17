@@ -169,12 +169,25 @@ Download and upload families have identical suffixes and ordering.
 
 | Event kind | Record scope | Field context |
 | --- | --- | --- |
-| `run_started` | Start of a session or child run | Run identity, parent, root, kind, start timestamp; session starts also include command, version and PID; outcome is `started` |
+| `run_started` | Start of a session or child run | Run identity, parent, root, kind, start timestamp; session starts also include command, version and PID; child starts include known context described below; outcome is `started` |
 | `run_finished` | Completion or orderly termination of that run | Same run identity, parent, root and kind; start/finish timestamps, monotonic elapsed time, outcome and any command failure |
 | `ping_probe` | One attempt against one target | Target, sequence, packet counts, RTT, ICMP details, and any failure; load fields identify a concurrent bandwidth attempt |
 | `bandwidth` | One bandwidth attempt | Provider, logical server, trigger, accounting, and independently available download/upload measurements |
 | `request_failure` | One failed request or stage within a bandwidth attempt | Request URL, direction, stage, request ID, known endpoints, response details, and diagnostic |
 | `scheduler` | One scheduling decision | Provider, trigger, accounting, applicable cooldown, and decision explanation; measurement fields are unavailable |
+
+Child `run_started` records contain only context already known before execution:
+selected `interface` for ping and bandwidth; `provider_id`, `provider_kind`, and
+`trigger_reason` for bandwidth; and `load_run_id`/`load_phase` for loaded ping rounds.
+Load fields use the same snapshot as the round's probes, even if the phase changes
+while probes run. An empty interface means no explicitly selected interface or no
+available context; the start record does not claim an observed network binding.
+
+These starts retain `outcome=started` and leave measurements, discovered addresses,
+`server_name`, accounting, finish time and elapsed duration unavailable. No extra
+network lookup is performed to enrich them. The start is durable before measurement
+work begins, so interrupted runs still retain their known intent. Context is not
+repeated on run finishes; join by `run_id` to the start and results.
 
 Each ping attempt produces one complete `ping_probe`, including failures. Packet
 counts describe that attempt; rolling health calculations remain internal. Calculate

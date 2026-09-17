@@ -212,6 +212,7 @@ async fn degraded_round_drains_before_one_triggered_bandwidth_attempt() {
     let scheduler =
         Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
     let settings = PingMonitorConfig {
+        interface: None,
         run_id: support::id("adaptive-run"),
         targets: vec![
             IpAddr::V4("192.0.2.1".parse().unwrap()),
@@ -282,6 +283,25 @@ async fn degraded_round_drains_before_one_triggered_bandwidth_attempt() {
             .iter()
             .any(|event| event.load_phase == Some(LoadPhase::Upload))
     );
+    for probe in &loaded {
+        let start = events
+            .iter()
+            .find(|event| event.run_id == probe.run_id && event.event_kind == EventKind::RunStarted)
+            .unwrap();
+        assert_eq!(start.load_run_id, probe.load_run_id);
+        assert_eq!(start.load_phase, probe.load_phase);
+    }
+    let result = events
+        .iter()
+        .find(|event| event.event_kind == EventKind::Bandwidth)
+        .unwrap();
+    let start = events
+        .iter()
+        .find(|event| event.run_id == result.run_id && event.event_kind == EventKind::RunStarted)
+        .unwrap();
+    assert_eq!(start.provider_id, result.provider_id);
+    assert_eq!(start.provider_kind, result.provider_kind);
+    assert_eq!(start.trigger_reason, result.trigger_reason);
     assert!(loaded.iter().all(|event| {
         event.load_run_id
             == events
@@ -290,7 +310,11 @@ async fn degraded_round_drains_before_one_triggered_bandwidth_attempt() {
                 .map(|e| e.run_id)
     }));
     assert!(events.iter().all(|event| {
-        event.load_phase.is_none() || matches!(event.event_kind, EventKind::PingProbe)
+        event.load_phase.is_none()
+            || matches!(
+                event.event_kind,
+                EventKind::PingProbe | EventKind::RunStarted
+            )
     }));
     assert!(events.iter().any(|event| {
         event.event_kind == EventKind::PingProbe
@@ -327,6 +351,7 @@ async fn loaded_successes_are_durable_but_do_not_rearm_the_health_trigger() {
     let scheduler =
         Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
     let settings = PingMonitorConfig {
+        interface: None,
         run_id: support::id("health-isolation-run"),
         targets: vec![
             IpAddr::V4("192.0.2.1".parse().unwrap()),

@@ -213,6 +213,7 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
     let journal = RecordingJournal::default();
     let mut coordinator = OutputCoordinator::new(journal.clone(), ConsoleOff);
     let settings = PingMonitorConfig {
+        interface: None,
         run_id: support::id("multi-run"),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
@@ -276,6 +277,13 @@ async fn failed_interface_does_not_starve_rotation_and_recovers_without_relabell
             other => panic!("unexpected interface {other}"),
         };
         assert_eq!(event.ping_local_ip, Some(expected.parse().unwrap()));
+        let start = events
+            .iter()
+            .find(|start| start.event_kind == EventKind::RunStarted && start.run_id == event.run_id)
+            .unwrap();
+        assert_eq!(start.interface, event.interface);
+        assert!(start.ping_local_ip.is_none());
+        assert!(start.ping_packets_sent.is_none());
     }
 }
 
@@ -474,6 +482,7 @@ mod loaded_tests {
         let scheduler =
             Scheduler::open(&config.state_file, &config.bandwidth, chrono::Utc::now()).unwrap();
         let settings = PingMonitorConfig {
+            interface: None,
             run_id: support::id("multi-loaded-run"),
             targets: config.ping.targets.clone(),
             interval: config.ping.interval,

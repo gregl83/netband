@@ -11,7 +11,10 @@ use thiserror::Error;
 
 use crate::config::OutputTarget;
 use crate::console::ConsoleSink;
-use crate::model::{ErrorKind, EventKind, MeasurementEvent, Outcome, RunId, RunKind};
+use crate::model::{
+    ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RunId, RunKind,
+    TriggerReason,
+};
 use std::collections::BTreeMap;
 
 // Keep CSV column order and its serializer in one declaration. JSONL serializes
@@ -354,6 +357,17 @@ impl<W: Write> JournalSink for JournalWriter<W> {
     }
 }
 
+/// Known intent at run start; excludes measurements, discovered endpoints and accounting.
+#[derive(Debug, Default)]
+pub struct RunContext {
+    pub interface: Option<String>,
+    pub provider_id: Option<String>,
+    pub provider_kind: Option<ProviderKind>,
+    pub trigger_reason: Option<TriggerReason>,
+    pub load_run_id: Option<RunId>,
+    pub load_phase: Option<LoadPhase>,
+}
+
 struct ActiveRun {
     root: RunId,
     parent: Option<RunId>,
@@ -422,7 +436,13 @@ where
             )));
         }
         self.sequence = 0;
-        self.begin_run(id, None, RunKind::Session, Some(command))
+        self.begin_run(
+            id,
+            None,
+            RunKind::Session,
+            Some(command),
+            RunContext::default(),
+        )
     }
 
     pub fn start_run(
@@ -431,12 +451,22 @@ where
         parent: RunId,
         kind: RunKind,
     ) -> Result<(), JournalError> {
+        self.start_run_with_context(id, parent, kind, RunContext::default())
+    }
+
+    pub fn start_run_with_context(
+        &mut self,
+        id: RunId,
+        parent: RunId,
+        kind: RunKind,
+        context: RunContext,
+    ) -> Result<(), JournalError> {
         if !self.runs.contains_key(&parent) {
             return Err(JournalError::write(io::Error::other(
                 "parent run is not active",
             )));
         }
-        self.begin_run(id, Some(parent), kind, None)
+        self.begin_run(id, Some(parent), kind, None, context)
     }
 
     fn begin_run(
@@ -445,6 +475,7 @@ where
         parent: Option<RunId>,
         kind: RunKind,
         command: Option<&str>,
+        context: RunContext,
     ) -> Result<(), JournalError> {
         if self.runs.contains_key(&id) {
             return Err(JournalError::write(io::Error::other(
@@ -461,6 +492,12 @@ where
         event.run_kind = kind;
         event.started_at_utc = Some(started_at);
         event.finished_at_utc = None;
+        event.interface = context.interface;
+        event.provider_id = context.provider_id;
+        event.provider_kind = context.provider_kind;
+        event.trigger_reason = context.trigger_reason;
+        event.load_run_id = context.load_run_id;
+        event.load_phase = context.load_phase;
         if let Some(command) = command {
             event.command = Some(command.to_owned());
             event.netband_version = Some(env!("CARGO_PKG_VERSION").to_owned());

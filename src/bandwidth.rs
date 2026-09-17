@@ -25,7 +25,7 @@ use url::Url;
 
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
-use crate::journal::{Journal, JournalError, OutputCoordinator};
+use crate::journal::{Journal, JournalError, OutputCoordinator, RunContext};
 use crate::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, ProviderKind, RequestDirection,
     RequestId, RequestStage, RunId, RunKind, TriggerReason,
@@ -261,7 +261,12 @@ where
                     requested_at_utc: started_at,
                     interface: config.interfaces.first().cloned(),
                 };
-                coordinator.start_run(run_id, session, RunKind::Bandwidth)?;
+                coordinator.start_run_with_context(
+                    run_id,
+                    session,
+                    RunKind::Bandwidth,
+                    bandwidth_run_context(config, opportunity.reason),
+                )?;
                 let mut report =
                     measure_bandwidth_with_gate(config, &run_id, shutdown, &mut scheduler).await;
                 opportunity.apply_timing(&mut report);
@@ -1510,6 +1515,16 @@ fn upload_payload_with_size(size: usize) -> Vec<u8> {
         *byte = state as u8;
     }
     payload
+}
+
+pub(crate) fn bandwidth_run_context(config: &ResolvedConfig, reason: TriggerReason) -> RunContext {
+    RunContext {
+        interface: config.interfaces.first().cloned(),
+        provider_id: Some(config.bandwidth.provider_id.clone()),
+        provider_kind: Some(provider_kind(config)),
+        trigger_reason: Some(reason),
+        ..RunContext::default()
+    }
 }
 
 fn provider_kind(config: &ResolvedConfig) -> ProviderKind {

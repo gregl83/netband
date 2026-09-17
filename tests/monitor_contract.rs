@@ -99,6 +99,7 @@ impl JournalSink for RecordingJournal {
 
 fn settings(interval: Duration, targets: usize) -> PingMonitorConfig {
     PingMonitorConfig {
+        interface: Some("eth-test".into()),
         run_id: support::id("continuous-test"),
         targets: (1..=targets)
             .map(|last| IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last as u8)))
@@ -529,25 +530,27 @@ async fn shutdown_drains_mixed_round_without_changing_probe_accounting() {
 }
 
 #[tokio::test]
-async fn failed_session_start_prevents_any_probe() {
-    let transport = Arc::new(FakeTransport::new(Duration::ZERO, ResultMode::Success));
-    let journal = RecordingJournal {
-        fail_on_batch: Some(1),
-        ..Default::default()
-    };
-    let mut output = OutputCoordinator::new(journal, ConsoleOff);
-    let (_sender, shutdown) = cancellation_channel();
-    assert!(matches!(
-        monitor_ping(
-            transport.clone(),
-            settings(Duration::from_secs(1), 1),
-            &mut output,
-            shutdown
-        )
-        .await,
-        Err(MonitorError::Journal(_))
-    ));
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+async fn failed_session_or_contextual_child_start_prevents_any_probe() {
+    for failed_batch in [1, 2] {
+        let transport = Arc::new(FakeTransport::new(Duration::ZERO, ResultMode::Success));
+        let journal = RecordingJournal {
+            fail_on_batch: Some(failed_batch),
+            ..Default::default()
+        };
+        let mut output = OutputCoordinator::new(journal, ConsoleOff);
+        let (_sender, shutdown) = cancellation_channel();
+        assert!(matches!(
+            monitor_ping(
+                transport.clone(),
+                settings(Duration::from_secs(1), 1),
+                &mut output,
+                shutdown
+            )
+            .await,
+            Err(MonitorError::Journal(_))
+        ));
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test(start_paused = true)]

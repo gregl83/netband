@@ -325,6 +325,24 @@ async fn starts_are_durable_before_network_work_and_kill_leaves_runs_unfinished(
     assert!(starts[0]["parent_run_id"].is_empty());
     assert_eq!(starts[1]["event_kind"], "run_started");
     assert_eq!(starts[1]["run_kind"], "bandwidth");
+    assert_eq!(starts[1]["provider_kind"], "direct");
+    assert!(starts[1]["provider_id"].starts_with("direct:"));
+    assert_eq!(starts[1]["trigger_reason"], "manual");
+    for field in [
+        "server_name",
+        "request_remote_ip",
+        "download_mbps",
+        "upload_mbps",
+        "provider_daily_starts",
+        "bandwidth_start_reserved",
+        "elapsed_ms",
+        "finished_at_utc",
+    ] {
+        assert!(
+            starts[1][field].is_empty(),
+            "unexpected start result: {field}"
+        );
+    }
     assert_eq!(starts[1]["parent_run_id"], starts[0]["run_id"]);
     assert_ne!(starts[1]["run_id"], starts[0]["run_id"]);
     for (index, row) in starts.iter().enumerate() {

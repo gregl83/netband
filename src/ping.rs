@@ -14,7 +14,7 @@ use tokio::io::AsyncWrite;
 
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleDiagnostic, ConsoleStats};
-use crate::journal::{Journal, JournalError, OutputCoordinator};
+use crate::journal::{Journal, JournalError, OutputCoordinator, RunContext};
 use crate::model::{ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind};
 
 const CONSOLE_CAPACITY: usize = 256;
@@ -273,7 +273,15 @@ where
     let mut coordinator = OutputCoordinator::new(journal, console);
     let result = async {
         coordinator.start_session(session, "once ping")?;
-        coordinator.start_run(run_id, session, RunKind::PingRound)?;
+        coordinator.start_run_with_context(
+            run_id,
+            session,
+            RunKind::PingRound,
+            RunContext {
+                interface: config.interfaces.first().cloned(),
+                ..RunContext::default()
+            },
+        )?;
         let report = measure_round(transport, round_request).await?;
         let outcome = report.outcome();
         coordinator.publish_batch(&report.events)?;

@@ -20,7 +20,9 @@ before its finish; general scheduler decisions belong to the session. Ping-round
 `load_run_id` separately identifies concurrent bandwidth work. Request IDs join
 retained directional measurements to any diagnostics from the same request.
 
-Lifecycle records carry no measurement values. Normal scheduler explanations use
+Lifecycle records carry no measurement values. Child starts include their known
+interface, bandwidth provider/trigger, or ping load snapshot; discovered addresses,
+server selection, and accounting remain unavailable until results. Normal scheduler explanations use
 `message`, `scheduler_action`, and `scheduler_reason`, leaving `error_kind` and `os_error_code` empty. Run finishes retain the
 operation outcome; the root session ends with orderly cancellation.
 

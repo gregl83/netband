@@ -11,12 +11,14 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::bandwidth::{BandwidthReport, measure_bandwidth_with_gate_and_phase};
+use crate::bandwidth::{
+    BandwidthReport, bandwidth_run_context, measure_bandwidth_with_gate_and_phase,
+};
 use crate::config::ResolvedConfig;
 use crate::console::{Console, ConsoleStats};
 use crate::health::{DegradationReason, HealthConfig, HealthDecision, HealthWindow};
 use crate::interfaces::{FairInterfaceSelector, InterfaceResolver, SystemInterfaceResolver};
-use crate::journal::{Journal, JournalError, JournalSink, OutputCoordinator};
+use crate::journal::{Journal, JournalError, JournalSink, OutputCoordinator, RunContext};
 use crate::model::{
     ErrorKind, EventKind, LoadPhase, MeasurementEvent, Outcome, RunId, RunKind, SchedulerAction,
     SchedulerReason,
@@ -32,6 +34,7 @@ const CONSOLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct PingMonitorConfig {
+    pub interface: Option<String>,
     pub run_id: RunId,
     pub targets: Vec<IpAddr>,
     pub interval: Duration,
@@ -100,6 +103,7 @@ where
     let started_at = Utc::now();
     let run_number = next_monitor_number();
     let settings = PingMonitorConfig {
+        interface: config.interfaces.first().cloned(),
         run_id: RunId::new(),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
@@ -179,6 +183,7 @@ where
     let started_at = Utc::now();
     let run_number = next_monitor_number();
     let settings = PingMonitorConfig {
+        interface: config.interfaces.first().cloned(),
         run_id: RunId::new(),
         targets: config.ping.targets.clone(),
         interval: config.ping.interval,
@@ -420,6 +425,7 @@ where
                         load_transport,
                         &config,
                         &bandwidth_run_id,
+                        &opportunity,
                         scheduler,
                         coordinator,
                         shutdown.clone(),
@@ -499,9 +505,11 @@ where
                             coordinator.publish_batch(&[event])?;
                         }
                         let transport = factory.create(&runtime.name, &config.targets);
+                        let mut round_config = config.clone();
+                        round_config.interface = Some(runtime.name.clone());
                         active = Some((
                             index,
-                            start_round(transport, &config, coordinator, next_round, scheduled, None, None)?,
+                            start_round(transport, &round_config, coordinator, next_round, scheduled, None, None)?,
                         ));
                         stats.rounds_started += 1;
                         next_round = next_round.wrapping_add(1);
@@ -718,6 +726,7 @@ where
                 load_transport,
                 &config,
                 &bandwidth_run_id,
+                &opportunity,
                 &mut scheduler,
                 coordinator,
                 shutdown.clone(),
@@ -946,6 +955,7 @@ async fn measure_bandwidth_while_monitoring<J, C>(
     transport: Arc<dyn PingTransport>,
     ping: &PingMonitorConfig,
     bandwidth_run_id: &RunId,
+    opportunity: &BandwidthOpportunity,
     scheduler: &mut Scheduler,
     coordinator: &mut OutputCoordinator<J, C>,
     shutdown: watch::Receiver<bool>,
@@ -957,7 +967,14 @@ where
     J: JournalSink,
     C: crate::console::ConsoleSink,
 {
-    coordinator.start_run(*bandwidth_run_id, ping.run_id, RunKind::Bandwidth)?;
+    coordinator.start_run_with_context(
+        *bandwidth_run_id,
+        ping.run_id,
+        RunKind::Bandwidth,
+        bandwidth_run_context(resolved, opportunity.reason),
+    )?;
+    let mut ping = ping.clone();
+    ping.interface = resolved.interfaces.first().cloned();
     let (phase_sender, phase_receiver) = watch::channel(LoadPhase::Setup);
     let bandwidth = measure_bandwidth_with_gate_and_phase(
         resolved,
@@ -1001,7 +1018,7 @@ where
                     let phase = *phase_receiver.borrow();
                     active_ping = Some(start_round(
                         Arc::clone(&transport),
-                        ping,
+                        &ping,
                         coordinator,
                         *next_round,
                         scheduled,
@@ -1086,7 +1103,17 @@ fn start_round<T: PingTransport + ?Sized, J: JournalSink, C: crate::console::Con
         load_run_id: load_run_id.copied(),
     };
     crate::ping::validate_round_request(&request)?;
-    coordinator.start_run(child, config.run_id, RunKind::PingRound)?;
+    coordinator.start_run_with_context(
+        child,
+        config.run_id,
+        RunKind::PingRound,
+        RunContext {
+            interface: config.interface.clone(),
+            load_phase: request.load_phase,
+            load_run_id: request.load_run_id,
+            ..RunContext::default()
+        },
+    )?;
     Ok(tokio::spawn(async move {
         measure_round(transport, request).await
     }))
