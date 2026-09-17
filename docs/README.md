@@ -30,5 +30,4 @@ for interpretation and limitations.
 ## Maintainers
 
 [Release maintenance](release.md) covers validation, packaging, publication, and artifacts.
-These reference docs describe their source checkout. For an installed release, use
-the documentation at its matching Git tag; see [installation](install.md).
+For release binaries and source builds, see [installation](install.md).

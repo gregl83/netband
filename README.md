@@ -27,8 +27,8 @@ curl --proto '=https' --proto-redir '=https' --tlsv1.2 -LsSf \
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Requires `curl`, `tar`, and `sha256sum`. Prefer to compile it yourself, or try this
-v1 development checkout? See [installation and source builds](docs/install.md).
+Requires `curl`, `tar`, and `sha256sum`. Prefer to compile it yourself?
+See [installation and source builds](docs/install.md).
 
 ## Try a quick test
 

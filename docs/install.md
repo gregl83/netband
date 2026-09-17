@@ -1,6 +1,6 @@
 # Install Netband
 
-Install a binary to try a quick test, or build the source checkout you want to use.
+Install a release binary or build Netband v1.0.0 from source.
 Neither path requires setting up a service.
 
 ## Release binary
@@ -20,18 +20,15 @@ netband config check
 Add `~/.local/bin` to your shell's PATH permanently if it is not already included.
 You can also download archives from [GitHub Releases](https://github.com/gregl83/netband/releases).
 
-The installer selects the latest published release, not this development checkout.
-Use the README and reference docs at the matching release tag when running that
-binary. This checkout documents the developing v1 data contract; build it below to
-use that implementation. See [release verification](release.md#release-assets) for
-archive checksums and provenance.
+The installer selects the latest published release. See
+[release verification](release.md#release-assets) for archive checksums and provenance.
 
 ## Build from source
 
-Building this v1 branch requires Git and Rust 1.98 or newer. To obtain the branch:
+Building v1.0.0 requires Git and Rust 1.98 or newer. Clone the release tag:
 
 ```sh
-git clone --branch release/v1.0.0 https://github.com/gregl83/netband.git
+git clone --branch v1.0.0 https://github.com/gregl83/netband.git
 cd netband
 ```
 
