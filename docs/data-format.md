@@ -519,7 +519,10 @@ TLS, WebSocket, download, and upload failures produce sanitized `request_failure
 
 Existing CSV files are appended only when their header exactly matches the schema. On startup, an unterminated trailing record is
 discarded and reported to the operational log; completed malformed records fail closed.
-Each completed batch is flushed and synced.
+Each completed batch is flushed and synced. On Unix, opening a CSV also syncs its
+containing directory after the file data. Automatic storage syncs its directory
+hierarchy at startup, including on retries after a failed sync. Any sync failure
+prevents a successful open. Ordinary measurement batches do not resync directories.
 
 Explicit and automatically named CSV files hold an exclusive OS file lock from before
 header initialization or recovery until the file closes. A competing Netband writer

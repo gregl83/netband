@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, Utc};
 
+use super::durability::{create_directory, sync_data, sync_directory};
 use super::{JournalError, JournalSink, JournalWriter, lock_file};
 use crate::config::OutputTarget;
 use crate::model::MeasurementEvent;
@@ -47,8 +48,8 @@ impl Journal {
             )
             .into());
         }
-        if target.is_automatic() {
-            fs::create_dir_all(target.directory())?;
+        if let OutputTarget::AutomaticDirectory(path) = target {
+            create_directory(path)?;
         }
         let directory = match target {
             OutputTarget::File(_) | OutputTarget::AutomaticFile(_) => None,
@@ -231,7 +232,7 @@ impl Directory {
         lock_file(&file, &pending)?;
         step(Step::HeaderWrite)?;
         let mut journal = JournalWriter::from_writer(file)?;
-        journal.sync = Some(File::sync_data);
+        journal.sync = Some(sync_data);
         step(Step::HeaderSync)?;
         journal.flush()?;
         let stem = format!("netband-{}", now.format("%Y%m%dT%H%M%S%.3fZ"));
@@ -284,13 +285,6 @@ fn regular_or_missing(path: &Path) -> Result<bool, JournalError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
-}
-
-fn sync_directory(path: &Path) -> Result<(), JournalError> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    let _ = path;
-    Ok(())
 }
 
 fn contextual(path: &Path, operation: &str, error: JournalError) -> JournalError {

@@ -1,3 +1,4 @@
+mod durability;
 mod output;
 pub use output::Journal;
 
@@ -207,13 +208,15 @@ impl JournalWriter<File> {
         output: &OutputTarget,
         started_at: DateTime<Utc>,
     ) -> Result<(Self, PathBuf), JournalError> {
+        if output.is_automatic() {
+            durability::create_directory(output.directory())?;
+        }
         match output {
             OutputTarget::File(path) => Self::open_explicit(path),
             OutputTarget::Directory(directory) | OutputTarget::AutomaticDirectory(directory) => {
                 Self::create_timestamped(directory, started_at)
             }
             OutputTarget::AutomaticFile(directory) => {
-                std::fs::create_dir_all(directory)?;
                 let path = directory.join(format!(
                     "netband-{}-{}.csv",
                     started_at.format("%Y%m%dT%H%M%S%.3fZ"),
@@ -243,8 +246,9 @@ impl JournalWriter<File> {
         } else {
             Self::without_header(file)
         };
-        journal.sync = Some(File::sync_data);
+        journal.sync = Some(durability::sync_data);
         journal.flush()?;
+        durability::sync_parent(path)?;
         Ok((journal, path.to_path_buf()))
     }
 
@@ -263,8 +267,9 @@ impl JournalWriter<File> {
             .open(&path)?;
         lock_file(&file, &path)?;
         let mut journal = Self::from_writer(file)?;
-        journal.sync = Some(File::sync_data);
+        journal.sync = Some(durability::sync_data);
         journal.flush()?;
+        durability::sync_parent(&path)?;
         Ok((journal, path))
     }
 }
