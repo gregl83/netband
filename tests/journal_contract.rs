@@ -109,6 +109,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     deferred.provider_id = Some("mlab".into());
     deferred.provider_kind = Some(ProviderKind::Mlab);
     deferred.scheduler_not_before_utc = Some(timestamp(3));
+    deferred.provider_accounting_date = Some(timestamp(2).date_naive());
     deferred.provider_daily_starts = Some(2);
     deferred.scheduler_reason = Some(netband::model::SchedulerReason::ProviderCooldown);
     deferred.scheduler_action = Some(netband::model::SchedulerAction::Deferred);
@@ -118,6 +119,7 @@ fn serialization_edge_events() -> Vec<MeasurementEvent> {
     suppressed.trigger_reason = Some(TriggerReason::Scheduled);
     suppressed.provider_id = Some("mlab".into());
     suppressed.provider_kind = Some(ProviderKind::Mlab);
+    suppressed.provider_accounting_date = Some(timestamp(2).date_naive());
     suppressed.provider_daily_starts = Some(4);
     suppressed.scheduler_reason = Some(netband::model::SchedulerReason::DailyCap);
     suppressed.scheduler_action = Some(netband::model::SchedulerAction::Suppressed);
@@ -225,7 +227,7 @@ fn explicit_file_recovers_only_an_unterminated_trailing_record() {
         .next()
         .unwrap()
         .unwrap();
-    assert_eq!(partial_record.len(), 65);
+    assert_eq!(partial_record.len(), 67);
     OpenOptions::new()
         .append(true)
         .open(&path)

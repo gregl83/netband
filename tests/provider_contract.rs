@@ -323,6 +323,8 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
         assert_eq!(report.events.len(), 2);
         let failure = &report.events[0];
         assert_eq!(failure.request_stage, Some(RequestStage::Locate));
+        assert_eq!(failure.bandwidth_start_reserved, None);
+        assert_eq!(failure.provider_accounting_date, None);
         assert_eq!(failure.outcome, outcome);
         assert!(failure.request_url.is_some());
         let bandwidth = report.events.last().unwrap();
@@ -331,6 +333,8 @@ async fn locate_interruption_preserves_stage_without_measurements_or_reservation
         assert_eq!(failure.started_at_utc, bandwidth.started_at_utc);
         assert_eq!(failure.finished_at_utc, bandwidth.finished_at_utc);
         assert_eq!(bandwidth.outcome, outcome);
+        assert_eq!(bandwidth.bandwidth_start_reserved, Some(false));
+        assert_eq!(bandwidth.provider_accounting_date, None);
         assert!(bandwidth.download_mbps.is_none());
         assert!(bandwidth.upload_mbps.is_none());
         assert!(bandwidth.download_bytes.is_none());

@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
 
@@ -235,7 +235,9 @@ pub struct MeasurementEvent {
     pub trigger_reason: Option<TriggerReason>,
     #[serde(serialize_with = "serialize_optional_timestamp")]
     pub scheduler_not_before_utc: Option<DateTime<Utc>>,
+    pub provider_accounting_date: Option<NaiveDate>,
     pub provider_daily_starts: Option<u32>,
+    pub bandwidth_start_reserved: Option<bool>,
 
     // Ping.
     pub ping_target_ip: Option<String>,
@@ -327,7 +329,9 @@ impl MeasurementEvent {
             scheduler_reason: None,
             trigger_reason: None,
             scheduler_not_before_utc: None,
+            provider_accounting_date: None,
             provider_daily_starts: None,
+            bandwidth_start_reserved: None,
             ping_target_ip: None,
             ping_local_ip: None,
             ping_sequence: None,

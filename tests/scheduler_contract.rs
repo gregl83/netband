@@ -985,6 +985,9 @@ fn minimum_spacing_uses_scheduler_eligibility_without_a_provider_response() {
     );
     assert!(json["request_retry_at_utc"].is_null());
     assert_eq!(json["scheduler_reason"], "minimum_spacing");
+    assert_eq!(json["provider_accounting_date"], "2026-08-30");
+    assert_eq!(json["provider_daily_starts"], 1);
+    assert!(json["bandwidth_start_reserved"].is_null());
     assert!(json["request_retry_after_ms"].is_null());
     assert!(json["error_kind"].is_null());
 }
@@ -1023,4 +1026,67 @@ fn cooldown_reason_is_distinct_from_spacing_without_consuming_a_start() {
     assert_eq!(json["scheduler_reason"], "provider_cooldown");
     assert!(json["error_kind"].is_null());
     assert_eq!(scheduler.snapshot().runs.len(), 0);
+}
+
+#[test]
+fn completion_after_midnight_preserves_the_admission_count() {
+    let root = TempDir::new().unwrap();
+    let start = at(30, 23, 59, 0);
+    let finish = at(31, 0, 1, 0);
+    let mut scheduler = Scheduler::open_seeded(
+        state_path(&root),
+        &direct("fixture", 4, Duration::from_secs(1)),
+        start - TimeDelta::seconds(3),
+        37,
+    )
+    .unwrap();
+    for offset in 0..4 {
+        let reservation = scheduler
+            .reserve_run(start - TimeDelta::seconds(3 - offset))
+            .unwrap();
+        assert_eq!(reservation.accounting_date, start.date_naive());
+        assert_eq!(reservation.daily_bandwidth_starts, (offset + 1) as u32);
+    }
+    let mut report = success_report(true);
+    report.events[0].provider_daily_starts = Some(4);
+    report.events[0].provider_accounting_date = Some(start.date_naive());
+    report.events[0].bandwidth_start_reserved = Some(true);
+    scheduler
+        .finish_attempt(
+            &support::id("session"),
+            finish,
+            BandwidthOpportunity {
+                reason: TriggerReason::Scheduled,
+                scheduled_at_utc: start,
+                interface: None,
+            },
+            &mut report,
+        )
+        .unwrap();
+    assert_eq!(report.events[0].provider_daily_starts, Some(4));
+    assert_eq!(
+        report.events[0].provider_accounting_date,
+        Some(start.date_naive())
+    );
+    assert_eq!(report.events[0].bandwidth_start_reserved, Some(true));
+    assert_eq!(
+        scheduler
+            .snapshot()
+            .runs
+            .iter()
+            .filter(|time| time.date_naive() == start.date_naive())
+            .count(),
+        4
+    );
+    let decisions = scheduler
+        .observe_health(
+            &support::id("session"),
+            finish,
+            degraded(DegradationReason::Loss),
+        )
+        .unwrap();
+    let decision = decisions.last().unwrap();
+    assert_eq!(decision.provider_accounting_date, Some(finish.date_naive()));
+    assert_eq!(decision.provider_daily_starts, Some(0));
+    assert_eq!(decision.bandwidth_start_reserved, None);
 }

@@ -68,7 +68,9 @@ csv_event! { event;
     scheduler_reason => event.scheduler_reason,
     trigger_reason => event.trigger_reason,
     scheduler_not_before_utc => event.scheduler_not_before_utc.map(crate::model::timestamp_text),
+    provider_accounting_date => event.provider_accounting_date,
     provider_daily_starts => event.provider_daily_starts,
+    bandwidth_start_reserved => event.bandwidth_start_reserved,
 
     ping_target_ip => event.ping_target_ip,
     ping_local_ip => event.ping_local_ip,

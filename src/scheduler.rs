@@ -170,6 +170,7 @@ pub enum ManualDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reservation {
+    pub accounting_date: NaiveDate,
     pub daily_bandwidth_starts: u32,
 }
 
@@ -575,6 +576,7 @@ impl Scheduler {
         };
         self.persist()?;
         Ok(Reservation {
+            accounting_date: now.date_naive(),
             daily_bandwidth_starts,
         })
     }
@@ -688,11 +690,9 @@ impl Scheduler {
             self.persist()?;
         }
 
-        let used = runs_on_day(self.state(), now.date_naive());
         for event in &mut report.events {
             event.trigger_reason = Some(opportunity.reason);
             event.scheduled_at_utc = Some(opportunity.scheduled_at_utc);
-            event.provider_daily_starts = Some(used);
         }
         Ok(events)
     }
@@ -940,6 +940,7 @@ impl Scheduler {
         event.provider_kind = Some(self.policy.provider_kind);
         event.interface = context.interface;
         event.scheduler_not_before_utc = context.cooldown_until;
+        event.provider_accounting_date = Some(now.date_naive());
         event.provider_daily_starts = Some(runs_on_day(self.state(), now.date_naive()));
         event.scheduler_action = Some(decision.0);
         event.scheduler_reason = Some(decision.1);
@@ -965,6 +966,7 @@ impl ReservationGate for Scheduler {
     fn reserve(&mut self, started_at: DateTime<Utc>) -> Result<AdmissionReservation, String> {
         self.reserve_run(started_at)
             .map(|reservation| AdmissionReservation::Reserved {
+                accounting_date: reservation.accounting_date,
                 daily_bandwidth_starts: reservation.daily_bandwidth_starts,
             })
             .map_err(|error| error.to_string())

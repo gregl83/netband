@@ -259,7 +259,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
     }
 
     assert!(data.contains(CSV_HEADER));
-    assert_eq!(CSV_HEADER.split(',').count(), 65);
+    assert_eq!(CSV_HEADER.split(',').count(), 67);
     for field in CSV_HEADER.split(',') {
         assert!(
             data.contains(&format!("| `{field}` |")),
@@ -402,7 +402,7 @@ fn reference_docs_track_every_cli_option_schema_field_and_policy_link() {
                         && candidate["run_id"] == row["load_run_id"])
             );
         }
-        assert_eq!(row.as_object().unwrap().len(), 65);
+        assert_eq!(row.as_object().unwrap().len(), 67);
         assert_eq!(row["schema_version"], 1);
         for field in CSV_HEADER.split(',') {
             assert!(row.get(field).is_some(), "missing example field: {field}");

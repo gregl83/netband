@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::{Sink, Stream, StreamExt};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -208,7 +208,10 @@ pub enum BandwidthCommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionReservation {
     Untracked,
-    Reserved { daily_bandwidth_starts: u32 },
+    Reserved {
+        accounting_date: NaiveDate,
+        daily_bandwidth_starts: u32,
+    },
 }
 
 pub trait ReservationGate {
@@ -536,12 +539,18 @@ fn apply_admission(
     mut report: BandwidthReport,
     reservation: AdmissionReservation,
 ) -> BandwidthReport {
-    if let AdmissionReservation::Reserved {
-        daily_bandwidth_starts,
-    } = reservation
-    {
-        report.reserved = true;
-        for event in &mut report.events {
+    report.reserved = matches!(reservation, AdmissionReservation::Reserved { .. });
+    for event in &mut report.events {
+        if event.event_kind != EventKind::Bandwidth {
+            continue;
+        }
+        event.bandwidth_start_reserved = Some(report.reserved);
+        if let AdmissionReservation::Reserved {
+            accounting_date,
+            daily_bandwidth_starts,
+        } = reservation
+        {
+            event.provider_accounting_date = Some(accounting_date);
             event.provider_daily_starts = Some(daily_bandwidth_starts);
         }
     }

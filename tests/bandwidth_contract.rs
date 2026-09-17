@@ -660,12 +660,7 @@ async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
             && event.request_id == bandwidth.upload_request_id));
         assert_eq!(report.exit_code(), 1);
         assert!(report.reserved);
-        assert!(
-            report
-                .events
-                .iter()
-                .all(|event| event.provider_daily_starts == Some(1))
-        );
+        assert_reserved_accounting(&report);
         assert_eq!(
             report
                 .events
@@ -818,6 +813,20 @@ impl TcpConnector for RecordingConnector {
     }
 }
 
+fn assert_reserved_accounting(report: &netband::bandwidth::BandwidthReport) {
+    for event in &report.events {
+        if event.event_kind == EventKind::Bandwidth {
+            assert_eq!(event.bandwidth_start_reserved, Some(true));
+            assert_eq!(event.provider_daily_starts, Some(1));
+            assert!(event.provider_accounting_date.is_some());
+        } else {
+            assert_eq!(event.bandwidth_start_reserved, None);
+            assert_eq!(event.provider_daily_starts, None);
+            assert_eq!(event.provider_accounting_date, None);
+        }
+    }
+}
+
 struct RecordingGate {
     reserved: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
@@ -826,11 +835,12 @@ struct RecordingGate {
 impl ReservationGate for RecordingGate {
     fn reserve(
         &mut self,
-        _started_at: chrono::DateTime<chrono::Utc>,
+        started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<AdmissionReservation, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.reserved.store(true, Ordering::SeqCst);
         Ok(AdmissionReservation::Reserved {
+            accounting_date: started_at.date_naive(),
             daily_bandwidth_starts: 1,
         })
     }
@@ -886,12 +896,7 @@ async fn daily_allowance_is_reserved_once_before_the_first_ndt_connection() {
     assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
     assert_eq!(connector_calls.load(Ordering::SeqCst), 2);
     assert!(report.reserved);
-    assert!(
-        report
-            .events
-            .iter()
-            .all(|event| event.provider_daily_starts == Some(1))
-    );
+    assert_reserved_accounting(&report);
 }
 
 #[tokio::test]
@@ -1372,12 +1377,7 @@ async fn interruption_preserves_completed_directions_diagnostics_and_admission()
                 assert_eq!(report.exit_code(), 1);
                 assert!(report.reserved);
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
-                assert!(
-                    report
-                        .events
-                        .iter()
-                        .all(|event| event.provider_daily_starts == Some(1))
-                );
+                assert_reserved_accounting(&report);
                 assert_eq!(
                     report
                         .events
@@ -1489,6 +1489,15 @@ async fn reservation_failure_and_prior_cancellation_never_start_connections() {
             (!cancel).then_some("injected reservation failure")
         );
         assert_eq!(report.events.len(), 2);
+        let summary = report
+            .events
+            .iter()
+            .find(|event| event.event_kind == EventKind::Bandwidth)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(summary).unwrap()["bandwidth_start_reserved"],
+            false
+        );
         assert!(
             report
                 .events

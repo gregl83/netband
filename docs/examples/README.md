@@ -4,7 +4,7 @@
 It includes successful, timed-out and unsent pings; a loaded ping overlapping a
 bandwidth attempt; successful and partial bandwidth results; upload cancellation;
 Locate rate limiting; and scheduler deferral and suppression. These are illustrative
-records, not captured network measurements. Every record includes all 65 fields.
+records, not captured network measurements. Every record includes all 67 fields.
 
 The matching [CSV session fixture](../../tests/fixtures/v1-events.csv) contains the
 same 32 records in the same order. Tests keep both representations aligned and
@@ -37,3 +37,7 @@ a normal explanation or a failure diagnostic; structured outcomes and error kind
 determine its context. Ping loss is derived from `ping_packets_sent` and
 `ping_packets_received`. Request retry deadlines and scheduler eligibility deadlines
 occupy separate columns even when their timestamps happen to match.
+
+Reservation accounting appears on bandwidth summaries and provider scheduler decisions.
+Bandwidth summaries retain the admission date/count and reservation flag; failed
+discovery has a false flag and no count. Request failures carry no accounting snapshot.

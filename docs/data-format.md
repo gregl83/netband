@@ -1,13 +1,13 @@
 # CSV schema and outcomes
 
-Netband's v1 journal has 65 fields shared by CSV and JSONL. CSV is the authoritative
+Netband's v1 journal has 67 fields shared by CSV and JSONL. CSV is the authoritative
 persisted output; JSONL emits the same records to the console. Each record represents
 a run lifecycle transition, ping attempt, bandwidth attempt, request failure, or scheduler decision.
 
 ## Fields and encoding
 
 ```csv
-schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_daily_starts,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
+schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,run_kind,scheduled_at_utc,started_at_utc,finished_at_utc,elapsed_ms,outcome,message,command,netband_version,process_id,interface,connection_details,provider_id,provider_kind,server_name,scheduler_action,scheduler_reason,trigger_reason,scheduler_not_before_utc,provider_accounting_date,provider_daily_starts,bandwidth_start_reserved,ping_target_ip,ping_local_ip,ping_sequence,ping_packets_sent,ping_packets_received,ping_rtt_ms,ping_icmp_type,ping_icmp_code,load_run_id,load_phase,request_id,request_direction,request_stage,request_url,request_local_ip,request_remote_ip,request_http_status,request_retry_after_ms,request_retry_at_utc,download_request_id,download_local_ip,download_remote_ip,download_bytes,download_measurement_duration_ms,download_mbps,download_server_tcp_min_rtt_ms,download_server_tcp_rtt_ms,download_server_tcp_retransmitted_bytes,upload_request_id,upload_local_ip,upload_remote_ip,upload_bytes,upload_measurement_duration_ms,upload_mbps,upload_server_tcp_min_rtt_ms,upload_server_tcp_rtt_ms,upload_server_tcp_retransmitted_bytes,error_kind,os_error_code
 ```
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
@@ -89,7 +89,9 @@ Download and upload families have identical suffixes and ordering.
 | `scheduler_reason` | Stable reason for the scheduling decision; populated on scheduler events only; values below |
 | `trigger_reason` | `scheduled`, `ping_loss`, `ping_rtt`, or `manual` |
 | `scheduler_not_before_utc` | Deadline applied by this scheduler decision, including provider cooldown, minimum spacing or interface retry; other policy gates may still block work after this time; empty on other event kinds |
-| `provider_daily_starts` | Bandwidth starts reserved for this provider and UTC day, including failed or interrupted attempts; not a count of successful tests |
+| `provider_accounting_date` | UTC calendar date (`YYYY-MM-DD`) to which the reservation-count snapshot applies |
+| `provider_daily_starts` | Reserved starts for that provider and accounting date: immediately after admission on reserved bandwidth summaries, or at decision time on provider scheduler events |
+| `bandwidth_start_reserved` | Boolean on bandwidth summaries: true if this attempt reserved a start, false if it did not; unavailable on other event kinds |
 
 ### Ping
 
@@ -236,6 +238,29 @@ Load-classified pings remain durable measurements but are excluded from the heal
 that can request another bandwidth test. Join `load_run_id` to the bandwidth row's
 `run_id` when analyzing loaded latency. Because rows are committed as operations finish,
 use their timestamps rather than file order when constructing a timeline.
+
+## Reservation accounting
+
+A reserved bandwidth summary preserves its admission-time `provider_accounting_date`
+and `provider_daily_starts`, with `bandwidth_start_reserved=true`. Completion after
+midnight, failure, or cancellation does not change that snapshot or refund the start.
+An attempt ending before reservation has `bandwidth_start_reserved=false` and leaves
+the accounting date and count unavailable. Low-level untracked measurements also
+reserve no start and report false.
+
+Provider scheduler decisions record the decision's UTC accounting date and current
+count; their reservation flag is unavailable. Interface-only scheduler decisions
+without provider accounting context leave all three fields unavailable. Request
+failures, ping events, and lifecycle records also leave these fields unavailable;
+join request failures to their bandwidth summary by `run_id` when needed.
+
+For example, an attempt admitted as start 4 before midnight retains the previous
+date and count 4 after completion. A scheduler decision after midnight can correctly
+show the new date and count 0. The count is a snapshot: never sum it. To count recorded
+reserved attempts, count distinct bandwidth `run_id` values whose reservation flag
+is true, grouped by provider and accounting date. This counts represented summaries;
+an abrupt exit can leave a persisted reservation without a summary. Persisted scheduler
+state remains authoritative for enforcing limits.
 
 ## Timing and throughput
 
