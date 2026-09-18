@@ -238,12 +238,28 @@ async fn successful_command_writes_one_terminal_result_and_returns_zero() {
                     .unwrap();
             }
             socket.close(None).await.unwrap();
+            if !download {
+                // Dropping with unread upload data can reset TCP before the report arrives.
+                loop {
+                    match socket.next().await {
+                        Some(Ok(Message::Close(_))) => break,
+                        Some(Ok(_)) => {}
+                        other => panic!("expected upload close acknowledgement, got {other:?}"),
+                    }
+                }
+            }
         }
     })
     .await
     .expect("command must complete both transfer stages");
-    assert_eq!(child.wait().await.code(), Some(0));
+    let status = child.wait().await;
     let rows = fixture.rows();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stderr: {}\nrows: {rows:?}",
+        fs::read_to_string(&child.stderr).unwrap()
+    );
     assert_complete_hierarchy(&rows);
     let bandwidth: Vec<_> = rows
         .iter()
@@ -252,7 +268,14 @@ async fn successful_command_writes_one_terminal_result_and_returns_zero() {
     assert_eq!(bandwidth.len(), 1);
     assert_eq!(bandwidth[0]["outcome"], "success");
     assert!(bandwidth[0]["download_mbps"].parse::<f64>().unwrap() > 0.0);
-    assert!(bandwidth[0]["upload_mbps"].parse::<f64>().unwrap() > 0.0);
+    assert_eq!(bandwidth[0]["upload_bytes"], "8192");
+    assert_eq!(
+        bandwidth[0]["upload_measurement_duration_ms"]
+            .parse::<f64>()
+            .unwrap(),
+        1.0
+    );
+    assert_eq!(bandwidth[0]["upload_mbps"].parse::<f64>().unwrap(), 65.536);
 }
 
 #[tokio::test]
