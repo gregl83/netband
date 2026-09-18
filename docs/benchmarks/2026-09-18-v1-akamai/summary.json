@@ -1,0 +1,76 @@
+{
+  "source": "measurements.csv",
+  "rows": 40,
+  "clients": {
+    "reference": {
+      "runs": 20,
+      "successful_runs": 20,
+      "success_pct": 100.0,
+      "outcomes": {
+        "success": 20
+      },
+      "diagnostic_runs": 0,
+      "diagnostics": {},
+      "download_mbps": {
+        "n": 20,
+        "median": 208.4196012434024,
+        "p10": 185.99253518002647,
+        "p90": 243.8315885218154,
+        "mean": 214.06537752391597,
+        "sample_sd": 25.88620663937097,
+        "cv_pct": 12.092663904268635
+      },
+      "upload_mbps": {
+        "n": 20,
+        "median": 110.19913717072654,
+        "p10": 101.50999092662283,
+        "p90": 116.76535170172168,
+        "mean": 108.34642681436075,
+        "sample_sd": 9.901380732748011,
+        "cv_pct": 9.1386315394719
+      }
+    },
+    "netband": {
+      "runs": 20,
+      "successful_runs": 20,
+      "success_pct": 100.0,
+      "outcomes": {
+        "success": 20
+      },
+      "diagnostic_runs": 0,
+      "diagnostics": {},
+      "download_mbps": {
+        "n": 20,
+        "median": 209.76297267522955,
+        "p10": 193.97547786288615,
+        "p90": 277.5129869279627,
+        "mean": 224.45439334497388,
+        "sample_sd": 36.317201067276386,
+        "cv_pct": 16.180213951730888
+      },
+      "upload_mbps": {
+        "n": 20,
+        "median": 114.50310877824913,
+        "p10": 102.33897431714156,
+        "p90": 117.52150644228864,
+        "mean": 112.40271878312777,
+        "sample_sd": 6.073506702323988,
+        "cv_pct": 5.403345015205853
+      }
+    }
+  },
+  "agreement": {
+    "download_mbps": {
+      "paired_n": 20,
+      "median_netband_minus_reference_pct": -0.3573186557434152,
+      "median_absolute_difference_pct": 7.40064289030698,
+      "p90_absolute_difference_pct": 37.482605426029764
+    },
+    "upload_mbps": {
+      "paired_n": 20,
+      "median_netband_minus_reference_pct": 2.8121985593083267,
+      "median_absolute_difference_pct": 3.912124988420129,
+      "p90_absolute_difference_pct": 12.775216208055845
+    }
+  }
+}

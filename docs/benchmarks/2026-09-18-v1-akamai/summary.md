@@ -5,13 +5,13 @@ in the distribution statistics. CV is the sample standard deviation divided by t
 
 | Client | Complete runs | Auxiliary diagnostics | Download median (p10–p90) | Download CV | Upload median (p10–p90) | Upload CV |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| reference | 20/20 (100.0%) | 0 | 49.72 (47.58–54.49) Mbit/s | 6.52% | 19.44 (17.08–20.77) Mbit/s | 10.86% |
-| netband | 20/20 (100.0%) | 0 | 53.17 (48.79–56.19) Mbit/s | 6.23% | 20.56 (19.30–22.65) Mbit/s | 6.63% |
+| reference | 20/20 (100.0%) | 0 | 208.42 (185.99–243.83) Mbit/s | 12.09% | 110.20 (101.51–116.77) Mbit/s | 9.14% |
+| netband | 20/20 (100.0%) | 0 | 209.76 (193.98–277.51) Mbit/s | 16.18% | 114.50 (102.34–117.52) Mbit/s | 5.40% |
 
 | Direction | Paired runs | Median signed difference | Median absolute difference | p90 absolute difference |
 | --- | ---: | ---: | ---: | ---: |
-| download | 20 | 7.28% | 9.15% | 17.51% |
-| upload | 20 | 6.68% | 7.32% | 25.17% |
+| download | 20 | -0.36% | 7.40% | 37.48% |
+| upload | 20 | 2.81% | 3.91% | 12.78% |
 
 Signed difference is `(Netband - reference) / reference × 100` for measurements
 with the same pair number.

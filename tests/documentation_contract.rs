@@ -79,8 +79,18 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
 }
 
 #[test]
-fn published_ndt7_validation_dataset_is_complete_and_sanitized() {
-    let directory = root().join("docs/benchmarks/2026-09-06-akamai");
+fn published_ndt7_benchmark_is_complete_and_sanitized() {
+    let directory = root().join("docs/benchmarks/2026-09-18-v1-akamai");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("metadata.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["netband_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(metadata["pair_count"], 20);
+    for client in ["netband", "ndt7-client"] {
+        let hash = metadata["binaries"][client].as_str().unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
     let mut reader = csv::Reader::from_path(directory.join("measurements.csv")).unwrap();
     assert_eq!(
         reader.headers().unwrap().iter().collect::<Vec<_>>(),
@@ -156,29 +166,42 @@ fn published_ndt7_validation_dataset_is_complete_and_sanitized() {
     let summary: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(directory.join("summary.json")).unwrap()).unwrap();
     let validation = fs::read_to_string(root().join("docs/ndt7-validation.md")).unwrap();
-    let readme = fs::read_to_string(root().join("README.md")).unwrap();
-    assert!(readme.contains("docs/ndt7-validation.md"));
-    assert!(validation.contains("benchmarks/2026-09-06-akamai/measurements.csv"));
-    for client in ["netband", "reference"] {
-        for (field, direction) in [(5, "download_mbps"), (6, "upload_mbps")] {
+    assert!(validation.contains("benchmarks/2026-09-18-v1-akamai/measurements.csv"));
+    for (client, label) in [("netband", "Netband"), ("reference", "Go reference")] {
+        let prefix = format!("| {label} |");
+        let documented: Vec<_> = validation
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        assert_eq!(documented.len(), 6);
+        for (field, direction, column) in [(5, "download_mbps", 2), (6, "upload_mbps", 4)] {
             let mut values: Vec<f64> = rows
                 .iter()
                 .filter(|row| &row[2] == client && &row[3] == "0" && &row[4] == "success")
                 .map(|row| row[field].parse().unwrap())
                 .collect();
             values.sort_by(f64::total_cmp);
-            assert!(!values.is_empty());
+            assert!(values.len() > 1);
             let median = (values[(values.len() - 1) / 2] + values[values.len() / 2]) / 2.0;
             let recorded = &summary["clients"][client][direction];
             assert_eq!(recorded["n"].as_u64().unwrap(), values.len() as u64);
             assert!((recorded["median"].as_f64().unwrap() - median).abs() < 1e-9);
-            assert!(
-                validation.contains(&format!("{median:.2}")),
-                "missing median for {client} {direction}"
-            );
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / (values.len() - 1) as f64;
+            let cv = 100.0 * variance.sqrt() / mean;
+            assert!((recorded["cv_pct"].as_f64().unwrap() - cv).abs() < 1e-9);
+            assert_eq!(documented[column], format!("{median:.2} Mb/s"));
+            assert_eq!(documented[column + 1], format!("{cv:.2}%"));
         }
     }
-    assert!(validation.contains("ndt.example.com"));
 }
 
 #[test]
@@ -191,6 +214,8 @@ fn measurement_docs_describe_current_behavior_without_old_build_claims() {
             "0.2.0",
             "0.3.0",
             "0.4.0",
+            "0.5.0",
+            "2026-09-06-akamai",
             "7531961",
             "revised",
             "Baseline download",
@@ -204,7 +229,12 @@ fn measurement_docs_describe_current_behavior_without_old_build_claims() {
     assert!(validation.contains("Upload accepts payloads for ten seconds"));
     assert!(validation.contains("separate two-second allowance"));
     assert!(validation.contains("64 KiB"));
-    assert!(validation.contains("twenty pairs"));
+    assert!(
+        validation
+            .contains("[M-Lab's Go reference client](https://github.com/m-lab/ndt7-client-go)")
+    );
+    assert!(readme.contains("docs/ndt7-validation.md"));
+    assert!(validation.contains("ndt.example.com"));
     assert!(validation.contains("numerical agreement alone does not prove"));
 }
 
