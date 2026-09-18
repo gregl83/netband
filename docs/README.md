@@ -13,19 +13,10 @@ Choose the next guide for what you want to do:
 | Leave Netband running unattended | [Service operation](service.md) |
 | Understand automatic tests, limits, or deferrals | [Scheduling](scheduling.md) |
 | Parse results or inspect example records | [Data format](data-format.md) · [Example session](examples/README.md) |
-| Understand measurement methods and validation | [NDT7 validation](ndt7-validation.md) |
+| Understand measurement methods and inspect the v1 benchmark | [NDT7 validation](ndt7-validation.md) |
 | Plan a study and preserve measurement provenance | [Research use](ndt7-validation.md#research-use) |
 | Run an operator-controlled NDT7 server | [Self-hosted NDT7 on Akamai Cloud](akamai-ndt-server.md) |
 | Understand what data is collected and shared | [Privacy and provider data](../PRIVACY.md) |
-
-## Recorded benchmarks
-
-The [reference-client comparison](benchmarks/2026-09-06-akamai/summary.md) includes
-[measurements](benchmarks/2026-09-06-akamai/measurements.csv),
-[build metadata](benchmarks/2026-09-06-akamai/metadata.json), and
-[paired analysis](benchmarks/2026-09-06-akamai/paired-analysis.json).
-Records describe the identified binaries and environment; see the validation guide
-for interpretation and limitations.
 
 ## Maintainers
 

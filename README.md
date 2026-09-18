@@ -109,8 +109,8 @@ JSONL is a best-effort live view; use CSV when you need the complete journal.
 See [quick tests and output](docs/usage.md) for console modes and troubleshooting,
 or inspect the [example records](docs/examples/README.md).
 
-Netband has been [compared with M-Lab's Go reference client](docs/ndt7-validation.md).
-The recorded dataset, measurement definitions, and limitations are available for inspection.
+See [NDT7 measurement and validation](docs/ndt7-validation.md) for rate definitions
+and the [v1 comparison with M-Lab's Go client](docs/ndt7-validation.md#v1-reference-client-comparison).
 
 ## Explore further
 

@@ -398,18 +398,27 @@ mod loaded_tests {
 
         let (upload, _) = listener.accept().await.unwrap();
         let mut upload = accept_hdr_async(upload, accept_ndt7).await.unwrap();
+        let mut bytes = 0;
         let upload_window = tokio::time::sleep(Duration::from_millis(60));
         tokio::pin!(upload_window);
         loop {
             tokio::select! {
                 _ = &mut upload_window => break,
                 message = upload.next() => {
-                    if message.is_none() {
-                        break;
+                    match message {
+                        Some(Ok(Message::Binary(payload))) => bytes += payload.len(),
+                        None => break,
+                        _ => {}
                     }
                 }
             }
         }
+        upload
+            .send(Message::Text(
+                format!(r#"{{"TCPInfo":{{"BytesReceived":{bytes},"ElapsedTime":60000}}}}"#).into(),
+            ))
+            .await
+            .unwrap();
         upload.close(None).await.unwrap();
         while let Some(message) = upload.next().await {
             if matches!(message.unwrap(), Message::Close(_)) {

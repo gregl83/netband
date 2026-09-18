@@ -1,0 +1,30 @@
+{
+  "netband_version": "1.0.0",
+  "netband_revision": "812ae91348ed4f638175788dbb850129e3355b73",
+  "reference_revision": "1f6adcf81a3f29cae933a2e317e86e24826e2900",
+  "build_command": "cargo build --release --locked",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "go": "go version go1.27.1 linux/amd64",
+  "binaries": {
+    "netband": "a22abb01d4b20568809de0b0f16285eacf623b74793692517ec1713d8281a472",
+    "ndt7-client": "26ba017c8bd37ad056b0f61ffc45b21027e90b314609cbeb355f64b3d6f6989f"
+  },
+  "source_clean_at_build": false,
+  "compiled_source_matches_revision": false,
+  "working_tree_changes": "Upload measurement refactor; apply netband-source.patch to the base revision before building.",
+  "pair_count": 20,
+  "cooldown_seconds": 10,
+  "environment": "Linux x86_64 host connected over 5 GHz Wi-Fi (5765 MHz at startup); router/AP, firmware and location unspecified",
+  "server": "Same operator-authorized Akamai Cloud NDT7 server for both clients",
+  "order": "Netband first in odd pairs; reference first in even pairs",
+  "netband_measurement": "Download: client binary application bytes / client elapsed time. Upload: server TCPInfo.BytesReceived / TCPInfo.ElapsedTime.",
+  "reference_measurement": "Download uses last client AppInfo snapshot including text; upload uses server TCPInfo",
+  "wifi_frequency_mhz": 5765,
+  "wifi_snapshot": "Before measurements; not continuous association monitoring",
+  "server_version": null,
+  "source_patch": "netband-source.patch",
+  "source_patch_sha256": "bb52b2fdc5de985beee6ee27839b13f36224f389514682905298119e916daee2",
+  "date_utc": "2026-09-18",
+  "started_at_utc": "2026-09-18T21:07:23+00:00",
+  "finished_at_utc": "2026-09-18T21:27:50+00:00"
+}

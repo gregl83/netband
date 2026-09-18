@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 const PROTOCOL: &str = "net.measurementlab.ndt.v7";
-const METRICS: &str = r#"{"TCPInfo":{"MinRTT":1200,"RTT":2500,"BytesRetrans":7}}"#;
+const METRICS: &str = r#"{"TCPInfo":{"BytesReceived":16384,"ElapsedTime":1000,"MinRTT":1200,"RTT":2500,"BytesRetrans":7}}"#;
 
 fn assert_report_timestamps(report: &netband::bandwidth::BandwidthReport) {
     let bandwidth = report.events.last().unwrap();
@@ -472,6 +472,108 @@ async fn upload_messages_scale_at_ndt7_boundaries() {
 }
 
 #[tokio::test]
+async fn upload_uses_the_latest_valid_server_counter_and_its_own_window() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        serve_download(listener.accept().await.unwrap().0).await;
+        let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+            .await
+            .unwrap();
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Binary(_)
+        ));
+        for report in [
+            r#"{"Origin":"server","Test":"upload","TCPInfo":{"BytesReceived":32000,"ElapsedTime":250000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":64000,"ElapsedTime":500000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":64000,"ElapsedTime":500000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":128000,"ElapsedTime":400000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":1,"ElapsedTime":600000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":128000,"ElapsedTime":500000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":128000}}"#,
+            r#"{"TCPInfo":{"ElapsedTime":900000}}"#,
+            r#"{"TCPInfo":{"BytesReceived":128000,"ElapsedTime":0}}"#,
+            r#"{"TCPInfo":{"BytesReceived":-1,"ElapsedTime":900000}}"#,
+            r#"{"Origin":"client","TCPInfo":{"BytesReceived":128000,"ElapsedTime":900000}}"#,
+            r#"{"Test":"download","TCPInfo":{"BytesReceived":128000,"ElapsedTime":900000}}"#,
+            "invalid json",
+        ] {
+            socket.send(Message::Text(report.into())).await.unwrap();
+        }
+        socket.close(None).await.unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    });
+    let dir = tempdir().unwrap();
+    let config = direct_config(dir.path(), address, "5s");
+    let (_sender, shutdown) = cancellation_channel();
+    let report = measure_bandwidth(&config, &support::id("server-upload"), shutdown).await;
+    assert_eq!(report.outcome, Outcome::Success);
+    let bandwidth = report.events.last().unwrap();
+    assert_eq!(bandwidth.upload_bytes, Some(64000));
+    assert_eq!(bandwidth.upload_measurement_duration_ms, Some(500.0));
+    assert_eq!(bandwidth.upload_mbps, Some(1.024));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn upload_without_a_valid_server_report_never_falls_back_to_local_bytes() {
+    for measurement in [
+        "{}",
+        r#"{"TCPInfo":{"BytesReceived":0,"ElapsedTime":1000}}"#,
+        r#"{"TCPInfo":{"BytesReceived":8192,"ElapsedTime":0}}"#,
+        r#"{"AppInfo":{"NumBytes":8192,"ElapsedTime":1000}}"#,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            serve_download(listener.accept().await.unwrap().0).await;
+            let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+                .await
+                .unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Binary(_)
+            ));
+            socket
+                .send(Message::Text(measurement.into()))
+                .await
+                .unwrap();
+            socket.close(None).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+        let dir = tempdir().unwrap();
+        let config = direct_config(dir.path(), address, "5s");
+        let (_sender, shutdown) = cancellation_channel();
+        let report =
+            measure_bandwidth(&config, &support::id("missing-upload-report"), shutdown).await;
+        assert_eq!(report.outcome, Outcome::Partial);
+        let bandwidth = report.events.last().unwrap();
+        assert!(bandwidth.download_mbps.is_some());
+        assert!(bandwidth.upload_bytes.is_none());
+        assert!(bandwidth.upload_measurement_duration_ms.is_none());
+        assert!(bandwidth.upload_mbps.is_none());
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| event.error_kind == Some(ErrorKind::UploadFailed)
+                    && event.message.as_deref()
+                        == Some("upload ended without a valid server measurement"))
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn upload_stops_after_ten_seconds_and_completes_the_close_handshake() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -482,6 +584,7 @@ async fn upload_stops_after_ten_seconds_and_completes_the_close_handshake() {
         let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
             .await
             .unwrap();
+        socket.send(Message::Text(METRICS.into())).await.unwrap();
         let started = tokio::time::Instant::now();
         let mut largest = 0;
         while let Some(message) = socket.next().await {
@@ -521,6 +624,7 @@ async fn upload_acknowledges_peer_close_before_disconnecting() {
             socket.next().await.unwrap().unwrap(),
             Message::Binary(_)
         ));
+        socket.send(Message::Text(METRICS.into())).await.unwrap();
         socket.close(None).await.unwrap();
         loop {
             match socket.next().await {
@@ -589,103 +693,109 @@ async fn upload_reads_control_messages_while_bulk_writes_are_blocked() {
 }
 
 #[tokio::test]
-async fn upload_cleanup_retains_load_phase_and_obeys_outer_limits() {
-    for (cancel, timeout, outcome) in [
-        (true, "15s", Outcome::Cancelled),
-        (false, "300ms", Outcome::Timeout),
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            serve_download(listener.accept().await.unwrap().0).await;
-            let mut socket = accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+async fn server_upload_results_survive_transfer_and_cleanup_interruption() {
+    for cleanup in [false, true] {
+        for (cancel, timeout, outcome) in [
+            (true, "15s", Outcome::Cancelled),
+            (false, "300ms", Outcome::Timeout),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (closing_tx, closing_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                serve_download(listener.accept().await.unwrap().0).await;
+                let mut socket =
+                    accept_hdr_async(listener.accept().await.unwrap().0, accept_protocol)
+                        .await
+                        .unwrap();
+                assert!(matches!(
+                    socket.next().await.unwrap().unwrap(),
+                    Message::Binary(_)
+                ));
+                socket.send(Message::Text(METRICS.into())).await.unwrap();
+                if cleanup {
+                    socket.close(None).await.unwrap();
+                }
+                closing_tx.send(()).unwrap();
+                let _ = release_rx.await;
+            });
+            let dir = tempdir().unwrap();
+            let config = direct_config(dir.path(), address, timeout);
+            let (shutdown_tx, shutdown) = cancellation_channel();
+            let (phase_tx, phase_rx) = tokio::sync::watch::channel(LoadPhase::Setup);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut gate = RecordingGate {
+                reserved: Arc::new(AtomicBool::new(false)),
+                calls: Arc::clone(&calls),
+            };
+            let task = tokio::spawn(async move {
+                measure_bandwidth_with_gate_and_phase(
+                    &config,
+                    &support::id("upload-cleanup-cancel"),
+                    shutdown,
+                    &mut gate,
+                    phase_tx,
+                )
                 .await
+            });
+            closing_rx.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                !task.is_finished(),
+                "cleanup must remain part of the bandwidth future"
+            );
+            assert_eq!(*phase_rx.borrow(), LoadPhase::Upload);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            if cancel {
+                shutdown_tx.send(true).unwrap();
+            }
+            let report = tokio::time::timeout(Duration::from_millis(500), task)
+                .await
+                .unwrap()
                 .unwrap();
-            assert!(matches!(
-                socket.next().await.unwrap().unwrap(),
-                Message::Binary(_)
-            ));
-            socket.close(None).await.unwrap();
-            closing_tx.send(()).unwrap();
-            let _ = release_rx.await;
-        });
-        let dir = tempdir().unwrap();
-        let config = direct_config(dir.path(), address, timeout);
-        let (shutdown_tx, shutdown) = cancellation_channel();
-        let (phase_tx, phase_rx) = tokio::sync::watch::channel(LoadPhase::Setup);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut gate = RecordingGate {
-            reserved: Arc::new(AtomicBool::new(false)),
-            calls: Arc::clone(&calls),
-        };
-        let task = tokio::spawn(async move {
-            measure_bandwidth_with_gate_and_phase(
-                &config,
-                &support::id("upload-cleanup-cancel"),
-                shutdown,
-                &mut gate,
-                phase_tx,
-            )
-            .await
-        });
-        closing_rx.await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            !task.is_finished(),
-            "cleanup must remain part of the bandwidth future"
-        );
-        assert_eq!(*phase_rx.borrow(), LoadPhase::Upload);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        if cancel {
-            shutdown_tx.send(true).unwrap();
+            assert_eq!(report.outcome, outcome);
+            let bandwidth = report.events.last().unwrap();
+            assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
+            assert!(
+                bandwidth.elapsed_ms.unwrap()
+                    > bandwidth.download_measurement_duration_ms.unwrap_or(0.0)
+                        + bandwidth.upload_measurement_duration_ms.unwrap_or(0.0)
+            );
+            assert!(bandwidth.download_request_id.is_some());
+            assert!(bandwidth.upload_request_id.is_some());
+            assert_ne!(bandwidth.download_request_id, bandwidth.upload_request_id);
+            assert!(report.events.iter().any(|event| event.request_direction
+                == Some(RequestDirection::Upload)
+                && event.request_id == bandwidth.upload_request_id));
+            assert_eq!(report.exit_code(), 1);
+            assert!(report.reserved);
+            assert_reserved_accounting(&report);
+            assert_eq!(
+                report
+                    .events
+                    .iter()
+                    .filter(|event| event.event_kind == EventKind::Bandwidth)
+                    .count(),
+                1
+            );
+            assert_report_timestamps(&report);
+            let bandwidth = report.events.last().unwrap();
+            assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
+            assert!(bandwidth.upload_bytes.unwrap() >= 8192);
+            assert!(bandwidth.download_mbps.unwrap() > 0.0);
+            assert!(bandwidth.upload_mbps.unwrap() > 0.0);
+            let terminal = &report.events[report.events.len() - 2];
+            assert_eq!(
+                serde_json::to_value(terminal).unwrap()["request_stage"],
+                if cleanup { "cleanup" } else { "upload" }
+            );
+            assert_eq!(terminal.request_id, bandwidth.upload_request_id);
+            assert_eq!(terminal.request_direction, Some(RequestDirection::Upload));
+            assert_eq!(terminal.outcome, outcome);
+            let _ = release_tx.send(());
+            server.await.unwrap();
         }
-        let report = tokio::time::timeout(Duration::from_millis(500), task)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(report.outcome, outcome);
-        let bandwidth = report.events.last().unwrap();
-        assert!(bandwidth.elapsed_ms.unwrap() >= 100.0);
-        assert!(
-            bandwidth.elapsed_ms.unwrap()
-                > bandwidth.download_measurement_duration_ms.unwrap_or(0.0)
-                    + bandwidth.upload_measurement_duration_ms.unwrap_or(0.0)
-        );
-        assert!(bandwidth.download_request_id.is_some());
-        assert!(bandwidth.upload_request_id.is_some());
-        assert_ne!(bandwidth.download_request_id, bandwidth.upload_request_id);
-        assert!(report.events.iter().any(|event| event.request_direction
-            == Some(RequestDirection::Upload)
-            && event.request_id == bandwidth.upload_request_id));
-        assert_eq!(report.exit_code(), 1);
-        assert!(report.reserved);
-        assert_reserved_accounting(&report);
-        assert_eq!(
-            report
-                .events
-                .iter()
-                .filter(|event| event.event_kind == EventKind::Bandwidth)
-                .count(),
-            1
-        );
-        assert_report_timestamps(&report);
-        let bandwidth = report.events.last().unwrap();
-        assert_eq!(bandwidth.download_bytes, Some(16 * 1024));
-        assert!(bandwidth.upload_bytes.unwrap() >= 8192);
-        assert!(bandwidth.download_mbps.unwrap() > 0.0);
-        assert!(bandwidth.upload_mbps.unwrap() > 0.0);
-        let terminal = &report.events[report.events.len() - 2];
-        assert_eq!(
-            serde_json::to_value(terminal).unwrap()["request_stage"],
-            "cleanup"
-        );
-        assert_eq!(terminal.request_id, bandwidth.upload_request_id);
-        assert_eq!(terminal.request_direction, Some(RequestDirection::Upload));
-        assert_eq!(terminal.outcome, outcome);
-        let _ = release_tx.send(());
-        server.await.unwrap();
     }
 }
 
@@ -1548,7 +1658,7 @@ async fn directional_tcp_metrics_remain_distinct_in_csv_and_jsonl() {
         ));
         upload
             .send(Message::Text(
-                r#"{"TCPInfo":{"RTT":9000,"BytesRetrans":29}}"#.into(),
+                r#"{"TCPInfo":{"BytesReceived":16384,"ElapsedTime":1000,"RTT":9000,"BytesRetrans":29}}"#.into(),
             ))
             .await
             .unwrap();

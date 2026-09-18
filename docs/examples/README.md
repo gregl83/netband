@@ -52,4 +52,5 @@ Periodic pings retain planned ticker times; one-shot pings have no planned time.
 
 The cancelled cleanup example uses `request_stage=cleanup` and
 `request_direction=upload`, sharing its request ID with the retained upload result.
-Its diagnostic duration covers cleanup only; the upload rate uses its active window.
+Its diagnostic duration covers cleanup only; upload bytes and duration come from the
+same server TCPInfo report, including TLS/WebSocket overhead in the byte count.

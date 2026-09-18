@@ -26,7 +26,7 @@ schema_version,event_id,event_kind,event_sequence,run_id,parent_run_id,root_run_
 
 Empty fields mean the value does not apply or was unavailable. Timestamps are RFC 3339
 UTC with millisecond precision. Durations and RTTs are milliseconds. Throughput is
-decimal megabits per second (`bytes * 8 / active_window_seconds / 1,000,000`).
+decimal megabits per second (`bytes * 8 / measurement_window_seconds / 1,000,000`).
 
 JSONL uses the same fields and types, with JSON null instead of empty CSV cells.
 Consumers must tolerate unknown JSON properties and future enum values without
@@ -169,8 +169,8 @@ used as scheduler accounting keys.
 | `upload_request_id` | Request ID of the retained upload measurement; empty without that measurement |
 | `upload_local_ip` | Local address of the upload connection; empty when that direction is unavailable |
 | `upload_remote_ip` | Remote address of the upload connection; empty when that direction is unavailable |
-| `upload_bytes` | Binary application payload bytes accepted by the WebSocket sink during active upload; includes any buffered tail, excludes WebSocket and TLS overhead |
-| `upload_measurement_duration_ms` | Client send measurement window in milliseconds; excludes close-handshake waiting; empty when that direction is unavailable |
+| `upload_bytes` | Server TCPInfo `BytesReceived` from the retained report; includes TLS/WebSocket overhead |
+| `upload_measurement_duration_ms` | Server TCPInfo `ElapsedTime` from the same report, converted from microseconds to milliseconds; empty without a valid report |
 | `upload_mbps` | NDT7 upload throughput in decimal Mb/s |
 | `upload_server_tcp_min_rtt_ms` | NDT7 server TCPInfo minimum RTT in milliseconds for the upload connection |
 | `upload_server_tcp_rtt_ms` | NDT7 server TCPInfo current/smoothed RTT in milliseconds for the upload connection |
@@ -256,9 +256,9 @@ close/drain phase, currently emitted with `request_direction=upload`. It begins 
 the active window ends or the peer sends Close. The request ID and endpoint context
 stay unchanged. Cleanup failures use that phase's own start timestamp and monotonic
 elapsed duration; later server metrics do not restart its clock. Errors during active
-transfer remain `upload`; an upload with no measurement bytes is also a transfer
-failure even if the connection closes cleanly. Cleanup's stage does not change the
-retained measurement, reservation, overall outcome, or concurrent `load_phase`.
+transfer remain `upload`; an upload without a valid server measurement is also a transfer
+failure even if the connection closes cleanly. Cleanup retains the reservation and concurrent `load_phase`; later valid server
+reports can update the retained upload measurement.
 
 Do not infer direction from diagnostic prose or count each request as a bandwidth test.
 Rate availability and diagnostics must be assessed independently of overall outcome.
@@ -348,7 +348,9 @@ producing measurements. Request-failure rows retain the stage start and failure 
 UTC timestamps reflect the observed wall clock and can move backward after a clock
 adjustment. Elapsed time and active durations use a monotonic clock.
 
-`download_measurement_duration_ms` and `upload_measurement_duration_ms` retain each active monotonic window.
+`download_measurement_duration_ms` retains the client receive window;
+`upload_measurement_duration_ms` retains the server-reported TCP measurement window.
+The windows use different clocks and need no clock synchronization.
 Recompute download as `8 * download_bytes / (1000 * download_measurement_duration_ms)` and upload
 as `8 * upload_bytes / (1000 * upload_measurement_duration_ms)` in decimal Mb/s. Allow floating-point
 roundoff (relative tolerance `1e-12`); CSV and JSONL do not round measurements for display.
@@ -363,27 +365,31 @@ Do not derive elapsed time by subtracting UTC timestamps: those timestamps have
 millisecond precision and can move backward when the system clock changes.
 
 NDT7 upload accepts new payloads for at most ten seconds after its handshake, or until
-the peer closes or a transport error occurs. Its rate uses locally accepted bytes and
-that active window, not confirmed server receipt. An accepted final payload may still
-drain during cleanup; neither those bytes nor pure close-handshake waiting are counted
-again. Upload cleanup has a separate two-second limit, subject to earlier cancellation
-or the whole-test timeout. A normal active-window deadline is not an error. A stalled
-close handshake produces an `upload_failed` diagnostic with
-`upload close handshake timed out after 2s`; other transport errors retain their details.
-Collected direction measurements remain available even when cleanup fails, so a
-bandwidth `success` means both rates are available, not that transport shutdown was clean.
+the peer closes or a transport error occurs. Its rate uses the latest valid server
+`TCPInfo.BytesReceived` and `TCPInfo.ElapsedTime` pair. Both values must be positive;
+subsequent reports must advance time without decreasing bytes. Missing, malformed,
+duplicate, or regressing reports do not replace the retained measurement. Reports
+identifying a client origin or a download test are not upload measurements.
+
+Upload cleanup has a separate two-second limit, subject to earlier cancellation or
+the whole-test timeout. Valid reports received during cleanup can update the result;
+local waiting time is never added to the server's measurement window. A normal send
+deadline is not an error. A stalled close handshake produces an `upload_failed`
+diagnostic with `upload close handshake timed out after 2s`; other transport errors
+retain their details. A bandwidth `success` means both rates are available, not that
+transport shutdown was clean. Without a valid server upload report, upload fields
+remain empty; a completed download yields `partial`, with an upload failure diagnostic.
 
 If the whole-test deadline or shutdown interrupts an attempt, its bandwidth row keeps
-`timeout` or `cancelled` as the outcome and retains all completed direction measurements.
-For example, a completed download remains available when upload setup or transfer is
-interrupted. Upload bytes, rate, and measurement duration are retained once its active
-window ends, even if cleanup is interrupted. An unfinished direction is left empty,
+`timeout` or `cancelled` as the outcome. Completed downloads and valid server upload
+measurements remain available, including upload reports received before interruption
+during transfer or cleanup. A direction without a retained measurement is left empty,
 not reported as zero throughput. Earlier request diagnostics are preserved, and the
 terminal `request_failure` identifies the interrupted stage.
 
 Use field availability alongside `outcome` when analyzing these rows; filtering only
 for `success` discards usable measurements from interrupted attempts. Retained rates
-keep their normal observation points and exclude cleanup time. Interruption does not
+keep their normal observation points and measurement windows. Interruption does not
 refund a reserved start.
 
 ## Server and connection identity

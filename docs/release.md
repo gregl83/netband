@@ -2,7 +2,7 @@
 
 This guide describes the repository's release checks, artifacts, and publication
 workflow. For installation and service operation, see [Service operation](service.md).
-For recorded measurement evidence, see [NDT7 validation](ndt7-validation.md).
+For measurement definitions and comparison methods, see [NDT7 validation](ndt7-validation.md).
 
 ## Source validation
 
@@ -56,6 +56,13 @@ record the board model, OS/kernel, architecture, and command results from the bo
 Live NDT7 comparisons are separate from local smoke tests. Follow the
 [comparison procedure](ndt7-validation.md#reproduce-the-comparison) with an authorized
 endpoint and retain the measured executable's identity with the results.
+
+Publish retained comparisons under `docs/benchmarks/<UTC-date>-<label>/` with
+sanitized `measurements.csv`, build and environment `metadata.json`, and generated
+`summary.json`, `summary.md`, and `paired-analysis.json`. Identify the exact tested
+version, source revisions, and binary hashes. Link findings from the validation guide
+only when they describe the release being documented. Keep raw journals and binaries
+private in `.netband/benchmarks/`; review addresses and diagnostics before publishing.
 
 ## Publication workflow
 
