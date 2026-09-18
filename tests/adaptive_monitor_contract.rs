@@ -176,6 +176,7 @@ fn resolved(root: PathBuf, address: std::net::SocketAddr) -> netband::config::Re
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root.clone(),
+            data_dir: root.join("data"),
             state_dir: root.join("state"),
         },
     )

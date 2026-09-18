@@ -4,6 +4,13 @@ The example service runs Netband in the foreground under systemd as a non-root d
 user. systemd owns `/var/lib/netband`, stdout is disabled, and operational stderr goes
 to journald. Measurements remain exclusively in the configured CSV segments.
 
+The service explicitly loads `/etc/netband/netband.toml`, stores scheduler accounting
+at `/var/lib/netband/scheduler.json`, and saves CSVs in
+`/var/lib/netband/journals/run/`. Its storage is separate from interactive users'
+XDG data and state directories; bandwidth accounting is not shared between them.
+The unit's `StateDirectory` directive provisions this service-owned persistent storage,
+including results. It does not use the interactive user's `$XDG_STATE_HOME`.
+
 For interactive use, start with [quick tests](usage.md).
 
 [Install](#install) · [Find measurements](#measurements-and-logs) ·
@@ -64,7 +71,7 @@ sudo systemctl stop netband.service
 sudo systemctl restart netband.service
 ```
 
-The unit uses `DynamicUser=yes`, `StateDirectory=netband netband/measurements`, and only
+The unit uses `DynamicUser=yes`, `StateDirectory=netband netband/journals/run`, and only
 `CAP_NET_RAW` in its ambient/bounding capability set. `ProtectSystem=strict` makes the state directory the
 persistent writable location. Keep `TimeoutStopSec` longer than Netband's configured
 `shutdown_grace` (30 seconds by default).
@@ -77,10 +84,10 @@ scheduler decisions, and shutdown diagnostics remain available there.
 ## Measurements and logs
 
 The packaged configuration writes rotating CSVs under
-`/var/lib/netband/measurements/`. It rotates daily at UTC midnight or before a batch
+`/var/lib/netband/journals/run/`. It rotates daily at UTC midnight or before a batch
 would exceed 64 MiB (`rotate_max_bytes = 67108864`), whichever comes first. Complete
 batches stay together, so the size threshold is soft. systemd provisions both the
-state root and measurements subdirectory with mode 0700.
+service storage root and journal directory with mode 0700.
 
 Change `output_dir` and `rotate_max_bytes` in `/etc/netband/netband.toml` to choose the
 location and size threshold. Remove `rotate_max_bytes` for daily-only rotation. To use
@@ -91,7 +98,7 @@ With `DynamicUser=yes`, systemd protects the state tree under `/var/lib/private`
 exposes it through `/var/lib/netband`. Use `sudo` to inspect it:
 
 ```sh
-sudo ls -lah /var/lib/netband/measurements/
+sudo ls -lah /var/lib/netband/journals/run/
 sudo journalctl -u netband.service -f
 sudo journalctl -u netband.service -n 100 --no-pager
 sudo journalctl -u netband.service -b
@@ -213,7 +220,7 @@ provider cooldown, or five-attempt expiry. Direct endpoints never fall back to M
 
 **No measurements in journald**
 
-This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/measurements/`
+This is expected. The unit sends stdout to null. Inspect `/var/lib/netband/journals/run/`
 with a CSV reader; journald contains operational diagnostics only.
 
 ## State recovery

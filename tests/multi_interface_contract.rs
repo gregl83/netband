@@ -179,6 +179,7 @@ fn resolved(root: PathBuf) -> netband::config::ResolvedConfig {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root.clone(),
+            data_dir: root.join("data"),
             state_dir: root.join("state"),
         },
     )
@@ -459,6 +460,7 @@ mod loaded_tests {
             &ResolveContext {
                 stdout_is_terminal: false,
                 current_dir: root.clone(),
+                data_dir: root.join("data"),
                 state_dir: root.join("state"),
             },
         )

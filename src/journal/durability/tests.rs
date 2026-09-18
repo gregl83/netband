@@ -79,7 +79,7 @@ fn fixed_csv_syncs_its_entry_after_data_and_not_on_each_batch() {
 #[test]
 fn one_shot_syncs_new_csv_entry_after_data_and_keeps_prior_results() {
     let root = tempdir().unwrap();
-    let directory = root.path().join("state/journals/once");
+    let directory = root.path().join("data/journals/once");
     let target = OutputTarget::AutomaticFile(directory.clone());
     let mut paths = Vec::new();
     for _ in 0..2 {
@@ -134,9 +134,9 @@ fn directory_sync_failure_rejects_fixed_output_and_retry_preserves_rows() {
 #[test]
 fn automatic_directory_sync_failures_block_creation_and_retry_syncs_existing_ancestors() {
     for rotating in [false, true] {
-        for failed_component in ["", "state", "state/journals", "state/journals/output"] {
+        for failed_component in ["", "data", "data/journals", "data/journals/output"] {
             let root = tempdir().unwrap();
-            let directory = root.path().join("state/journals/output");
+            let directory = root.path().join("data/journals/output");
             let target = if rotating {
                 OutputTarget::AutomaticDirectory(directory.clone())
             } else {

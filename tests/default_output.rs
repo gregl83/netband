@@ -11,6 +11,7 @@ fn default_storage_is_lazy_unique_and_keeps_directory_ownership() {
     let root = tempdir().unwrap();
     let context = ResolveContext {
         current_dir: root.path().to_owned(),
+        data_dir: root.path().join("data"),
         state_dir: root.path().join("state"),
         stdout_is_terminal: false,
     };
@@ -24,19 +25,20 @@ fn default_storage_is_lazy_unique_and_keeps_directory_ownership() {
     let ping = config(&["netband", "once", "ping"]);
     let bandwidth = config(&["netband", "--accept-mlab-policy", "once", "bandwidth"]);
     let check = config(&["netband", "config", "check"]);
-    assert!(check.summary().contains("state/journals/run"));
-    assert!(ping.summary().contains("state/journals/once"));
+    assert!(check.summary().contains("data/journals/run"));
+    assert!(ping.summary().contains("data/journals/once"));
     assert!(
         !context.state_dir.exists(),
         "validation must not create files"
     );
 
+    assert!(!context.data_dir.exists());
     let now = chrono::Utc::now();
     let monitor = Journal::open_at(&run.output, None, now).unwrap();
     assert!(
         monitor
             .path()
-            .starts_with(context.state_dir.join("journals/run"))
+            .starts_with(context.data_dir.join("journals/run"))
     );
     assert!(Journal::open_at(&run.output, None, now).is_err());
     let first = Journal::open_at(&ping.output, None, now).unwrap();
@@ -45,7 +47,7 @@ fn default_storage_is_lazy_unique_and_keeps_directory_ownership() {
     assert!(
         first
             .path()
-            .starts_with(context.state_dir.join("journals/once"))
+            .starts_with(context.data_dir.join("journals/once"))
     );
     assert!(
         JournalWriter::open_at(
@@ -60,11 +62,12 @@ fn default_storage_is_lazy_unique_and_keeps_directory_ownership() {
     let third = Journal::open_at(&ping.output, None, now).unwrap();
     assert_ne!(third.path(), first_path);
     assert_eq!(std::fs::read(first_path).unwrap(), contents);
-    for entry in std::fs::read_dir(context.state_dir.join("journals/once")).unwrap() {
+    for entry in std::fs::read_dir(context.data_dir.join("journals/once")).unwrap() {
         assert_eq!(entry.unwrap().path().extension().unwrap(), "csv");
     }
     drop(monitor);
     Journal::open_at(&run.output, None, now)
         .expect("directory ownership must be released after drop");
+    assert!(!context.state_dir.exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
 }

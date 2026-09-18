@@ -389,6 +389,7 @@ fn rotation_and_restart_preserve_scheduler_admission_evidence() {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: dir.path().to_owned(),
+            data_dir: dir.path().to_owned().join("data"),
             state_dir: dir.path().to_owned(),
         },
     )

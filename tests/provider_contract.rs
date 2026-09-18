@@ -18,6 +18,7 @@ fn context(root: PathBuf) -> ResolveContext {
     ResolveContext {
         stdout_is_terminal: false,
         current_dir: root.clone(),
+        data_dir: root.join("data"),
         state_dir: root.join("state"),
     }
 }

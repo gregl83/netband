@@ -74,7 +74,7 @@ Illustrative terminal results (one ping target shown):
 ```
 
 Both commands exit when finished and save a unique CSV under
-`~/.local/state/netband/journals/once/` (or `$XDG_STATE_HOME/netband/journals/once/`).
+`~/.local/share/netband/journals/once/` (or `$XDG_DATA_HOME/netband/journals/once/`).
 The full results path is printed to stderr at startup. Use `--output netband.csv`
 to save in your current directory instead.
 
@@ -92,7 +92,7 @@ After accepting the provider policies, enable scheduled and health-triggered ban
 netband --accept-mlab-policy run
 ```
 
-Results rotate daily under the same state directory in `journals/run/`. Netband
+Results rotate daily under the same data directory in `journals/run/`. Netband
 prints the output directory and each new CSV path to stderr. Stop with `Ctrl-C`;
 completed measurements are flushed before exit.
 For unattended monitoring, see [systemd setup](docs/service.md).

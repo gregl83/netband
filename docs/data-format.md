@@ -539,7 +539,7 @@ lock is advisory: readers can inspect the CSV, and unrelated writers can ignore 
 
 Without an explicit output destination, `once` creates a CSV named
 `netband-YYYYMMDDTHHMMSS.sssZ-<uuid>.csv` under `journals/once/` in the
-[platform state directory](configuration.md#scheduler-state). Creation is exclusive;
+[user data directory](configuration.md#default-result-storage). Creation is exclusive;
 concurrent or repeated invocations never append to or overwrite another result.
 These files do not rotate or need a directory lock or active marker. The CSV itself
 is locked for the invocation and completed batches are flushed and synced.
