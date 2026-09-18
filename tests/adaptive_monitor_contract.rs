@@ -132,6 +132,12 @@ async fn ndt_server(
         }
     }
     assert!(bytes >= 16 * 1024);
+    upload
+        .send(Message::Text(
+            format!(r#"{{"TCPInfo":{{"BytesReceived":{bytes},"ElapsedTime":80000}}}}"#).into(),
+        ))
+        .await
+        .unwrap();
     upload.close(None).await.unwrap();
     while let Some(message) = upload.next().await {
         if matches!(message.unwrap(), Message::Close(_)) {

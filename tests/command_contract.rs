@@ -230,6 +230,12 @@ async fn successful_command_writes_one_terminal_result_and_returns_zero() {
                     socket.next().await.unwrap().unwrap(),
                     Message::Binary(_)
                 ));
+                socket
+                    .send(Message::Text(
+                        r#"{"TCPInfo":{"BytesReceived":8192,"ElapsedTime":1000}}"#.into(),
+                    ))
+                    .await
+                    .unwrap();
             }
             socket.close(None).await.unwrap();
         }

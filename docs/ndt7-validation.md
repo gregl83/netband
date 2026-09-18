@@ -15,22 +15,26 @@ control responses remain active throughout the test.
 Download throughput uses client-received binary application bytes and elapsed time.
 Go's download summary uses its last periodic client snapshot and includes text
 measurement bytes. These are both client-side observations, with different sampling
-boundaries. Netband's upload throughput uses application payload bytes accepted by
-the local WebSocket sink during the active upload window, including any buffered
-tail. Go summarizes upload from server-side TCP measurements. Neither WebSocket nor
-TLS overhead is counted in Netband's application-byte rates.
+boundaries. Netband and the benchmarked Go client calculate upload throughput from
+server `TCPInfo.BytesReceived` and `TCPInfo.ElapsedTime` in the same report. These
+TCP payload bytes include TLS/WebSocket overhead; download application bytes do not.
+Netband retains the latest valid upload report with increasing elapsed time and
+nondecreasing byte counts. Missing, malformed, or regressing reports never substitute
+local send counts for server receipt.
 
 Upload accepts payloads for ten seconds after the handshake, or until the peer closes
 or a transport error occurs. Adaptive outbound payload sizing starts at 8 KiB and
 caps at 1 MiB; the inbound limit is 16 MiB. The close handshake has a
 separate two-second allowance, subject to earlier cancellation or the whole-test
-timeout. Cleanup adds neither measurement bytes nor measurement time. Incoming
-control messages remain responsive while writes are blocked.
+timeout. Reports received during cleanup can update the upload result using the
+server's own byte/time pair; local cleanup waiting is never added to its denominator.
+Incoming control messages remain responsive while writes are blocked.
 
 A terminal bandwidth `success` means both rates are available, not that shutdown was
 clean. Unexpected transport errors and cleanup timeouts remain diagnostics. Whole-test
-timeout or cancellation retains completed direction measurements while preserving the
-terminal outcome; unfinished direction counters remain unavailable. See
+timeout or cancellation retains completed downloads and any valid upload report while
+preserving the terminal outcome. Without a valid server upload report, upload fields
+remain empty and a completed download produces a partial result. See
 [Data format](data-format.md#outcomes).
 
 ## Protocol behavior and automated coverage
@@ -62,31 +66,34 @@ client host used 5 GHz Wi-Fi; no builds or test suites ran during measurement.
 
 | Client | Complete runs | Download median | Download CV | Upload median | Upload CV |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Netband | 20/20 | 209.76 Mb/s | 16.18% | 114.50 Mb/s | 5.40% |
-| Go reference | 20/20 | 208.42 Mb/s | 12.09% | 110.20 Mb/s | 9.14% |
+| Netband | 20/20 | 247.05 Mb/s | 17.57% | 114.28 Mb/s | 8.02% |
+| Go reference | 20/20 | 240.77 Mb/s | 18.88% | 109.31 Mb/s | 6.31% |
 
-All forty runs returned both rates, with no recorded diagnostics. Download
-variability was greater for Netband; upload variability was greater for the reference.
-The lowest upload samples were 97.31 Mb/s for Netband and 74.00 Mb/s for the reference.
+All forty runs returned both rates, with no recorded diagnostics. Upload variability
+was greater for Netband; download variability was greater for the reference. The
+lowest upload samples were 81.15 Mb/s for Netband and 92.48 Mb/s for the reference.
 All samples are included in the summaries; these observations do not establish the
 cause of individual rate changes.
 
 | Direction | Median paired difference | Exploratory 95% interval |
 | --- | ---: | ---: |
-| Download | -0.36% | -6.99% to +3.68% |
-| Upload | +2.81% | +1.34% to +7.23% |
+| Download | +8.70% | -4.50% to +11.59% |
+| Upload | -0.26% | -1.32% to +4.06% |
 
-The paired download difference differs from the comparison of client medians because
-it compares adjacent measurements. The download interval includes zero. Upload rates
-were higher for Netband in the paired analysis, but the clients' upload observation
-points differ. This single-host comparison does not establish a speed advantage,
-measurement accuracy, or general equivalence.
+Paired differences compare adjacent measurements and differ from comparisons of
+client medians. Both intervals include zero. Both clients use server-received TCP
+bytes for upload, but their reporting windows and network conditions can differ.
+This single-host comparison does not establish a speed advantage, measurement
+accuracy, or general equivalence.
 
 Inspect the [measurements](benchmarks/2026-09-18-v1-akamai/measurements.csv),
 [full summary](benchmarks/2026-09-18-v1-akamai/summary.md),
 [machine-readable summary](benchmarks/2026-09-18-v1-akamai/summary.json),
 [paired and run-order analysis](benchmarks/2026-09-18-v1-akamai/paired-analysis.json), and
 [versions, revisions, binary hashes, and environment](benchmarks/2026-09-18-v1-akamai/metadata.json).
+The recorded build is the base revision plus the
+[exact source patch](benchmarks/2026-09-18-v1-akamai/netband-source.patch); both the patch
+and executable have SHA-256 hashes in the metadata.
 Router/AP model, firmware, test location, and server version were not recorded.
 Raw journals and exact executables are retained privately; published data excludes
 client addresses and raw paths.
@@ -148,8 +155,7 @@ python3 scripts/analyze-ndt7-benchmark.py /path/to/measurements.csv
 Compare completion and diagnostic counts, rate distributions, paired differences,
 and run order. Paired differences are `(Netband / reference - 1) × 100`: a positive
 value means Netband reported a higher rate. It does not establish greater accuracy
-or higher server-received throughput, particularly for upload, where the clients
-use different observation points.
+or consistently higher throughput across other hosts and network conditions.
 
 The summary's p10–p90 range contains the central 80% of observed rates; it is not a
 confidence interval. CV is sample standard deviation divided by the mean. Paired

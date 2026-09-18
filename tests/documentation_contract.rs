@@ -86,6 +86,18 @@ fn published_ndt7_benchmark_is_complete_and_sanitized() {
             .unwrap();
     assert_eq!(metadata["netband_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(metadata["pair_count"], 20);
+    if metadata["compiled_source_matches_revision"] == false {
+        use sha2::{Digest, Sha256};
+
+        let patch = fs::read(directory.join(metadata["source_patch"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            Sha256::digest(patch)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            metadata["source_patch_sha256"].as_str().unwrap()
+        );
+    }
     for client in ["netband", "ndt7-client"] {
         let hash = metadata["binaries"][client].as_str().unwrap();
         assert_eq!(hash.len(), 64);
