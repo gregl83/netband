@@ -30,6 +30,7 @@ fn error(message: impl Into<String>) -> ConfigError {
 pub struct ResolveContext {
     pub stdout_is_terminal: bool,
     pub current_dir: PathBuf,
+    pub data_dir: PathBuf,
     pub state_dir: PathBuf,
 }
 
@@ -809,7 +810,7 @@ fn resolve_output(
             current_dir,
         )));
     }
-    let journals = make_absolute(context.state_dir.join("journals"), current_dir);
+    let journals = make_absolute(context.data_dir.join("journals"), current_dir);
     Ok(match command {
         CommandKind::OncePing | CommandKind::OnceBandwidth => {
             OutputTarget::AutomaticFile(journals.join("once"))
@@ -894,7 +895,7 @@ pub fn validate_environment(config: &ResolvedConfig) -> Result<(), ConfigError> 
 
     let mut directory = config.output.directory();
     if config.output.is_automatic() {
-        // Validate the nearest existing ancestor without creating application state.
+        // Validate the nearest existing ancestor without creating application storage.
         while !directory
             .try_exists()
             .map_err(|source| error(source.to_string()))?

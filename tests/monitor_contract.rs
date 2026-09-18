@@ -378,6 +378,7 @@ async fn rotating_monitor_drains_inflight_round_and_reports_final_segment() {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root.path().to_owned(),
+            data_dir: root.path().join("data"),
             state_dir: root.path().join("state"),
         },
     )
@@ -450,6 +451,7 @@ async fn rotation_failure_stops_monitor_and_preserves_original_error() {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root.path().to_owned(),
+            data_dir: root.path().join("data"),
             state_dir: root.path().join("state"),
         },
     )

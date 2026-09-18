@@ -27,7 +27,7 @@ fn assert_smoke_waits_for_new_segments(already_running: bool) {
     let start = script.find("wait_ready() {").unwrap();
     let end = script[start..].find("\npython3 - ").unwrap() + start;
     let lifecycle =
-        script[start..end].replace("/var/lib/netband/measurements", "$TEST_MEASUREMENTS");
+        script[start..end].replace("/var/lib/netband/journals/run", "$TEST_MEASUREMENTS");
     let harness = r#"
 set -euo pipefail
 running=$TEST_SERVICE_RUNNING

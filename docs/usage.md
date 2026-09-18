@@ -57,11 +57,14 @@ Netband prints the absolute CSV path to stderr when it opens the file.
 
 | Command | Default directory | Behavior |
 | --- | --- | --- |
-| `once` | `~/.local/state/netband/journals/once/` | A new timestamped CSV for each invocation |
-| `run` | `~/.local/state/netband/journals/run/` | A new segment at startup, then daily rotation |
+| `once` | `~/.local/share/netband/journals/once/` | A new timestamped CSV for each invocation |
+| `run` | `~/.local/share/netband/journals/run/` | A new segment at startup, then daily rotation |
 
-`$XDG_STATE_HOME` overrides `~/.local/state`. Default directories are created as
+`$XDG_DATA_HOME` overrides `~/.local/share`. Default directories are created as
 needed. Earlier results are preserved; files are not automatically deleted.
+Scheduler accounting lives separately in `~/.local/state/netband/` (or
+`$XDG_STATE_HOME/netband/`); changing `--state-file` does not move CSV results.
+The system service uses its own [results directory](service.md#measurements-and-logs).
 To save in your current directory instead:
 
 ```sh

@@ -6,7 +6,9 @@ reference for customizing targets, interfaces, providers, and output.
 [Options](#cli-options-and-defaults) · [Result storage](#default-result-storage) ·
 [Scheduler state](#scheduler-state) · [M-Lab](#m-lab-provider) · [Direct servers](#direct-provider)
 
-Netband reads one optional TOML file, then applies CLI overrides. Scalar CLI values
+Netband reads only the TOML file selected with `--config`, then applies CLI overrides.
+It does not automatically load files from `~/.config/netband/` or `/etc/netband/`.
+The packaged systemd service explicitly selects `/etc/netband/netband.toml`. Scalar CLI values
 replace TOML values. Repeated `--interface` and `--ping-target` values replace, rather
 than extend, their TOML lists. Relative paths are resolved from the current directory.
 Unknown TOML keys, zero durations, duplicate interfaces/targets, and conflicting output
@@ -33,6 +35,26 @@ auto-deleted. Use one rotating output directory per running process. Explicit
 directories must already exist; default storage is created automatically.
 See [CSV rotation and recovery](data-format.md#rotating-directory-output).
 
+## Default result storage
+
+Without `output` or `output_dir`, journals live under the per-user data directory:
+`journals/once/` for unique one-shot CSVs and `journals/run/` for rotating continuous
+output. `--state-file` changes scheduler storage only, not journal paths.
+On Linux the data directory is `$XDG_DATA_HOME/netband/`, defaulting to
+`~/.local/share/netband/`. Scheduler accounting is stored separately under
+`$XDG_STATE_HOME/netband/`, defaulting to `~/.local/state/netband/`.
+Changing either XDG variable does not relocate the other category. If no platform
+home directory is available, output falls back to `.netband/data/journals/` under
+the current directory.
+
+Default journal directories are created when measurements start; `config check`
+validates the nearest existing ancestor and reports the `run` destination without
+creating anything. Explicit output directories must already exist.
+
+One-shot defaults do not rotate. To use `--rotate-max-bytes` with `once`, explicitly
+select `--output-dir`. CLI output settings override TOML as before. Each opened CSV
+path is printed to stderr regardless of console mode or log verbosity.
+
 ## CLI options and defaults
 
 Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
@@ -45,7 +67,7 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 | `--console auto\|human\|jsonl\|off` | `console` | `auto` for `run`/`config check`; `human` for `once`; `auto` is human on a TTY and off otherwise |
 | `--verbosity error\|warn\|info\|debug\|trace` | `verbosity` | `info` |
 | `--output FILE` | `output` | Unset; when selected, append to a single CSV without rotation |
-| `--output-dir DIR` | `output_dir` | Explicit rotating directory; defaults use application state storage (see below) |
+| `--output-dir DIR` | `output_dir` | Explicit rotating directory; defaults use application data storage (see below) |
 | `--rotate-max-bytes BYTES` | `rotate_max_bytes` | Unset; optional positive soft size limit for directory output, including the header |
 | `--state-file FILE` | `state_file` | OS-native per-user state directory, file `scheduler.json` |
 | `--shutdown-grace DURATION` | `shutdown_grace` | `30s` |
@@ -96,19 +118,6 @@ Durations accept values such as `250ms`, `5s`, `36m`, and `2h`.
 
 `run`, `once ping`, `once bandwidth`, and `config check` are subcommands, not TOML
 values. CLI help is authoritative for spelling: `netband --help`.
-
-## Default result storage
-
-Without `output` or `output_dir`, journals live under the platform state directory
-listed below: `journals/once/` for unique one-shot CSVs and `journals/run/` for rotating
-continuous output. `--state-file` changes scheduler storage only, not journal paths.
-Default journal directories are created when measurements start; `config check`
-validates the nearest existing ancestor and reports the `run` destination without
-creating anything. Explicit output directories must already exist.
-
-One-shot defaults do not rotate. To use `--rotate-max-bytes` with `once`, explicitly
-select `--output-dir`. CLI output settings override TOML as before. Each opened CSV
-path is printed to stderr regardless of console mode or log verbosity.
 
 ## Scheduler state
 

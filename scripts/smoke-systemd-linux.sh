@@ -40,9 +40,9 @@ systemctl daemon-reload
 wait_ready() {
   local previous_segment="${1:-}" segment
   for _ in $(seq 1 100); do
-    if systemctl is-active --quiet netband.service && [[ -s /var/lib/netband/measurements/.netband-active ]]; then
-      read -r segment </var/lib/netband/measurements/.netband-active
-      if [[ "$segment" != "$previous_segment" && -s "/var/lib/netband/measurements/$segment" ]]; then
+    if systemctl is-active --quiet netband.service && [[ -s /var/lib/netband/journals/run/.netband-active ]]; then
+      read -r segment </var/lib/netband/journals/run/.netband-active
+      if [[ "$segment" != "$previous_segment" && -s "/var/lib/netband/journals/run/$segment" ]]; then
         return 0
       fi
     fi
@@ -53,22 +53,22 @@ wait_ready() {
 }
 
 systemctl stop netband.service
-previous_segment="$(cat /var/lib/netband/measurements/.netband-active 2>/dev/null || true)"
+previous_segment="$(cat /var/lib/netband/journals/run/.netband-active 2>/dev/null || true)"
 systemctl start netband.service
 wait_ready "$previous_segment"
-first_segment="$(cat /var/lib/netband/measurements/.netband-active)"
+first_segment="$(cat /var/lib/netband/journals/run/.netband-active)"
 systemctl stop netband.service
 systemctl is-active --quiet netband.service && exit 1 || true
 systemctl start netband.service
 wait_ready "$first_segment"
-second_segment="$(cat /var/lib/netband/measurements/.netband-active)"
+second_segment="$(cat /var/lib/netband/journals/run/.netband-active)"
 [[ "$first_segment" != "$second_segment" ]]
 before_restart="$(systemctl show netband.service -p MainPID --value)"
 systemctl restart netband.service
 wait_ready "$second_segment"
 after_restart="$(systemctl show netband.service -p MainPID --value)"
 [[ "$before_restart" != "$after_restart" ]]
-third_segment="$(cat /var/lib/netband/measurements/.netband-active)"
+third_segment="$(cat /var/lib/netband/journals/run/.netband-active)"
 [[ "$second_segment" != "$third_segment" ]]
 systemctl stop netband.service
 
@@ -77,7 +77,7 @@ import csv
 import pathlib
 import sys
 
-root = pathlib.Path("/var/lib/netband/measurements")
+root = pathlib.Path("/var/lib/netband/journals/run")
 identifiers = set()
 for name in sys.argv[1:]:
     with (root / name).open(newline="", encoding="utf-8") as stream:

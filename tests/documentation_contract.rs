@@ -32,6 +32,7 @@ fn load_config(path: &Path) -> ResolvedConfig {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root(),
+            data_dir: root().join(".netband/data"),
             state_dir: root().join(".netband/state"),
         },
     )
@@ -50,13 +51,13 @@ fn checked_in_configs_use_the_real_loader_and_safe_provider_identities() {
     assert_eq!(service.shutdown_grace, Duration::from_secs(30));
     assert_eq!(
         service.output,
-        netband::config::OutputTarget::Directory(PathBuf::from("/var/lib/netband/measurements"))
+        netband::config::OutputTarget::Directory(PathBuf::from("/var/lib/netband/journals/run"))
     );
     assert_eq!(service.rotate_max_bytes, Some(67_108_864));
     assert!(
         fs::read_to_string(root().join("packaging/netband.service"))
             .unwrap()
-            .contains("StateDirectory=netband netband/measurements")
+            .contains("StateDirectory=netband netband/journals/run")
     );
     assert!(!service.bandwidth.automatic_enabled);
 

@@ -42,9 +42,11 @@ pub async fn run(cli: Cli) -> ExitCode {
         }
     };
     let state_dir = default_state_dir(&current_dir);
+    let data_dir = default_data_dir(&current_dir);
     let context = ResolveContext {
         stdout_is_terminal: std::io::stdout().is_terminal(),
         current_dir,
+        data_dir,
         state_dir,
     };
 
@@ -72,6 +74,12 @@ pub async fn run(cli: Cli) -> ExitCode {
         CommandKind::Run => run_monitor(&config).await,
         CommandKind::OnceBandwidth => run_once_bandwidth(&config).await,
     }
+}
+
+fn default_data_dir(current_dir: &std::path::Path) -> std::path::PathBuf {
+    ProjectDirs::from("dev", "netband", "netband")
+        .map(|dirs| dirs.data_local_dir().to_owned())
+        .unwrap_or_else(|| current_dir.join(".netband").join("data"))
 }
 
 fn default_state_dir(current_dir: &std::path::Path) -> std::path::PathBuf {
@@ -393,6 +401,7 @@ mod orchestration_tests {
             &ResolveContext {
                 stdout_is_terminal: false,
                 current_dir: root.path().to_owned(),
+                data_dir: root.path().join("data"),
                 state_dir: root.path().join("state"),
             },
         )

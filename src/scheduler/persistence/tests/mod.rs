@@ -64,6 +64,7 @@ fn config(root: &TempDir) -> BandwidthConfig {
         &ResolveContext {
             stdout_is_terminal: false,
             current_dir: root.path().to_owned(),
+            data_dir: root.path().to_owned().join("data"),
             state_dir: root.path().to_owned(),
         },
     )
