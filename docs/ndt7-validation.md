@@ -148,6 +148,7 @@ Build Netband and run both clients sequentially against an authorized endpoint:
 cargo build --release --locked
 NDT7_CLIENT_BIN=/path/to/ndt7-client \
 NETBAND_BIN="$PWD/target/release/netband" \
+NETBAND_BENCHMARK_NOTES="router/AP model; wired or Wi-Fi; band; location" \
 ./scripts/benchmark-ndt7-clients.sh \
   ndt.example.com 20 10
 ```
@@ -161,6 +162,21 @@ Raw output and generated summaries default to the Git-ignored `.netband/benchmar
 directory. Raw journals can contain client addresses; publish only whitelisted
 measurement fields. To regenerate the checked-in summary from the sanitized data,
 use the [offline analysis commands](#analyze-recorded-data-offline).
+
+Before measurements begin, the harness saves both executable SHA-256 hashes,
+Netband's version, pair count, cooldown, route, and supplied network notes in
+`metadata.txt`. `netband-config.txt` records resolved shared settings; each raw
+measurement has a `.command` file with its exact shell-quoted invocation, including
+Netband's per-attempt output path and `--force`. Metadata collection failure stops
+preparation; client measurement failures are still recorded for analysis.
+
+Keep the binaries unchanged during a comparison. Supply router/AP model, firmware,
+wired/Wi-Fi connection, band, and location in `NETBAND_BENCHMARK_NOTES`; these are
+operator observations, not automatically detected facts. The route is a startup
+snapshot, not proof of the interface used throughout the run. Default-route journal
+rows leave `interface` empty; use `--interface` for deliberately bound standalone
+tests. Record the source revision alongside the executable hash when available.
+Keep this metadata private until reviewed for publication.
 
 The benchmark harness runs both shared analysis scripts automatically. Each accepts
 a measurements CSV and an optional output directory, defaulting to the CSV's
