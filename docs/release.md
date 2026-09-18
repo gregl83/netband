@@ -6,12 +6,13 @@ For recorded measurement evidence, see [NDT7 validation](ndt7-validation.md).
 
 ## Source validation
 
-Run from the repository root with Rust 1.98 and `cargo-deny` installed:
+Run from the repository root with Rust 1.98, `cargo-deny`, and `cargo-llvm-cov` installed
+(the coverage command also requires the `llvm-tools-preview` Rust component):
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets --all-features --locked
+cargo llvm-cov --workspace --all-targets --all-features --locked --fail-under-lines 80 --summary-only
 cargo deny check
 python3 -m unittest discover -s scripts -p 'test_*.py'
 bash scripts/smoke-installer-linux.sh
@@ -19,6 +20,9 @@ bash scripts/smoke-readme-linux.sh
 bash scripts/smoke-release-linux.sh
 cargo package --locked
 ```
+
+CI and release preparation both require at least **80% overall Rust line coverage**;
+falling below it fails the workflow. This is not a per-file or branch-coverage threshold.
 
 The [CI workflow](../.github/workflows/ci.yml) runs source checks and Linux x86_64
 release smoke tests. A separate job cross-builds aarch64 and runs startup/configuration

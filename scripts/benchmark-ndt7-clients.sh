@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
@@ -11,6 +11,7 @@ Netband. Raw output may contain client addresses; keep OUTPUT_DIR private.
 Environment:
   NDT7_CLIENT_BIN  reference client binary (default: ndt7-client on PATH)
   NETBAND_BIN      Netband binary (default: netband on PATH)
+  NETBAND_BENCHMARK_NOTES  network context: router/AP, wired/Wi-Fi, band, location
 EOF
 }
 
@@ -36,7 +37,7 @@ if [[ ! "$cooldown" =~ ^[0-9]+$ ]]; then
   echo "COOLDOWN_SECONDS must be a non-negative integer" >&2
   exit 2
 fi
-for dependency in "$ndt7_client" "$netband" python3; do
+for dependency in "$ndt7_client" "$netband" python3 sha256sum; do
   if [[ -z "$dependency" ]] || ! command -v "$dependency" >/dev/null 2>&1; then
     echo "missing required command: ${dependency:-unset binary path}" >&2
     exit 2
@@ -47,9 +48,19 @@ if [[ -z "$route_address" ]]; then
   exit 2
 fi
 
+netband="$(command -v "$netband")"
+ndt7_client="$(command -v "$ndt7_client")"
+netband_hash="$(sha256sum <"$netband")"
+reference_hash="$(sha256sum <"$ndt7_client")"
+netband_version="$("$netband" --version)"
+
 mkdir -p "$output_dir/raw"
 measurements="$output_dir/measurements.csv"
 state_file="$output_dir/netband-state.json"
+netband_options=(--ndt-provider direct --ndt-target "$server"
+  --bandwidth-daily-max "$((pairs * 2 + 10))" --bandwidth-min-spacing 70s
+  --state-file "$state_file" --console off)
+"$netband" "${netband_options[@]}" config check >"$output_dir/netband-config.txt"
 printf '%s\n' 'pair,position,client,started_at_utc,finished_at_utc,exit_code,outcome,download_mbps,upload_mbps,diagnostic,raw_file' >"$measurements"
 
 {
@@ -59,7 +70,11 @@ printf '%s\n' 'pair,position,client,started_at_utc,finished_at_utc,exit_code,out
   printf 'kernel=%s\n' "$(uname -srmo)"
   printf 'route=%s\n' "$(ip route get "$route_address" 2>/dev/null | head -n 1 || true)"
   printf 'netband_binary=%s\n' "$netband"
-  printf 'netband_version=%s\n' "$($netband --version)"
+  printf 'netband_version=%s\n' "$netband_version"
+  printf 'netband_sha256=%s\n' "${netband_hash%% *}"
+  printf 'ndt7_client_sha256=%s\n' "${reference_hash%% *}"
+  printf 'pairs=%s\ncooldown_seconds=%s\n' "$pairs" "$cooldown"
+  printf 'network_notes=%q\n' "${NETBAND_BENCHMARK_NOTES:-}"
   printf 'ndt7_client_binary=%s\n' "$ndt7_client"
   if command -v go >/dev/null 2>&1; then
     go version -m "$ndt7_client" 2>/dev/null || true
@@ -80,8 +95,11 @@ run_reference() {
   local pair="$1" position="$2" base started finished status parsed outcome download upload
   base="$output_dir/raw/pair-$(printf '%02d' "$pair")-${position}-reference"
   started="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
-  "$ndt7_client" -server "$server" -format json -quiet >"$base.jsonl" 2>"$base.stderr"
-  status=$?
+  local command=("$ndt7_client" -server "$server" -format json -quiet)
+  printf '%q ' "${command[@]}" >"$base.command"
+  printf '\n' >>"$base.command"
+  status=0
+  "${command[@]}" >"$base.jsonl" 2>"$base.stderr" || status=$?
   finished="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
   parsed="$(python3 - "$base.jsonl" <<'PY'
 import json
@@ -115,17 +133,11 @@ run_netband() {
   local pair="$1" position="$2" base started finished status parsed outcome download upload diagnostic
   base="$output_dir/raw/pair-$(printf '%02d' "$pair")-${position}-netband"
   started="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
-  "$netband" \
-    --ndt-provider direct \
-    --ndt-target "$server" \
-    --bandwidth-daily-max "$((pairs * 2 + 10))" \
-    --bandwidth-min-spacing 70s \
-    --force \
-    --output "$base.csv" \
-    --state-file "$state_file" \
-    --console off \
-    once bandwidth >"$base.stdout" 2>"$base.stderr"
-  status=$?
+  local command=("$netband" "${netband_options[@]}" --force --output "$base.csv" once bandwidth)
+  printf '%q ' "${command[@]}" >"$base.command"
+  printf '\n' >>"$base.command"
+  status=0
+  "${command[@]}" >"$base.stdout" 2>"$base.stderr" || status=$?
   finished="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
   parsed="$(python3 - "$base.csv" <<'PY'
 import csv

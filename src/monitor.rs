@@ -1203,15 +1203,14 @@ fn finish_monitor<J: JournalSink, C: crate::console::ConsoleSink>(
     result: Result<MonitorStats, MonitorError>,
     coordinator: &mut OutputCoordinator<J, C>,
 ) -> Result<MonitorStats, MonitorError> {
-    let finish = coordinator.finish_session(
-        session,
-        if result.is_ok() {
-            Outcome::Cancelled
-        } else {
-            Outcome::Error
-        },
-        result.as_ref().err().map(ToString::to_string).as_deref(),
-    );
+    let (outcome, message) = match &result {
+        Ok(_) => (
+            Outcome::Cancelled,
+            "shutdown requested; active work drained".to_owned(),
+        ),
+        Err(error) => (Outcome::Error, error.to_string()),
+    };
+    let finish = coordinator.finish_session(session, outcome, Some(&message));
     let stats = result?;
     finish?;
     Ok(stats)

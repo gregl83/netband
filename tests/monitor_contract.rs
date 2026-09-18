@@ -514,6 +514,25 @@ async fn shutdown_drains_mixed_round_without_changing_probe_accounting() {
     assert_eq!((stats.successful_probes, stats.failed_probes), (1, 1));
     assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
     let events = recorded.events.lock().unwrap();
+    let finishes: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_kind == netband::model::EventKind::RunFinished)
+        .collect();
+    let session = finishes
+        .iter()
+        .find(|e| e.run_kind == netband::model::RunKind::Session)
+        .unwrap();
+    assert_eq!(session.outcome, netband::model::Outcome::Cancelled);
+    assert_eq!(
+        session.message.as_deref(),
+        Some("shutdown requested; active work drained")
+    );
+    let child = finishes
+        .iter()
+        .find(|e| e.run_kind == netband::model::RunKind::PingRound)
+        .unwrap();
+    assert_eq!(child.outcome, netband::model::Outcome::Partial);
+    assert!(child.message.is_none());
     let probes: Vec<_> = events
         .iter()
         .filter(|e| e.event_kind == netband::model::EventKind::PingProbe)

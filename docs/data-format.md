@@ -242,8 +242,8 @@ operation-start order, and gaps may indicate omitted output. Console JSONL can d
 records under backpressure; CSV remains authoritative.
 
 A run finish records success, partial results, failure or cancellation. A monitor
-session ends with `cancelled` on orderly shutdown; drained ping rounds retain their
-measurement outcome. Missing finish records mean completion was not recorded, not
+session ends with `cancelled` and `message="shutdown requested; active work drained"`
+on orderly shutdown; drained ping rounds retain their measurement outcome. Missing finish records mean completion was not recorded, not
 necessarily that the process crashed. No synthetic finish is written on process exit.
 Preflight configuration/storage failures can prevent a session from starting at all.
 
